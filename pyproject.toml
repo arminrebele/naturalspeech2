@@ -1,0 +1,16 @@
+[project]
+name = "audiodeepfakedetection-ddim-inversion"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Armin Rebele", email = "armin.rebele@uni-a.de"},
+    {name = "Lion Pöllath", email = "lion.poellath@uni-a.de"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
