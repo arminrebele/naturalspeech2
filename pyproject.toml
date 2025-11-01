@@ -3,8 +3,8 @@ name = "audiodeepfakedetection-ddim-inversion"
 version = "0.1.0"
 description = ""
 authors = [
-    {name = "Armin Rebele", email = "armin.rebele@uni-a.de"},
-    {name = "Lion Pöllath", email = "lion.poellath@uni-a.de"}
+  { name = "Armin Rebele", email = "164416228+arminrebele@users.noreply.github.com" },
+  { name = "Lion Pöllath" }
 ]
 readme = "README.md"
 requires-python = ">=3.12"
