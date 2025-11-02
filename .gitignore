@@ -3,3 +3,6 @@
 data/
 notebooks/
 models/
+
+__pycache__/
+*.py[cod]
