@@ -3,9 +3,7 @@ from datasets import load_dataset, load_from_disk, Audio
 
 from audiodeepfakedetection_ddim_inversion.paths import VCTK_DIR, VCTK_PROCESSED_DIR
 
-
 class VCTKDataset(Dataset):
-
     def __init__(self, sampling_rate=24000):
         self.sampling_rate = sampling_rate
         self.dataset = self._process_dataset()
