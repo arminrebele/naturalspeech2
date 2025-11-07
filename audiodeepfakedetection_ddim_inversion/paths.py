@@ -9,3 +9,6 @@ VCTK_PROCESSED_DIR = DATA_DIR / "vctk_processed"
 
 MODELS_DIR = PROJECT_ROOT / "models"
 ENCODEC_24KHZ_DIR = MODELS_DIR / "encodec_24khz"
+
+CONFIG_DIR = PROJECT_ROOT / "configs"
+PHONEME_VOCAB_PATH = CONFIG_DIR / "phoneme_vocab.json"
