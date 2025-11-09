@@ -58,14 +58,16 @@ def build_token_vocabulary(dataset: Iterable[dict], phonemizer: EspeakPhonemizer
     return token_vocabulary
 
 if __name__ == "__main__":
-    from audiodeepfakedetection_ddim_inversion.data.vctk import VCTKDataset
 
+    # Code to build token vocabulary based on VCTK dataset
+    from audiodeepfakedetection_ddim_inversion.data.vctk import VCTKDataset
     dataset = VCTKDataset()
-    dataset.dataset = dataset.dataset.select(range(100))
+    #dataset.dataset = dataset.dataset.select(range(200))
     phonemizer = EspeakPhonemizer()
     token_vocabulary = build_token_vocabulary(dataset, phonemizer)
     print(len(token_vocabulary))
 
+    # Test code to verify tokenizer
     tokenizer = PhonemeTokenizer(phonemizer)
-    text = "Hello, world!"
+    text = "123 Hello, world! This is a test."
     print(tokenizer(text))
