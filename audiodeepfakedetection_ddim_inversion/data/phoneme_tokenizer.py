@@ -39,7 +39,7 @@ class PhonemeTokenizer:
 
 
 
-def build_token_vocabulary(dataset: Iterable[dict], phonemizer: EspeakPhonemizer, save_path: str = TOKEN_VOCABULARY_PATH) -> dict[str, int]:
+def build_token_vocabulary(dataset: Iterable[dict], phonemizer: EspeakPhonemizer, special_tokens: list[str] = SPECIAL_TOKENS, save_path: str = TOKEN_VOCABULARY_PATH) -> dict[str, int]:
     
     tokens_from_text = set()
 
@@ -48,7 +48,7 @@ def build_token_vocabulary(dataset: Iterable[dict], phonemizer: EspeakPhonemizer
         phonemized_text = phonemizer(text)
         tokens_from_text.update(phonemized_text)
 
-    tokens = SPECIAL_TOKENS + sorted(tokens_from_text)
+    tokens = special_tokens + sorted(tokens_from_text)
 
     token_vocabulary = {token: idx for idx, token in enumerate(tokens)}
 
