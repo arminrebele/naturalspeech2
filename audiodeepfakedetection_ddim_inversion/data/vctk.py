@@ -82,12 +82,12 @@ def vctk_collate_fn(batch, pad_token_id=0):
     raw_audios = [item["audio"] for item in batch]
     
     return {
-        "padded_audio": padded_audio,
-        "padded_token_seq": padded_token_seq,
-        "audio_mask": audio_mask,
-        "token_mask": token_mask,
-        "audio_lengths": audio_lengths,
-        "token_lengths": token_seq_lengths,
+        "padded_audio": padded_audio,               # [B, T_max_audio]
+        "padded_token_seq": padded_token_seq,       # [B, T_max_token_seq]
+        "audio_mask": audio_mask,                   # [B, 1, T_max_audio]    
+        "token_mask": token_mask,                   # [B, 1, T_max_token_seq]
+        "audio_lengths": audio_lengths,             # [B]
+        "token_lengths": token_seq_lengths,         # [B]
         "text": texts,
         "raw_audio": raw_audios,
     }
