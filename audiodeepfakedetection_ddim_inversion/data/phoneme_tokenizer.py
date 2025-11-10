@@ -11,8 +11,8 @@ SPECIAL_TOKENS = ["<pad>", "<unk>", "<bos>", "<eos>"]
 
 
 class PhonemeTokenizer:
-    def __init__(self, phonemizer: EspeakPhonemizer, token_vocabulary_path: str = TOKEN_VOCABULARY_PATH):
-        self.phonemizer = phonemizer
+    def __init__(self, phonemizer: EspeakPhonemizer = None, token_vocabulary_path: str = TOKEN_VOCABULARY_PATH):
+        self.phonemizer = phonemizer or EspeakPhonemizer()
         self.token_vocabulary_path = token_vocabulary_path
         self.token_vocabulary = {} # token to id
         self.id_to_token = {}
