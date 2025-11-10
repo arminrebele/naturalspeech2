@@ -45,14 +45,21 @@ class EncodecWrapper:
             bandwidth=self.bandwidth,
         )
 
-        return output.audio_codes, output.audio_scales
+        return output.audio_codes, output.audio_scales     # output.audio_codes: (C=1, B, Q, T)
          # output.audio_codes => discrete codebook indices (0-1023), Shape: (Channel(Mono), Batch, Quantizer/Codebook, Frames/Time)
 
     @torch.no_grad()
     def get_latents(self, audio):
+        # if batch tensor (B, T)
+        if isinstance(audio, torch.Tensor) and audio.dim() == 2:
+            audio = [a.cpu().numpy() for a in audio]
+        # if single audio (T,)
+        elif isinstance(audio, torch.Tensor):
+            audio = [audio.cpu().numpy()]
+
         audio_codes, _ = self.encode(audio) # (C=1, B, Q, T)
         audio_codes_qbt = audio_codes.squeeze(0).permute(1, 0, 2).contiguous() # (Q, B, T)
-        latents = self.model.quantizer.decode(audio_codes_qbt)
+        latents = self.model.quantizer.decode(audio_codes_qbt)  # (B, D=128, T)
         return latents
 
     @torch.no_grad()
