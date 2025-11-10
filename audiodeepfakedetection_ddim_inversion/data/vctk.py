@@ -1,3 +1,4 @@
+import torch
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 from datasets import load_dataset, load_from_disk, Audio, Sequence, Value
@@ -59,11 +60,40 @@ class VCTKDataset(Dataset):
             "region": item["region"],
         }
 
-def vctk_collate_fn(batch):
-    pass
+def vctk_collate_fn(batch, pad_token_id=0):
+
+    token_seq_tensors = [torch.tensor(item["token_ids"]) for item in batch]   # list of tensor with variable length
+    token_seq_lengths = torch.tensor([len(tensor) for tensor in token_seq_tensors])
+    padded_token_seq = pad_sequence(
+        token_seq_tensors,
+        batch_first=True, 
+        padding_value=pad_token_id
+    )
+    max_token_seq_len = padded_token_seq.shape[1]
+    token_mask = (torch.arange(max_token_seq_len).unsqueeze(0) < token_seq_lengths.unsqueeze(1)).unsqueeze(1)
+
+    audio_tensors = [torch.tensor(item["audio"]) for item in batch]
+    audio_lengths = torch.tensor([len(tensor) for tensor in audio_tensors])
+    padded_audio = pad_sequence(audio_tensors, batch_first=True, padding_value=0.0)
+    max_audio_len = padded_audio.shape[1]
+    audio_mask = (torch.arange(max_audio_len).unsqueeze(0) < audio_lengths.unsqueeze(1)).unsqueeze(1)
+
+    texts = [item["text"] for item in batch]
+    raw_audios = [item["audio"] for item in batch]
+    
+    return {
+        "padded_audio": padded_audio,
+        "padded_token_seq": padded_token_seq,
+        "audio_mask": audio_mask,
+        "token_mask": token_mask,
+        "audio_lengths": audio_lengths,
+        "token_lengths": token_seq_lengths,
+        "text": texts,
+        "raw_audio": raw_audios,
+    }
 
 if __name__ == "__main__":
-    
+
     # test code to verify dataset loading
     dataset = VCTKDataset()
     print(len(dataset))
