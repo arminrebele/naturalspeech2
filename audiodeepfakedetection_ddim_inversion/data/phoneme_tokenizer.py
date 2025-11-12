@@ -28,8 +28,12 @@ class PhonemeTokenizer:
 
         self.id_to_token = {v: k for k, v in self.token_vocabulary.items()}
 
-    def __call__(self, text: str) -> list[int]:
-        tokens =  ["<bos>"] + self.phonemizer(text) + ["<eos>"]
+    def __call__(self, input_data) -> list[int]:
+        if isinstance(input_data, str):
+            phonemes = self.phonemizer(input_data)
+        elif isinstance(input_data, list):
+            phonemes = input_data
+        tokens =  ["<bos>"] + phonemes + ["<eos>"]
         unk_id = self.token_vocabulary.get("<unk>")
         return [self.token_vocabulary.get(token, unk_id) for token in tokens]
 
@@ -39,17 +43,16 @@ class PhonemeTokenizer:
 
 
 
-def build_token_vocabulary(dataset: Iterable[dict], phonemizer: EspeakPhonemizer, special_tokens: list[str] = SPECIAL_TOKENS, save_path: str = TOKEN_VOCABULARY_PATH) -> dict[str, int]:
+def build_token_vocabulary(
+        dataset: Iterable[dict],
+        special_tokens: list[str] = SPECIAL_TOKENS, 
+        save_path: str = TOKEN_VOCABULARY_PATH) -> dict[str, int]:
     
     tokens_from_text = set()
-
     for sample in tqdm(dataset):
-        text = sample["text"]
-        phonemized_text = phonemizer(text)
-        tokens_from_text.update(phonemized_text)
+        tokens_from_text.update(sample["phonemized_text"])
 
     tokens = special_tokens + sorted(tokens_from_text)
-
     token_vocabulary = {token: idx for idx, token in enumerate(tokens)}
 
     with open(save_path, "w", encoding="utf-8") as f:
@@ -63,11 +66,10 @@ if __name__ == "__main__":
     from audiodeepfakedetection_ddim_inversion.data.vctk import VCTKDataset
     dataset = VCTKDataset()
     #dataset.dataset = dataset.dataset.select(range(200))
-    phonemizer = EspeakPhonemizer()
-    token_vocabulary = build_token_vocabulary(dataset, phonemizer)
+    token_vocabulary = build_token_vocabulary(dataset)
     print(len(token_vocabulary))
 
     # Test code to verify tokenizer
-    tokenizer = PhonemeTokenizer(phonemizer)
+    tokenizer = PhonemeTokenizer()
     text = "123 Hello, world! This is a test."
     print(tokenizer(text))
