@@ -31,7 +31,7 @@ class Aligner(nn.Module):
         phoneme_tokens_lengths,   # [B]
     ) -> dict[str, torch.Tensor]:
         
-        attn_soft, attn_logits = self.aligner_net(audio_encodings, phoneme_encodings, phoneme_tokens_mask)  # [B, 1, F, P]
+        alignment_soft, alignment_logits = self.aligner_net(audio_encodings, phoneme_encodings, phoneme_tokens_mask)  # [B, 1, F, P]
 
         with torch.no_grad():
             # combine masks [B,1,F] & [B,1,P] -> [B,F,P]
@@ -39,9 +39,9 @@ class Aligner(nn.Module):
             phoneme_tokens_mask_2d = phoneme_tokens_mask.squeeze(1).bool()   # [B,P]
             attn_mask = frame_mask_2d.unsqueeze(2) & phoneme_tokens_mask_2d.unsqueeze(1)  # [B,F,P]
 
-            attn_soft_2d = attn_soft.squeeze(1)           # [B,F,P]
-            B, F, P = attn_soft_2d.shape
-            attn_logprobs = torch.log(attn_soft_2d + 1e-9) # [B,F,P]
+            alignment_soft_2d = alignment_soft.squeeze(1)           # [B,F,P]
+            B, F, P = alignment_soft_2d.shape
+            alignment_logprobs = torch.log(alignment_soft_2d + 1e-9) # [B,F,P]
             prior_logprobs = compute_beta_binomial_prior(
                 frame_lengths,
                 phoneme_tokens_lengths, 
@@ -50,16 +50,15 @@ class Aligner(nn.Module):
                 w=1.0 
             )
 
-            logprobs_for_viterbi = attn_logprobs + prior_logprobs # [B,F,P]
-
-            alignment_mask = maximum_path(logprobs_for_viterbi, attn_mask, frame_lengths, phoneme_tokens_lengths)  # [B,F,P] | Hard alignment
-            durations = alignment_mask.sum(dim=1).int()   # [B,P]
+            alignment_logprobs_for_viterbi = alignment_logprobs + prior_logprobs # [B,F,P]
+            alignment_hard = maximum_path(alignment_logprobs_for_viterbi, attn_mask, frame_lengths, phoneme_tokens_lengths)  # [B,F,P]
+            durations = alignment_hard.sum(dim=1).int()   # [B,P]
 
             return {
                 "durations": durations, 
-                "alignment_mask": alignment_mask,
-                "attn_soft": attn_soft,
-                "attn_logprobs": attn_logprobs
+                "alignment_hard": alignment_hard,
+                "alignment_soft": alignment_soft,
+                "alignment_logprobs": alignment_logprobs
             }
 
 
@@ -100,17 +99,16 @@ class AlignerNet(nn.Module):
         
 
         # L2 distances between frames and phonemes
-        attn_logits = torch.cdist(audio_features, phoneme_features)  # [B, F, P]
-        attn_logits = rearrange(attn_logits, "b f p -> b 1 f p")
-
-        mask_value = -torch.finfo(attn_logits.dtype).max
+        alignment_logits = torch.cdist(audio_features, phoneme_features)  # [B, F, P]
+        alignment_logits = rearrange(alignment_logits, "b f p -> b 1 f p")
+        alignment_logits = -alignment_logits / self.temperature # [B, 1, F, P]
+        mask_value = -torch.finfo(alignment_logits.dtype).max
         mask = rearrange(phoneme_token_mask.bool(), "b 1 p -> b 1 1 p")
-        attn_logits.masked_fill_(~mask, mask_value)
+        alignment_logits.masked_fill_(~mask, mask_value)
+        
+        alignment_soft = alignment_logits.softmax(dim=-1)
 
-        attn_logits = -attn_logits / self.temperature # [B, 1, F, P]
-        attn_soft = attn_logits.softmax(dim=-1)
-
-        return attn_soft, attn_logits  # [B, 1, F, P]
+        return alignment_soft, alignment_logits  # [B, 1, F, P]
 
 
 
@@ -154,19 +152,19 @@ def maximum_path(
     frame_lengths_idx = frame_lengths.long() - 1
     phoneme_tokens_lengths_idx = phoneme_tokens_lengths.long() - 1
     batch_indices = torch.arange(B, device=device)
-    alignment_mask = torch.zeros_like(path, dtype=torch.bool, device=device) # initialize hard alignment
+    alignment_hard = torch.zeros_like(path, dtype=torch.bool, device=device) # initialize hard alignment
     p = phoneme_tokens_lengths_idx # start from the last phoneme token
 
     for f in reversed(range(F)):
         active = (f <= frame_lengths_idx) # check if within valid frame length
-        alignment_mask[batch_indices, f, p] = alignment_mask[batch_indices, f, p] | active # mark the path position if valid
+        alignment_hard[batch_indices, f, p] = alignment_hard[batch_indices, f, p] | active # mark the path position if valid
         decision = path[batch_indices, f, p]  # get the decision made at (f, p) (0=stay, 1=move)
         p = p - (decision & active).long() # if decision = 1 and active, move to previous phoneme token
         p = torch.clamp(p, min=0) # ensure p does not go negative
     
-    alignment_mask = alignment_mask & attn_mask # final masking to ensure path only in valid positions
+    alignment_hard = alignment_hard & attn_mask # final masking to ensure path only in valid positions
 
-    return alignment_mask.float()
+    return alignment_hard.float()
 
 
 
