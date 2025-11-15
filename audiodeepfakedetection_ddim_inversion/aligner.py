@@ -2,6 +2,8 @@ import torch
 from torch import nn
 from einops import rearrange, repeat
 
+
+
 class Aligner(nn.Module):
     def __init__(
         self,
@@ -19,7 +21,6 @@ class Aligner(nn.Module):
             temperature = temperature,
         )
 
-
     def forward(
         self,
         audio_encodings,          # [B, dim_audio=80, F]
@@ -33,15 +34,15 @@ class Aligner(nn.Module):
         attn_soft, attn_logits = self.aligner_net(audio_encodings, phoneme_encodings, phoneme_tokens_mask)  # [B, 1, F, P]
 
         with torch.no_grad():
-            # Masken kombinieren: [B,1,F] & [B,1,P] -> [B,F,P]
+            # combine masks [B,1,F] & [B,1,P] -> [B,F,P]
             frame_mask_2d = frame_mask.squeeze(1).bool()   # [B,F]
             phoneme_tokens_mask_2d = phoneme_tokens_mask.squeeze(1).bool()   # [B,P]
             attn_mask = frame_mask_2d.unsqueeze(2) & phoneme_tokens_mask_2d.unsqueeze(1)  # [B,F,P]
 
             attn_soft_2d = attn_soft.squeeze(1)           # [B,F,P]
             B, F, P = attn_soft_2d.shape
-            attn_logprob = torch.log(attn_soft_2d + 1e-9) # [B,F,P]
-            prior_logprob = compute_beta_binomial_prior(
+            attn_logprobs = torch.log(attn_soft_2d + 1e-9) # [B,F,P]
+            prior_logprobs = compute_beta_binomial_prior(
                 frame_lengths,
                 phoneme_tokens_lengths, 
                 frames_max=F,
@@ -49,16 +50,16 @@ class Aligner(nn.Module):
                 w=1.0 
             )
 
-            logprob_for_viterbi = attn_logprob + prior_logprob
+            logprobs_for_viterbi = attn_logprobs + prior_logprobs # [B,F,P]
 
-            alignment_mask = maximum_path(logprob_for_viterbi, attn_mask, frame_lengths, phoneme_tokens_lengths)  # [B,F,P] Hard alignment
+            alignment_mask = maximum_path(logprobs_for_viterbi, attn_mask, frame_lengths, phoneme_tokens_lengths)  # [B,F,P] | Hard alignment
             durations = alignment_mask.sum(dim=1).int()   # [B,P]
 
             return {
                 "durations": durations, 
                 "alignment_mask": alignment_mask,
                 "attn_soft": attn_soft,
-                "attn_logprob": attn_logprob
+                "attn_logprobs": attn_logprobs
             }
 
 
@@ -112,97 +113,61 @@ class AlignerNet(nn.Module):
         return attn_soft, attn_logits  # [B, 1, F, P]
 
 
+
 def maximum_path(
-        value: torch.Tensor, 
-        mask: torch.Tensor, 
-        frame_lengths: torch.Tensor, 
-        token_lengths: torch.Tensor) -> torch.Tensor:
+        logprobs: torch.Tensor,      # [B, F, P]
+        attn_mask: torch.Tensor,     # [B, F, P]
+        frame_lengths: torch.Tensor,    # [B]
+        phoneme_tokens_lengths: torch.Tensor  # [B]
+) -> torch.Tensor:
     """
-    Findet den wahrscheinlichsten monotonen Pfad mittels Viterbi-Algorithmus.
-    Implementiert die DP-Logik: dp[i, j] = value[i, j] + max(dp[i-1, j], dp[i-1, j-1])
-    
-    value: [B, F, P] (Log-Wahrscheinlichkeiten)
-    mask:  [B, F, P] (Boolesche Maske für gültige Positionen)
+
     """
-    device = value.device
-    dtype = value.dtype
-    B, T_x, T_y = value.shape  # B=Batch, T_x=Frames (Audio), T_y=Phoneme (Text)
     
-    # 1. DP-Tabelle und Pfad-Tracker initialisieren
-    # dp speichert die kumulative Log-Wahrscheinlichkeit des besten Pfades
-    dp = torch.full((B, T_x, T_y), float("-inf"), device=device, dtype=dtype)
-    
-    # path speichert die "Entscheidung" (0=bleiben, 1=wechseln)
-    path = torch.zeros((B, T_x, T_y), dtype=torch.long, device=device)
+    device = logprobs.device
+    dtype = logprobs.dtype
 
-    # 2. Initialisierung (Frame i=0)
-    # Ein Pfad kann nur bei Frame 0, Phonem 0 beginnen.
-    # Wir nutzen `mask` um sicherzustellen, dass dies eine gültige Position ist.
-    dp[:, 0, 0] = torch.where(mask[:, 0, 0], value[:, 0, 0], float("-inf"))
+    B, F, P = logprobs.shape
 
-    # 3. Dynamic Programming (DP)
-    for i in range(1, T_x):  # Äußere Schleife über die Audio-Frames
-        
-        # Option 1: Beim gleichen Phonem j bleiben
-        # Der Pfad kommt von dp[i-1, j]
-        dp_stay = dp[:, i-1, :]
-        
-        # Option 2: Vom vorherigen Phonem j-1 wechseln
-        # Der Pfad kommt von dp[i-1, j-1]
-        # Wir paddern links mit -inf, da man bei j=0 nicht von j-1 kommen kann
-        dp_move = torch.nn.functional.pad(dp[:, i-1, :], (1, 0), value=float("-inf"))[:, :-1]
-        
-        # Wähle die beste der beiden Optionen
+    ### Initialize dp table and path tracker ###
+
+    # dp saves the cumulative log-probability of the best path to cell (f, p)
+    dp = torch.full((B, F, P), float("-inf"), device=device, dtype=dtype)
+
+    # path saves the decision made (0=stay, 1=move)
+    path = torch.zeros((B, F, P), dtype=torch.long, device=device)
+
+    # initialize
+    dp[:, 0, 0] = torch.where(attn_mask[:, 0, 0], logprobs[:, 0, 0], float("-inf"))
+
+    ### Dynamic Programming ###
+    for f in range(1, F):
+        dp_stay = dp[:, f-1, :]
+        dp_move = torch.nn.functional.pad(dp[:, f-1, :], (1, 0), value=float("-inf"))[:, :-1]
         dp_max, indices = torch.max(torch.stack([dp_stay, dp_move]), dim=0)
-        
-        # Speichere die Entscheidung (0=bleiben, 1=wechseln)
-        path[:, i, :] = indices
-        
-        # Aktualisiere die DP-Tabelle für den aktuellen Frame i
-        # dp[i, j] = value[i, j] + max(dp[i-1, j], dp[i-1, j-1])
-        # Maskierte Positionen werden auf -inf gesetzt
-        dp[:, i, :] = torch.where(
-            mask[:, i, :],
-            value[:, i, :] + dp_max,
-            float("-inf")
-        )
+        path[:, f, :] = indices  # save decision (0=stay, 1=move)
 
-    # 4. Backtracking
-    # Finde die tatsächlichen Längen aus der Maske
+        dp[:, f, :] = torch.where(attn_mask[:, f, :], logprobs[:, f, :] + dp_max, float("-inf")) #update dp table
+
+
+    ### Backtracking ###
     frame_lengths_idx = frame_lengths.long() - 1
-    token_lengths_idx = token_lengths.long() - 1
-    
+    phoneme_tokens_lengths_idx = phoneme_tokens_lengths.long() - 1
     batch_indices = torch.arange(B, device=device)
-    
-    # Initialisiere die binäre Ausgabemaske
-    alignment_mask = torch.zeros_like(path, dtype=torch.bool, device=device)
-    
-    # Starte das Backtracking beim letzten gültigen Phonem
-    j = token_lengths_idx  # [B]
+    alignment_mask = torch.zeros_like(path, dtype=torch.bool, device=device) # initialize hard alignment
+    p = phoneme_tokens_lengths_idx # start from the last phoneme token
 
-    # Gehe rückwärts durch die Frames
-    for i in reversed(range(T_x)):
-        # Prüfe für jeden Batch-Eintrag, ob wir noch in der gültigen Frame-Länge sind
-        active = (i <= frame_lengths_idx)
-        
-        # Markiere die Position (i, j) als Teil des Pfades, falls aktiv
-        alignment_mask[batch_indices, i, j] = alignment_mask[batch_indices, i, j] | active
-        
-        # Finde die Entscheidung, die an (i, j) getroffen wurde
-        decision = path[batch_indices, i, j]  # 0 = bleiben, 1 = wechseln
-        
-        # Aktualisiere j für den nächsten Schritt (i-1)
-        # j = j - (decision * active) # (Subtrahiere 1, wenn 'decision' 1 war UND wir aktiv sind)
-        j = j - (decision & active).long()
-        
-        # Stelle sicher, dass j nicht negativ wird
-        j = torch.clamp(j, min=0)
-
-    # 5. Finale Maskierung
-    # Stelle sicher, dass der Pfad nur dort existiert, wo die Maske es erlaubt
-    alignment_mask = alignment_mask & mask
+    for f in reversed(range(F)):
+        active = (f <= frame_lengths_idx) # check if within valid frame length
+        alignment_mask[batch_indices, f, p] = alignment_mask[batch_indices, f, p] | active # mark the path position if valid
+        decision = path[batch_indices, f, p]  # get the decision made at (f, p) (0=stay, 1=move)
+        p = p - (decision & active).long() # if decision = 1 and active, move to previous phoneme token
+        p = torch.clamp(p, min=0) # ensure p does not go negative
     
+    alignment_mask = alignment_mask & attn_mask # final masking to ensure path only in valid positions
+
     return alignment_mask.float()
+
 
 
 def compute_beta_binomial_prior(
