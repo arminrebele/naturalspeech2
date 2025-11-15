@@ -50,7 +50,7 @@ def build_token_vocabulary(
     
     tokens_from_text = set()
     for sample in tqdm(dataset):
-        tokens_from_text.update(sample["phonemized_text"])
+        tokens_from_text.update(sample["phonemes"])
 
     tokens = special_tokens + sorted(tokens_from_text)
     token_vocabulary = {token: idx for idx, token in enumerate(tokens)}
