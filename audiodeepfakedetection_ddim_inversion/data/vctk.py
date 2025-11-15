@@ -8,11 +8,11 @@ from audiodeepfakedetection_ddim_inversion.data.phoneme_tokenizer import Phoneme
 from audiodeepfakedetection_ddim_inversion.data.espeak_phonemizer import EspeakPhonemizer
 
 def phonemize_text(sample, phonemizer):
-    sample["phonemized_text"] = phonemizer(sample["text"])
+    sample["phonemes"] = phonemizer(sample["text"])
     return sample
 
 def tokenize_text(sample, phoneme_tokenizer):
-    sample["token_ids"] = phoneme_tokenizer(sample["phonemized_text"])
+    sample["phoneme_tokens"] = phoneme_tokenizer(sample["phonemes"])
     return sample
 
 class VCTKDataset(Dataset):
@@ -61,8 +61,8 @@ class VCTKDataset(Dataset):
         return {
             "audio": item["audio"]["array"],
             "text": item["text"],
-            "phonemized_text": item["phonemized_text"],
-            "token_ids": item["token_ids"],
+            "phonemes": item["phonemes"],
+            "phoneme_tokens": item["phoneme_tokens"],
             "sampling_rate": item["audio"]["sampling_rate"],
             "speaker_id": item["speaker_id"],
             "age": int(item["age"]), 
@@ -73,34 +73,36 @@ class VCTKDataset(Dataset):
 
 def vctk_collate_fn(batch, pad_token_id=0):
 
-    token_seq_tensors = [torch.tensor(item["token_ids"]) for item in batch]   # list of tensor with variable length
-    token_seq_lengths = torch.tensor([len(tensor) for tensor in token_seq_tensors])
-    padded_token_seq = pad_sequence(
-        token_seq_tensors,
+    audio_tensors = [torch.tensor(item["audio"]) for item in batch]
+    audio_lengths = torch.tensor([len(tensor) for tensor in audio_tensors])
+    audio_padded = pad_sequence(audio_tensors, batch_first=True, padding_value=0.0)
+    max_audio_len = audio_padded.shape[1]
+    audio_mask = (torch.arange(max_audio_len).unsqueeze(0) < audio_lengths.unsqueeze(1)).unsqueeze(1)
+
+    phoneme_tokens_tensors = [torch.tensor(item["phoneme_tokens"]) for item in batch]   # list of tensor with variable length
+    phoneme_tokens_lengths = torch.tensor([len(tensor) for tensor in phoneme_tokens_tensors])
+    phoneme_tokens_padded= pad_sequence(
+        phoneme_tokens_tensors,
         batch_first=True, 
         padding_value=pad_token_id
     )
-    max_token_seq_len = padded_token_seq.shape[1]
-    token_mask = (torch.arange(max_token_seq_len).unsqueeze(0) < token_seq_lengths.unsqueeze(1)).unsqueeze(1)
+    max_tokens_len = phoneme_tokens_padded.shape[1]
+    phoneme_tokens_mask = (torch.arange(max_tokens_len).unsqueeze(0) < phoneme_tokens_lengths.unsqueeze(1)).unsqueeze(1)
 
-    audio_tensors = [torch.tensor(item["audio"]) for item in batch]
-    audio_lengths = torch.tensor([len(tensor) for tensor in audio_tensors])
-    padded_audio = pad_sequence(audio_tensors, batch_first=True, padding_value=0.0)
-    max_audio_len = padded_audio.shape[1]
-    audio_mask = (torch.arange(max_audio_len).unsqueeze(0) < audio_lengths.unsqueeze(1)).unsqueeze(1)
-
-    texts = [item["text"] for item in batch]
     raw_audios = [item["audio"] for item in batch]
+    texts = [item["text"] for item in batch]
     
     return {
-        "padded_audio": padded_audio,               # [B, T_max_audio]
-        "padded_token_seq": padded_token_seq,       # [B, T_max_token_seq]
-        "audio_mask": audio_mask,                   # [B, 1, T_max_audio]    
-        "token_mask": token_mask,                   # [B, 1, T_max_token_seq]
-        "audio_lengths": audio_lengths,             # [B]
-        "token_lengths": token_seq_lengths,         # [B]
-        "text": texts,
-        "raw_audio": raw_audios,
+        "audio": audio_padded,                      # [B, T_max_audio]
+        "audio_mask": audio_mask,                   # [B, 1, T_max_audio]  
+        "audio_lengths": audio_lengths,             # [B]  
+        
+        "phoneme_tokens": phoneme_tokens_padded,                # [B, T_max_token_seq]
+        "phoneme_tokens_mask": phoneme_tokens_mask,             # [B, 1, T_max_token_seq]
+        "phoneme_tokens_lengths": phoneme_tokens_lengths,       # [B]
+
+        "texts": texts,
+        "raw_audios": raw_audios,
     }
 
 if __name__ == "__main__":
