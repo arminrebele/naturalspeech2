@@ -233,14 +233,19 @@ def compute_beta_binomial_prior(
     # Log Binomial Coefficient: log( "P_len" choose "P_grid" )
     # Formula: log(N!) - log(k!) - log((N-k)!)
     # N = token_lengths, k = P_grid
+
+    #token_lengths - P_grid + 1 kann bei P_grid >= token_lengths <= 0
+    safe_token_lengths_minus_P_grid_plus1 = torch.clamp(token_lengths - P_grid + 1.0, min=1.0)
+    
     log_binom_coeff = (
         torch.lgamma(token_lengths + 1)
         - torch.lgamma(P_grid + 1)
-        - torch.lgamma(token_lengths - P_grid + 1)
+        - torch.lgamma(safe_token_lengths_minus_P_grid_plus1)
     )
 
     # Log Beta Functions (Numerator and Denominator)
-    log_beta_numerator = torch.lbeta(P_grid + alpha, token_lengths - P_grid + beta)
+    safe_token_lengths_minus_P_grid_plus_beta = torch.clamp(token_lengths - P_grid + beta, min=1e-5)
+    log_beta_numerator = torch.lbeta(P_grid + alpha, safe_token_lengths_minus_P_grid_plus_beta)
     log_beta_denominator = torch.lbeta(alpha, beta)
 
     log_prior = log_binom_coeff + log_beta_numerator - log_beta_denominator  # [B, F, P]
