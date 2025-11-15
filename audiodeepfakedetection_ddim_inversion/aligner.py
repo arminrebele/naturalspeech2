@@ -112,7 +112,11 @@ class AlignerNet(nn.Module):
         return attn_soft, attn_logits  # [B, 1, F, P]
 
 
-def maximum_path(value: torch.Tensor, mask: torch.Tensor, frame_lengths: torch.Tensor, token_lengths: torch.Tensor) -> torch.Tensor:
+def maximum_path(
+        value: torch.Tensor, 
+        mask: torch.Tensor, 
+        frame_lengths: torch.Tensor, 
+        token_lengths: torch.Tensor) -> torch.Tensor:
     """
     Findet den wahrscheinlichsten monotonen Pfad mittels Viterbi-Algorithmus.
     Implementiert die DP-Logik: dp[i, j] = value[i, j] + max(dp[i-1, j], dp[i-1, j-1])
@@ -203,7 +207,7 @@ def maximum_path(value: torch.Tensor, mask: torch.Tensor, frame_lengths: torch.T
 
 def compute_beta_binomial_prior(
     frame_lengths: torch.Tensor,  # [B]
-    token_lengths: torch.Tensor,  # [B]
+    phoneme_tokens_lengths: torch.Tensor,  # [B]
     frames_max: int,
     phoneme_tokens_max: int, 
     w: float = 1.0
@@ -218,7 +222,7 @@ def compute_beta_binomial_prior(
     P_grid = torch.arange(0, phoneme_tokens_max, device=device, dtype=torch.float).view(1, 1, -1)  # [1, 1, P]   | [0, 1, 2, ..., P-1]
 
     frame_lengths = frame_lengths.view(B, 1, 1).float()        # [B, 1, 1]
-    token_lengths = token_lengths.view(B, 1, 1).float()        # [B, 1, 1]
+    phoneme_tokens_lengths = phoneme_tokens_lengths.view(B, 1, 1).float()        # [B, 1, 1]
 
     alpha = w * F_grid                                   # [1, F, 1]
     beta = w * (frame_lengths - F_grid + 1)              # [B, F, 1]
@@ -234,25 +238,25 @@ def compute_beta_binomial_prior(
     # Formula: log(N!) - log(k!) - log((N-k)!)
     # N = token_lengths, k = P_grid
 
-    #token_lengths - P_grid + 1 kann bei P_grid >= token_lengths <= 0
-    safe_token_lengths_minus_P_grid_plus1 = torch.clamp(token_lengths - P_grid + 1.0, min=1.0)
+    #phoneme_tokens_lengths - P_grid + 1 kann bei P_grid >= phoneme_tokens_lengths <= 0
+    safe_phoneme_tokens_lengths_minus_P_grid_plus1 = torch.clamp(phoneme_tokens_lengths - P_grid + 1.0, min=1.0)
     
     log_binom_coeff = (
-        torch.lgamma(token_lengths + 1)
+        torch.lgamma(phoneme_tokens_lengths + 1)
         - torch.lgamma(P_grid + 1)
-        - torch.lgamma(safe_token_lengths_minus_P_grid_plus1)
+        - torch.lgamma(safe_phoneme_tokens_lengths_minus_P_grid_plus1)
     )
 
     # Log Beta Functions (Numerator and Denominator)
-    safe_token_lengths_minus_P_grid_plus_beta = torch.clamp(token_lengths - P_grid + beta, min=1e-5)
-    log_beta_numerator = torch.lbeta(P_grid + alpha, safe_token_lengths_minus_P_grid_plus_beta)
+    safe_phoneme_tokens_lengths_minus_P_grid_plus_beta = torch.clamp(phoneme_tokens_lengths - P_grid + beta, min=1e-5)
+    log_beta_numerator = torch.lbeta(P_grid + alpha, safe_phoneme_tokens_lengths_minus_P_grid_plus_beta)
     log_beta_denominator = torch.lbeta(alpha, beta)
 
     log_prior = log_binom_coeff + log_beta_numerator - log_beta_denominator  # [B, F, P]
     ###
 
     mask_F = (F_grid <= frame_lengths) # [B, F, 1]  | True for all valid frames
-    mask_P = (P_grid < token_lengths)  # [B, 1, P]  | True for all valid phoneme_tokens
+    mask_P = (P_grid < phoneme_tokens_lengths)  # [B, 1, P]  | True for all valid phoneme_tokens
     mask = mask_F & mask_P     # [B, F, P]
 
     # Where the mask is True -> use the calculated log_prior
