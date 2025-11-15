@@ -237,7 +237,7 @@ def compute_beta_binomial_prior(
 
 class ForwardSumLoss(nn.Module):
     """
-
+    Paper: RAD-TTS: Parallel Flow-Based TTS with Robust Alignment Learning and Diverse Synthesis | Appendix A.6
     """
     def __init__(self, blank_logprob: float = -1e4):
         super().__init__()
