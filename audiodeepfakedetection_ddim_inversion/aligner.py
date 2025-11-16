@@ -209,16 +209,16 @@ def compute_beta_binomial_prior(
     # N = token_lengths, k = P_grid
 
     #phoneme_tokens_lengths - P_grid + 1 kann bei P_grid >= phoneme_tokens_lengths <= 0
-    safe_phoneme_tokens_lengths_minus_P_grid_plus1 = torch.clamp(phoneme_tokens_lengths - P_grid + 1.0, min=1.0)
+    safe_phoneme_tokens_lengths_minus_P_grid_plus1 = torch.clamp((phoneme_tokens_lengths - 1.0) - P_grid + 1.0, min=1.0)
     
     log_binom_coeff = (
-        torch.lgamma(phoneme_tokens_lengths + 1)
+        torch.lgamma((phoneme_tokens_lengths - 1.0) + 1)
         - torch.lgamma(P_grid + 1)
         - torch.lgamma(safe_phoneme_tokens_lengths_minus_P_grid_plus1)
     )
 
     # Log Beta Functions (Numerator and Denominator)
-    safe_phoneme_tokens_lengths_minus_P_grid_plus_beta = torch.clamp(phoneme_tokens_lengths - P_grid + beta, min=1e-5)
+    safe_phoneme_tokens_lengths_minus_P_grid_plus_beta = torch.clamp((phoneme_tokens_lengths - 1.0) - P_grid + beta, min=1e-5)
     log_beta_numerator = torch.lbeta(P_grid + alpha, safe_phoneme_tokens_lengths_minus_P_grid_plus_beta)
     log_beta_denominator = torch.lbeta(alpha, beta)
 
@@ -239,7 +239,7 @@ class ForwardSumLoss(nn.Module):
     """
     Paper: RAD-TTS: Parallel Flow-Based TTS with Robust Alignment Learning and Diverse Synthesis | Appendix A.6
     """
-    def __init__(self, blank_logprob: float = -1e4):
+    def __init__(self, blank_logprob: float = -1.0):
         super().__init__()
         self.blank_logprob = blank_logprob
         self.ctc_loss = nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
