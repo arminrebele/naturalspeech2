@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from einops import rearrange, repeat
+from einops import rearrange
 
 
 
@@ -61,7 +61,7 @@ class Aligner(nn.Module):
 
         return {
             "durations": durations,                     # [B,P]
-            "alignment_hard": alignment_hard,           # [B, F, P]
+            "alignment_hard": alignment_hard,           # [B, F, P] | {0.0, 1.0}
             "alignment_soft": alignment_soft,           # [B, 1, F, P]
             "alignment_logprobs": alignment_logprobs,   # [B, F, P]
             "attn_mask": attn_mask,                     # [B, F, P]
@@ -89,11 +89,11 @@ class AlignerNet(nn.Module):
             nn.Conv1d(dim_hidden*2, attn_channels, kernel_size=1)
         )
 
-    def forward(self, audio_encodings, phoneme_encodings, phoneme_token_mask):
+    def forward(self, audio_encodings, phoneme_encodings, phoneme_tokens_mask):
         """
         audio_encodings:     [B, 80, F]
         phoneme_encodings:   [B, 512, P]
-        phoneme_token_mask:  [B, 1, P]
+        phoneme_tokens_mask:  [B, 1, P]
         """
 
         audio_features = self.audio_encoder(audio_encodings)   # [B, 80, F]
@@ -110,7 +110,7 @@ class AlignerNet(nn.Module):
         alignment_logits = rearrange(alignment_logits, "b f p -> b 1 f p")
         alignment_logits = -alignment_logits / self.temperature # [B, 1, F, P]
         mask_value = -torch.finfo(alignment_logits.dtype).max
-        mask = rearrange(phoneme_token_mask.bool(), "b 1 p -> b 1 1 p")
+        mask = rearrange(phoneme_tokens_mask.bool(), "b 1 p -> b 1 1 p")
         alignment_logits.masked_fill_(~mask, mask_value)
         
         alignment_soft = alignment_logits.softmax(dim=-1)
@@ -239,7 +239,7 @@ class ForwardSumLoss(nn.Module):
     """
     Paper: RAD-TTS: Parallel Flow-Based TTS with Robust Alignment Learning and Diverse Synthesis | Appendix A.6
     """
-    def __init__(self, blank_logprob: float = -1.0):
+    def __init__(self, blank_logprob: float = -1e4):
         super().__init__()
         self.blank_logprob = blank_logprob
         self.ctc_loss = nn.CTCLoss(blank=0, reduction="mean", zero_infinity=True)
@@ -289,10 +289,24 @@ class ForwardSumLoss(nn.Module):
 
 
 
-
 class BinLoss(nn.Module):
-    def forward():
-        pass
+    def __init__(self, eps: float = 1e-9):
+        super().__init__()
+        self.eps = eps
+
+    def forward(
+        self,
+        alignment_logprobs: torch.Tensor,  # [B, F, P]
+        alignment_hard: torch.Tensor,      # [B, F, P]  {0.0, 1.0}
+        attn_mask: torch.Tensor,           # [B, F, P]  bool
+    ) -> torch.Tensor:
+        
+        nll_per_batch = -(alignment_hard * alignment_logprobs).sum(dim=(1, 2))  # [B] | negative log likelihood
+        denom = alignment_hard.sum(dim=(1, 2)).clamp_min(1.0)  # [B] | how many steps does the path have?
+        loss_per_batch = nll_per_batch / denom  # [B] | average negative log likelihood per step
+
+        return loss_per_batch.mean()
+
 
 if __name__ == "__main__":
     pass
