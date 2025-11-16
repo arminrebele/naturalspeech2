@@ -59,14 +59,14 @@ class Aligner(nn.Module):
             alignment_hard = maximum_path(alignment_logprobs_for_viterbi, attn_mask, frame_lengths, phoneme_tokens_lengths)  # [B,F,P]
             durations = alignment_hard.sum(dim=1).int()   # [B,P]
 
-        return {
-            "durations": durations,                     # [B,P]
-            "alignment_hard": alignment_hard,           # [B, F, P] | {0.0, 1.0}
-            "alignment_soft": alignment_soft,           # [B, 1, F, P]
-            "alignment_logprobs": alignment_logprobs,   # [B, F, P]
-            "attn_mask": attn_mask,                     # [B, F, P]
-            "alignment_logits_with_prior": alignment_logits_with_prior,     # [B, F, P]
-        }
+        return (
+            durations,                     # [B, P]
+            alignment_hard,                # [B, F, P]
+            alignment_soft,                # [B, 1, F, P]
+            alignment_logprobs,            # [B, F, P]
+            attn_mask,                     # [B, F, P]
+            alignment_logits_with_prior,   # [B, F, P]
+        )
 
 
 
