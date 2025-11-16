@@ -298,7 +298,6 @@ class BinLoss(nn.Module):
         self,
         alignment_logprobs: torch.Tensor,  # [B, F, P]
         alignment_hard: torch.Tensor,      # [B, F, P]  {0.0, 1.0}
-        attn_mask: torch.Tensor,           # [B, F, P]  bool
     ) -> torch.Tensor:
         
         nll_per_batch = -(alignment_hard * alignment_logprobs).sum(dim=(1, 2))  # [B] | negative log likelihood
