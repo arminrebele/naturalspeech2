@@ -311,4 +311,72 @@ class BinLoss(nn.Module):
 
 
 if __name__ == "__main__":
-    pass
+    torch.manual_seed(0)
+
+    B = 2
+    F = 15
+    P = 5
+    dim_audio = 80
+    dim_hidden = 512
+
+    device = "cpu"
+
+    audio_encodings = torch.randn(B, dim_audio, F, device=device)   # [B, 80, F]
+    phoneme_encodings = torch.randn(B, dim_hidden, P, device=device)  # [B, 512, P]
+
+    frame_lengths = torch.randint(low=10, high=F + 1, size=(B,), device=device)          # [B]
+    phoneme_tokens_lengths = torch.randint(low=3, high=P + 1, size=(B,), device=device)  # [B]
+
+    frame_idx = torch.arange(F, device=device).unsqueeze(0)          # [1, F]
+    frame_mask = (frame_idx < frame_lengths.unsqueeze(1)).unsqueeze(1)  # [B, 1, F]
+
+    phoneme_idx = torch.arange(P, device=device).unsqueeze(0)        # [1, P]
+    phoneme_tokens_mask = (phoneme_idx < phoneme_tokens_lengths.unsqueeze(1)).unsqueeze(1)  # [B, 1, P]
+
+    aligner = Aligner(
+        dim_audio=dim_audio,
+        dim_hidden=dim_hidden,
+        attn_channels=80,
+        temperature=5e-4,
+    ).to(device)
+
+    forward_sum_loss = ForwardSumLoss()
+    bin_loss = BinLoss()
+
+    durations, alignment_hard, alignment_soft, alignment_logprobs, attn_mask, alignment_logits_with_prior = aligner(
+            audio_encodings,
+            frame_mask,
+            frame_lengths,
+            phoneme_encodings,
+            phoneme_tokens_mask,
+            phoneme_tokens_lengths,
+        )
+    
+    print("durations shape:", durations.shape)
+    print("alignment_hard shape:", alignment_hard.shape)
+    print("alignment_soft shape:", alignment_soft.shape)
+    print("alignment_logprobs shape:", alignment_logprobs.shape)
+    print("attn_mask shape:", attn_mask.shape)
+    print("alignment_logits_with_prior shape:", alignment_logits_with_prior.shape)
+
+    print("durations:", durations)
+    print("\n alignment_hard:\n", alignment_hard)
+    print("\n alignment_soft:\n", alignment_soft)
+    print("\n alignment_logprobs:\n", alignment_logprobs)
+    print("\n attn_mask:\n", attn_mask)
+    print("\n alignment_logits_with_prior:\n", alignment_logits_with_prior)
+    
+    forward_sum_loss = forward_sum_loss(
+        alignment_logits_with_prior,
+        frame_lengths,
+        phoneme_tokens_lengths
+    )
+
+    print("ForwardSumLoss:", forward_sum_loss.item())
+
+    bin_loss = bin_loss(
+        alignment_logprobs,
+        alignment_hard
+    )
+
+    print("BinLoss:", bin_loss.item())
