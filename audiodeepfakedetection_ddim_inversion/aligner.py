@@ -183,51 +183,54 @@ def compute_beta_binomial_prior(
     w: float = 1.0
 ) -> torch.Tensor:
     """
-
+    Paper: One TTS Alignment To Rule Them All
+    Equations (12), (13)
     """
     device = frame_lengths.device
     B = len(frame_lengths) # batch size
 
-    F_grid = torch.arange(1, frames_max + 1, device=device, dtype=torch.float).view(1, -1, 1)      # [1, F, 1]   | [1, 2, 3, ..., F]
-    P_grid = torch.arange(0, phoneme_tokens_max, device=device, dtype=torch.float).view(1, 1, -1)  # [1, 1, P]   | [0, 1, 2, ..., P-1]
+    T= frame_lengths.view(B, 1, 1).float()          # [B, 1, 1]
+    N = (phoneme_tokens_lengths.view(B, 1, 1).float()) - 1.0       # [B, 1, 1]
 
-    frame_lengths = frame_lengths.view(B, 1, 1).float()        # [B, 1, 1]
-    phoneme_tokens_lengths = phoneme_tokens_lengths.view(B, 1, 1).float()        # [B, 1, 1]
+    t_grid = torch.arange(1, frames_max + 1, device=device).view(1, -1, 1)  # [1, T, 1]
+    k_grid = torch.arange(0, phoneme_tokens_max, device=device).view(1, 1, -1)  # [1, 1, N]
 
-    alpha = w * F_grid                                   # [1, F, 1]
-    beta = w * (frame_lengths - F_grid + 1)              # [B, F, 1]
-
+    alpha = w * t_grid                     # [1, T, 1] | w * t
     alpha = torch.clamp(alpha, min=1e-5)
+
+    beta = w * (T - t_grid + 1.0)          # [B, T, 1] | w * (T - t + 1)
     beta = torch.clamp(beta, min=1e-5)
 
-    
-    ### Equation 12 from "One TTS Alignment To Rule Them All" ###
-    # log space for numerical stability(lgamma instead faculty, lbeta instead beta)
-    
-    # Log Binomial Coefficient: log( "P_len" choose "P_grid" )
-    # Formula: log(N!) - log(k!) - log((N-k)!)
-    # N = token_lengths, k = P_grid
 
-    #phoneme_tokens_lengths - P_grid + 1 kann bei P_grid >= phoneme_tokens_lengths <= 0
-    safe_phoneme_tokens_lengths_minus_P_grid_plus1 = torch.clamp((phoneme_tokens_lengths - 1.0) - P_grid + 1.0, min=1.0)
-    
+    # Log Binomial Coefficient: log( N choose k ) = log(N!) - log(k!) - log((N-k)!)
+    N_minus_k = torch.clamp(N - k_grid, min=1.0)  
+
     log_binom_coeff = (
-        torch.lgamma((phoneme_tokens_lengths - 1.0) + 1)
-        - torch.lgamma(P_grid + 1)
-        - torch.lgamma(safe_phoneme_tokens_lengths_minus_P_grid_plus1)
+        torch.lgamma(N + 1)            # log(N!)
+        - torch.lgamma(k_grid + 1)     # log(k!)
+        - torch.lgamma(N_minus_k + 1)  # log((N-k)!)
     )
 
-    # Log Beta Functions (Numerator and Denominator)
-    safe_phoneme_tokens_lengths_minus_P_grid_plus_beta = torch.clamp((phoneme_tokens_lengths - 1.0) - P_grid + beta, min=1e-5)
-    log_beta_numerator = torch.lbeta(P_grid + alpha, safe_phoneme_tokens_lengths_minus_P_grid_plus_beta)
-    log_beta_denominator = torch.lbeta(alpha, beta)
+    # Numerator: log B(k+α, N-k+β) = log Γ(k+α) + log Γ(N-k+β) - log Γ(N + α + β)
+    log_beta_numerator = (
+        torch.lgamma(k_grid + alpha)
+        + torch.lgamma(torch.clamp(N - k_grid + beta, min=1e-5))
+        - torch.lgamma(k_grid + alpha + torch.clamp(N - k_grid + beta, min=1e-5))
+    )
 
-    log_prior = log_binom_coeff + log_beta_numerator - log_beta_denominator  # [B, F, P]
-    ###
+    # Denominator: log B(α, β) = log Γ(α) + log Γ(β) - log Γ(α + β)
+    log_beta_denominator = (
+        torch.lgamma(alpha)
+        + torch.lgamma(beta)
+        - torch.lgamma(alpha + beta)
+    )
+    log_beta_denominator = log_beta_denominator.expand(B, frames_max, phoneme_tokens_max) # broadcast
 
-    mask_F = (F_grid <= frame_lengths) # [B, F, 1]  | True for all valid frames
-    mask_P = (P_grid < phoneme_tokens_lengths)  # [B, 1, P]  | True for all valid phoneme_tokens
-    mask = mask_F & mask_P     # [B, F, P]
+    log_prior = log_binom_coeff + log_beta_numerator - log_beta_denominator  # [B, T, N] | [B, F, P]
+    
+    t_mask = (t_grid <= T)  # [B, T, 1]  | True for all valid frames
+    k_mask = (k_grid < N + 1.0)  # [1, 1, N]  | True for all valid phoneme_tokens
+    mask = t_mask & k_mask     # [B, T, N]
 
     # Where the mask is True -> use the calculated log_prior
     # Everywhere else (in padding) -> set to -inf (forbidden path)
