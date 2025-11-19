@@ -5,7 +5,7 @@ from audiodeepfakedetection_ddim_inversion.encodec import EncodecWrapper
 from audiodeepfakedetection_ddim_inversion.log_mel_spectrogram import LogMelSpectrogramGenerator
 from audiodeepfakedetection_ddim_inversion.phoneme_encoder import PhonemeEncoder
 from audiodeepfakedetection_ddim_inversion.aligner import Aligner, ForwardSumLoss, BinLoss
-
+from audiodeepfakedetection_ddim_inversion.utils.utils import expand_phoneme_encodings
 
 
 class NaturalSpeech2Model(nn.Module):
@@ -58,6 +58,11 @@ class NaturalSpeech2Model(nn.Module):
             phoneme_encodings,
             phoneme_tokens_mask,
             phoneme_tokens_lengths,
+        )
+
+        expanded_phoneme_encodings, frame_mask_expanded, frame_lengths_expanded = expand_phoneme_encodings(
+            phoneme_encodings,
+            durations,
         )
 
         audio_latents = self.encodec.get_latents(audio)
