@@ -7,7 +7,7 @@ class LogMelSpectrogramGenerator(nn.Module):
         self,
         sampling_rate=24000,
         n_fft=1024,
-        hop_length=256,
+        hop_length=320,
         n_mels=80,
         f_min=0.0,
         f_max=None
