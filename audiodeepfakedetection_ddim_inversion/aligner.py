@@ -293,9 +293,8 @@ class ForwardSumLoss(nn.Module):
 
 
 class BinLoss(nn.Module):
-    def __init__(self, eps: float = 1e-9):
+    def __init__(self):
         super().__init__()
-        self.eps = eps
 
     def forward(
         self,
