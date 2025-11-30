@@ -1,7 +1,7 @@
 import torch
 from transformers import EncodecModel, AutoProcessor
 
-from audiodeepfakedetection_ddim_inversion.paths import ENCODEC_24KHZ_DIR
+from naturalspeech2.paths import ENCODEC_24KHZ_DIR
 
 
 class EncodecWrapper:

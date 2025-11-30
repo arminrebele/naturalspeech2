@@ -1,11 +1,11 @@
 import torch
 from torch import nn
 
-from audiodeepfakedetection_ddim_inversion.encodec import EncodecWrapper
-from audiodeepfakedetection_ddim_inversion.log_mel_spectrogram import LogMelSpectrogramGenerator
-from audiodeepfakedetection_ddim_inversion.phoneme_encoder import PhonemeEncoder
-from audiodeepfakedetection_ddim_inversion.aligner import Aligner, ForwardSumLoss, BinLoss
-from audiodeepfakedetection_ddim_inversion.utils.utils import expand_phoneme_encodings
+from naturalspeech2.encodec import EncodecWrapper
+from naturalspeech2.log_mel_spectrogram import LogMelSpectrogramGenerator
+from naturalspeech2.phoneme_encoder import PhonemeEncoder
+from naturalspeech2.aligner import Aligner, ForwardSumLoss, BinLoss
+from naturalspeech2.utils.utils import expand_phoneme_encodings
 
 
 class NaturalSpeech2Model(nn.Module):
