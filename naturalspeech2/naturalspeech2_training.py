@@ -2,8 +2,8 @@ import torch
 from torch.utils.data import DataLoader
 
 
-from audiodeepfakedetection_ddim_inversion.data.vctk import VCTKDataset, vctk_collate_fn
-from audiodeepfakedetection_ddim_inversion.naturalspeech2_model import NaturalSpeech2Model
+from naturalspeech2.data.vctk import VCTKDataset, vctk_collate_fn
+from naturalspeech2.naturalspeech2_model import NaturalSpeech2Model
 
 
 def train():

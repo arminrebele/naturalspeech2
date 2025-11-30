@@ -1,3 +1,0 @@
-from audiodeepfakedetection_ddim_inversion.config.environment import setup_environment
-
-setup_environment()

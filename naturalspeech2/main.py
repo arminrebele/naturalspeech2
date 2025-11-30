@@ -5,9 +5,9 @@ import numpy as np
 import sounddevice as sd
 import os
 
-from audiodeepfakedetection_ddim_inversion.data.vctk import VCTKDataset, vctk_collate_fn
-from audiodeepfakedetection_ddim_inversion.encodec import EncodecWrapper
-from audiodeepfakedetection_ddim_inversion.data.phoneme_tokenizer import PhonemeTokenizer
+from naturalspeech2.data.vctk import VCTKDataset, vctk_collate_fn
+from naturalspeech2.encodec import EncodecWrapper
+from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 
 def main():
     device = "mps" if torch.backends.mps.is_available() else "cpu"
