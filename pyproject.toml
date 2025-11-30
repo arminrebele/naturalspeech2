@@ -1,5 +1,5 @@
 [project]
-name = "audiodeepfakedetection-ddim-inversion"
+name = "naturalspeech2"
 version = "0.1.0"
 description = ""
 authors = [
