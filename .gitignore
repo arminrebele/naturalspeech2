@@ -1,7 +1,7 @@
 .DS_Store
 
 data/
-!/audiodeepfakedetection_ddim_inversion/data/
+!/naturalspeech2/data/
 
 notebooks/
 models/
