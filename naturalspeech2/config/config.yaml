@@ -1,0 +1,24 @@
+defaults:
+  - _self_
+
+model:
+  dim_audio: 80
+  dim_hidden: 512
+  attn_channels: 80
+  temperature: 0.0005
+  n_fft: 1024
+  hop_length: 320
+  n_mels: 80
+  f_min: 0.0
+  f_max: null
+
+data:
+  batch_size: 4
+  num_proc: 4
+  sampling_rate: 24000
+  shuffle: true
+
+training:
+  device: "auto"
+  learning_rate: 0
+  epochs: 0
