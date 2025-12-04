@@ -35,6 +35,7 @@ def train(cfg: DictConfig):
     model_config = OmegaConf.to_container(cfg.model, resolve=True)
     model_config['token_vocabulary_size'] = token_vocabulary_size
     model_config['device'] = device
+    model_config['sampling_rate'] = cfg.data.sampling_rate
 
     model = NaturalSpeech2Model(**model_config).to(device)
 
