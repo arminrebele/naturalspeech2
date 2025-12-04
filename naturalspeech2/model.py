@@ -9,28 +9,41 @@ from naturalspeech2.utils.utils import expand_phoneme_encodings
 
 
 class NaturalSpeech2Model(nn.Module):
-    def __init__(self, config: dict):
+    def __init__(self,
+                 dim_audio: int = 80,
+                 dim_hidden: int = 512,
+                 attn_channels: int = 80,
+                 temperature: float = 0.0005,
+                 sampling_rate: int = 24000,
+                 n_fft: int = 1024,
+                 hop_length: int = 320,
+                 n_mels: int = 80,
+                 f_min: float = 0.0,
+                 f_max: float = None,
+                 device: str = "cpu",
+                 token_vocabulary_size: int = None,
+                 **kwargs    
+    ):
         super().__init__()
-        self.config = config
 
-        self.encodec = EncodecWrapper(config["device"])
+        self.encodec = EncodecWrapper(device)
 
         self.log_mel_spectrogram_generator = LogMelSpectrogramGenerator(
-            sampling_rate=config["sampling_rate"],
-            n_fft=config["n_fft"],
-            hop_length=config["hop_length"],
-            n_mels=config["n_mels"],
-            f_min=config["f_min"],
-            f_max=config["f_max"],
+            sampling_rate=sampling_rate,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            f_min=f_min,
+            f_max=f_max,
         )
 
         self.phoneme_encoder = PhonemeEncoder() # TODO: implement PhonemeEncoder
 
         self.aligner = Aligner(
-            dim_audio=config.get("dim_audio", 80),
-            dim_hidden=config.get("dim_hidden", 512),
-            attn_channels=config.get("attn_channels", 80),
-            temperature=config.get("temperature", 5e-4),
+            dim_audio=dim_audio,
+            dim_hidden=dim_hidden,
+            attn_channels=attn_channels,
+            temperature=temperature,
         )
 
         self.forward_sum_loss = ForwardSumLoss()
