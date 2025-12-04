@@ -4,13 +4,16 @@ from torch.utils.data import DataLoader
 
 from naturalspeech2.data.vctk import VCTKDataset, vctk_collate_fn
 from naturalspeech2.model import NaturalSpeech2Model
-
+from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 
 def train():
     device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
     
     config = {} # TODO: define model config
     
+    tokenizer = PhonemeTokenizer()
+    token_vocabulary_size = tokenizer.token_vocabulary_size 
+
     dataset = VCTKDataset()
     loader = DataLoader(dataset, batch_size=4, shuffle=False, collate_fn=vctk_collate_fn)
 
