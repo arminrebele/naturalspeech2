@@ -3,7 +3,7 @@ from torch.utils.data import DataLoader
 
 
 from naturalspeech2.data.vctk import VCTKDataset, vctk_collate_fn
-from naturalspeech2.naturalspeech2_model import NaturalSpeech2Model
+from naturalspeech2.model import NaturalSpeech2Model
 
 
 def train():
