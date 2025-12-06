@@ -6,6 +6,7 @@ model:
   dim_hidden: 512
   attn_channels: 80
   temperature: 0.0005
+  prior_w: 1.0 
   n_fft: 1024
   hop_length: 320
   n_mels: 80
