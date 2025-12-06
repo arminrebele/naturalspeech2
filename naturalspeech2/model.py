@@ -14,6 +14,7 @@ class NaturalSpeech2Model(nn.Module):
                  dim_hidden: int = 512,
                  attn_channels: int = 80,
                  temperature: float = 0.0005,
+                 prior_w: float = 1.0,
                  sampling_rate: int = 24000,
                  n_fft: int = 1024,
                  hop_length: int = 320,
@@ -44,6 +45,7 @@ class NaturalSpeech2Model(nn.Module):
             dim_hidden=dim_hidden,
             attn_channels=attn_channels,
             temperature=temperature,
+            prior_w=prior_w,
         )
 
         self.forward_sum_loss = ForwardSumLoss()
