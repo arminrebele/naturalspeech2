@@ -32,12 +32,33 @@ def train(cfg: DictConfig):
         collate_fn=vctk_collate_fn
     )
 
-    model_config = OmegaConf.to_container(cfg.model, resolve=True)
-    model_config['token_vocabulary_size'] = token_vocabulary_size
-    model_config['device'] = device
-    model_config['sampling_rate'] = cfg.data.sampling_rate
+    model_args = {
+        'device': device,
+        'token_vocabulary_size': token_vocabulary_size,
+        'dim_hidden': cfg.model.dim_hidden,
+        'sampling_rate': cfg.data.sampling_rate,
 
-    model = NaturalSpeech2Model(**model_config).to(device)
+        # Log Mel Spectrogram parameters
+        'n_fft': cfg.model.mel.n_fft,
+        'hop_length': cfg.model.mel.hop_length,
+        'n_mels': cfg.model.mel.n_mels,
+        'f_min': cfg.model.mel.f_min,
+        'f_max': cfg.model.mel.f_max,
+
+        # Phoneme Encoder parameters
+        'phoneme_encoder_layers': cfg.model.phoneme_encoder.transformer_layers,
+        'phoneme_encoder_heads': cfg.model.phoneme_encoder.attention_heads,
+        'phoneme_encoder_filter_size': cfg.model.phoneme_encoder.conv1d_filter_size,
+        'phoneme_encoder_kernel_size': cfg.model.phoneme_encoder.conv1d_kernel_size,
+        'phoneme_encoder_dropout': cfg.model.phoneme_encoder.dropout,
+
+        # Aligner parameters
+        'aligner_attn_channels': cfg.model.aligner.attn_channels,
+        'aligner_temperature': cfg.model.aligner.temperature,
+        'prior_w': cfg.model.aligner.prior_w,
+    }
+
+    model = NaturalSpeech2Model(**model_args).to(device)
 
     
 
