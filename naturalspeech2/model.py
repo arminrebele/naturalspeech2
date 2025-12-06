@@ -1,5 +1,5 @@
 import torch
-from torch import nn
+from torch import device, nn
 
 from naturalspeech2.encodec import EncodecWrapper
 from naturalspeech2.log_mel_spectrogram import LogMelSpectrogramGenerator
@@ -10,20 +10,32 @@ from naturalspeech2.utils.utils import expand_phoneme_encodings
 
 class NaturalSpeech2Model(nn.Module):
     def __init__(self,
-                 dim_audio: int = 80,
+                 # global parameters
+                 device: str = "cpu",
+                 token_vocabulary_size: int = None,
                  dim_hidden: int = 512,
-                 attn_channels: int = 80,
-                 temperature: float = 0.0005,
-                 prior_w: float = 1.0,
                  sampling_rate: int = 24000,
+
+                 # Log Mel Spectrogram parameters
                  n_fft: int = 1024,
                  hop_length: int = 320,
                  n_mels: int = 80,
                  f_min: float = 0.0,
                  f_max: float = None,
-                 device: str = "cpu",
-                 token_vocabulary_size: int = None,
-                 **kwargs    
+
+                 # Phoneme Encoder parameters
+                 phoneme_encoder_layers: int = 6,
+                 phoneme_encoder_heads: int = 8,
+                 phoneme_encoder_filter_size: int = 2048,
+                 phoneme_encoder_kernel_size: int = 9,
+                 phoneme_encoder_dropout: float = 0.2,
+
+                 # Aligner parameters
+                 aligner_attn_channels: int = 80,
+                 aligner_temperature: float = 0.0005,
+                 prior_w: float = 1.0,
+
+                 **kwargs
     ):
         super().__init__()
 
@@ -41,10 +53,10 @@ class NaturalSpeech2Model(nn.Module):
         self.phoneme_encoder = PhonemeEncoder() # TODO: implement PhonemeEncoder
 
         self.aligner = Aligner(
-            dim_audio=dim_audio,
+            dim_audio=n_mels,
             dim_hidden=dim_hidden,
-            attn_channels=attn_channels,
-            temperature=temperature,
+            attn_channels=aligner_attn_channels,
+            temperature=aligner_temperature,
             prior_w=prior_w,
         )
 
