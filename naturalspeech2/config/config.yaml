@@ -1,17 +1,10 @@
 defaults:
   - _self_
 
-model:
-  dim_audio: 80
-  dim_hidden: 512
-  attn_channels: 80
-  temperature: 0.0005
-  prior_w: 1.0 
-  n_fft: 1024
-  hop_length: 320
-  n_mels: 80
-  f_min: 0.0
-  f_max: null
+training:
+  device: "auto"
+  learning_rate: 0
+  epochs: 0
 
 data:
   batch_size: 4
@@ -19,7 +12,28 @@ data:
   sampling_rate: 24000
   shuffle: true
 
-training:
-  device: "auto"
-  learning_rate: 0
-  epochs: 0
+model:
+  # global model parameters
+  dim_hidden: 512
+
+  # Modul: Log Mel Spectrogram Generator
+  mel:
+    n_fft: 1024
+    hop_length: 320
+    n_mels: 80
+    f_min: 0.0
+    f_max: null
+  
+  # Modul: Phoneme Encoder
+  phoneme_encoder:
+    transformer_layers: 6
+    attention_heads: 8
+    conv1d_filter_size: 2048
+    conv1_kernel_size: 9
+    dropout: 0.2
+
+  # Modul: Aligner
+  aligner:
+    attn_channels: 80
+    temperature: 0.0005
+    prior_w: 1.0
