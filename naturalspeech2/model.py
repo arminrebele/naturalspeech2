@@ -84,7 +84,11 @@ class NaturalSpeech2Model(nn.Module):
 
         audio_encodings, frame_mask, frame_lengths = self.log_mel_spectrogram_generator(audio, audio_lengths)
         
-        phoneme_encodings = self.phoneme_encoder(phoneme_tokens, phoneme_tokens_mask, phoneme_tokens_lengths)
+        phoneme_encodings = self.phoneme_encoder(
+            phoneme_tokens,
+            phoneme_tokens_mask,
+            phoneme_tokens_lengths
+        )
 
         durations, alignment_hard, alignment_soft, alignment_logprobs, attn_mask, alignment_logits_with_prior = self.aligner(
             audio_encodings,
