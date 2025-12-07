@@ -50,7 +50,15 @@ class NaturalSpeech2Model(nn.Module):
             f_max=f_max,
         )
 
-        self.phoneme_encoder = PhonemeEncoder() # TODO: implement PhonemeEncoder
+        self.phoneme_encoder = PhonemeEncoder(
+            token_vocabulary_size=token_vocabulary_size,
+            dim_hidden=dim_hidden,
+            transformer_layers=phoneme_encoder_layers,
+            attention_heads=phoneme_encoder_heads,
+            conv1d_filter_size=phoneme_encoder_filter_size,
+            conv1d_kernel_size=phoneme_encoder_kernel_size,
+            dropout=phoneme_encoder_dropout,
+        )
 
         self.aligner = Aligner(
             dim_audio=n_mels,
