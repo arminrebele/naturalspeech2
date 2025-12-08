@@ -15,19 +15,22 @@ def main():
     dataset = VCTKDataset()
     loader = DataLoader(dataset, batch_size=4, shuffle=False, collate_fn=vctk_collate_fn)
 
-    encodec = EncodecWrapper(device)
-
     batch = next(iter(loader))
-    padded_audio = batch["padded_audio"]
-    latents = encodec.get_latents(padded_audio)
 
-    print(latents.shape)
+    print("audio: ", batch["audio"], "\n\n")
+    print("audio_mask: ", batch["audio_mask"], "\n\n")
+    print("audio_lengths: ", batch["audio_lengths"], "\n\n")
+
+    print("phoneme_tokens: ", batch["phoneme_tokens"], "\n\n")
+    print("phoneme_tokens_mask: ", batch["phoneme_tokens_mask"], "\n\n")
+    print("phoneme_tokens_lengths: ", batch["phoneme_tokens_lengths"], "\n\n")
+    
     
     
 
 if __name__ == "__main__":
-    #main()
-    tokenizer = PhonemeTokenizer()
-    text = "Hello Mr., world! & 2025 This is a test."
-    print(tokenizer(text))
-    print(tokenizer.decode_tokens(tokenizer(text)))
+    main()
+    # tokenizer = PhonemeTokenizer()
+    # text = "Hello Mr., world! & 2025 This is a test."
+    # print(tokenizer(text))
+    # print(tokenizer.decode_tokens(tokenizer(text)))

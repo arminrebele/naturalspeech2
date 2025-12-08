@@ -28,6 +28,10 @@ class PhonemeTokenizer:
 
         self.id_to_token = {v: k for k, v in self.token_vocabulary.items()}
 
+    @property
+    def token_vocabulary_size(self) -> int:
+        return len(self.token_vocabulary)
+    
     def __call__(self, input_data) -> list[int]:
         if isinstance(input_data, str):
             phonemes = self.phonemizer(input_data)
@@ -49,7 +53,7 @@ def build_token_vocabulary(
         save_path: str = TOKEN_VOCABULARY_PATH) -> dict[str, int]:
     
     tokens_from_text = set()
-    for sample in tqdm(dataset):
+    for sample in tqdm(dataset, desc="Building token vocabulary"):
         tokens_from_text.update(sample["phonemes"])
 
     tokens = special_tokens + sorted(tokens_from_text)

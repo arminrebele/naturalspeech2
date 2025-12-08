@@ -11,8 +11,10 @@ class Aligner(nn.Module):
         dim_hidden=512,
         attn_channels=80,
         temperature=0.0005,
+        prior_w=1.0,
     ):
         super().__init__()
+        self.prior_w = prior_w
 
         self.aligner_net = AlignerNet(
             dim_audio = dim_audio,
@@ -29,6 +31,7 @@ class Aligner(nn.Module):
         phoneme_encodings,        # [B, dim_hidden=512, P]
         phoneme_tokens_mask,      # [B, 1, P]
         phoneme_tokens_lengths,   # [B]
+
     ) -> dict[str, torch.Tensor]:
         
         alignment_soft, alignment_logits = self.aligner_net(audio_encodings, phoneme_encodings, phoneme_tokens_mask)  # [B, 1, F, P]
@@ -47,7 +50,7 @@ class Aligner(nn.Module):
             phoneme_tokens_lengths, 
             frames_max=F,
             phoneme_tokens_max=P, 
-            w=1.0 
+            w=self.prior_w 
         )
 
         alignment_logits_2d = alignment_logits.squeeze(1)        # [B, F, P]

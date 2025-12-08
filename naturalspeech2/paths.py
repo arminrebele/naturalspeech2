@@ -11,4 +11,4 @@ MODELS_DIR = PROJECT_ROOT / "models"
 ENCODEC_24KHZ_DIR = MODELS_DIR / "encodec_24khz"
 
 CONFIG_DIR = PACKAGE_ROOT / "config"
-TOKEN_VOCABULARY_PATH = CONFIG_DIR / "token_vocabulary.json"
+TOKEN_VOCABULARY_PATH = DATA_DIR / "token_vocabulary.json"
