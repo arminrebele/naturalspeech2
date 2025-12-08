@@ -37,6 +37,8 @@ def train(cfg: DictConfig):
         'token_vocabulary_size': token_vocabulary_size,
         'dim_hidden': cfg.model.dim_hidden,
         'sampling_rate': cfg.data.sampling_rate,
+        'rope_base': cfg.model.rope_base,
+        'rope_max_seq_len': cfg.model.rope_max_seq_len,
 
         # Log Mel Spectrogram parameters
         'n_fft': cfg.model.mel.n_fft,
