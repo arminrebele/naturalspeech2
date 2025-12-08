@@ -35,6 +35,7 @@ rather than interleaved pairs, to avoid the rotate_half shuffle overhead.
 
 
 
+from json import encoder
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -290,3 +291,73 @@ class Conv1DFeedForward(nn.Module):
         x = x.transpose(1, 2)  # [B, P, dim_hidden]
         
         return x
+
+
+if __name__ == "__main__":
+    from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
+    
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+
+    tokenizer = PhonemeTokenizer()
+    vocab_size = tokenizer.token_vocabulary_size
+    print(f"Vocabulary size: {vocab_size}")
+
+    phoneme_encoder = PhonemeEncoder(
+        token_vocabulary_size=vocab_size,
+        dim_hidden=512,
+        transformer_layers=6,
+        attention_heads=8,
+        conv1d_filter_size=2048,
+        conv1d_kernel_size=9,
+        dropout=0.2,
+    ).to(device)
+
+    texts = [
+        "Hello, world!",
+        "This is a test.",
+    ]
+    
+    # Tokenize
+    token_ids_list = [tokenizer(text) for text in texts]
+    lengths = [len(ids) for ids in token_ids_list]
+    max_len = max(lengths)
+    
+    # Pad sequences
+    padded_tokens = []
+    for ids in token_ids_list:
+        padded = ids + [0] * (max_len - len(ids))  # 0 = <pad>
+        padded_tokens.append(padded)
+    
+    # Create tensors
+    phoneme_tokens = torch.tensor(padded_tokens, device=device)  # [B, P]
+    phoneme_tokens_lengths = torch.tensor(lengths, device=device)  # [B]
+    
+    # Create mask: True = valid, False = padding
+    token_idx = torch.arange(max_len, device=device).unsqueeze(0)  # [1, P]
+    phoneme_tokens_mask = (token_idx < phoneme_tokens_lengths.unsqueeze(1)).unsqueeze(1)  # [B, 1, P]
+    
+    print(f"\nInput shapes:")
+    print(f"  phoneme_tokens: {phoneme_tokens.shape}")
+    print(f"  phoneme_tokens_mask: {phoneme_tokens_mask.shape}")
+    print(f"  phoneme_tokens_lengths: {phoneme_tokens_lengths}")
+    
+    # Forward pass
+    phoneme_encoder.eval()
+    with torch.no_grad():
+        output = phoneme_encoder(phoneme_tokens, phoneme_tokens_mask, phoneme_tokens_lengths)
+    
+    print(f"\nOutput shape: {output.shape}")  # Expected: [B, dim_hidden, P]
+    
+    # Verify output values
+    print(f"\nOutput statistics:")
+    print(f"  Mean: {output.mean().item():.4f}")
+    print(f"  Std: {output.std().item():.4f}")
+    print(f"  Min: {output.min().item():.4f}")
+    print(f"  Max: {output.max().item():.4f}")
+    
+    # Parameter count
+    total_params = sum(p.numel() for p in phoneme_encoder.parameters())
+    trainable_params = sum(p.numel() for p in phoneme_encoder.parameters() if p.requires_grad)
+    print(f"\nModel parameters:")
+    print(f"  Total: {total_params:,}")
+    print(f"  Trainable: {trainable_params:,}")
