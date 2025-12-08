@@ -15,6 +15,8 @@ class NaturalSpeech2Model(nn.Module):
                  token_vocabulary_size: int = None,
                  dim_hidden: int = 512,
                  sampling_rate: int = 24000,
+                 rope_base: float = 10000.0,
+                 rope_max_seq_len: int = 3000,
 
                  # Log Mel Spectrogram parameters
                  n_fft: int = 1024,
@@ -58,6 +60,8 @@ class NaturalSpeech2Model(nn.Module):
             conv1d_filter_size=phoneme_encoder_filter_size,
             conv1d_kernel_size=phoneme_encoder_kernel_size,
             dropout=phoneme_encoder_dropout,
+            rope_base=rope_base,
+            rope_max_seq_len=rope_max_seq_len,
         )
 
         self.aligner = Aligner(
