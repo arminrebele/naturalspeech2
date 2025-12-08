@@ -127,10 +127,16 @@ class TransformerEncoderLayer(nn.Module):
             conv1d_kernel_size,
             dropout,
         )
+
+        self.dropout = nn.Dropout(dropout)
         
     def forward(self, x, phoneme_tokens_mask):
-        x = x + self.multi_head_attention(self.norm1(x), phoneme_tokens_mask)        
-        x = x + self.conv1d_feed_forward(self.norm2(x))
+        attn_out = self.multi_head_attention(self.norm1(x), phoneme_tokens_mask)
+        x = x + self.dropout(attn_out)
+
+        ffn_out = self.conv1d_feed_forward(self.norm2(x))
+        x = x + self.dropout(ffn_out)
+
         return x
 
 class RMSNorm(nn.Module):
@@ -205,7 +211,7 @@ class MultiHeadSelfAttention(nn.Module):
         self.dim_head = dim_hidden // attention_heads
         self.dropout = dropout
         self.to_qkv = nn.Linear(dim_hidden, dim_hidden * 3, bias=False)
-        self.to_out = nn.Linear(dim_hidden, dim_hidden)
+        self.to_out = nn.Linear(dim_hidden, dim_hidden, bias=False)
 
         self.rotary_embedding = RotaryEmbedding(
             dim_head=self.dim_head,
@@ -214,7 +220,7 @@ class MultiHeadSelfAttention(nn.Module):
         )
 
     def forward(self, x, mask):
-        B, P, dim_hidden = x.shape
+        B, P, dim_hidden = x.shape # [B, P, dim_hidden]
         qkv = self.to_qkv(x) # [B, P, 3 * dim_hidden]
         q, k, v = qkv.chunk(3, dim=-1) # each [B, P, dim_hidden]
 
@@ -265,6 +271,22 @@ class Conv1DFeedForward(nn.Module):
             dropout: float,
     ):
         super().__init__()
-    
-    def forward(self):
-        pass
+        padding = (conv1d_kernel_size - 1) // 2
+        self.conv1 = nn.Conv1d(dim_hidden, conv1d_filter_size, conv1d_kernel_size, padding=padding)
+        self.conv2 = nn.Conv1d(conv1d_filter_size, dim_hidden, 1)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        
+        # [B, P, dim_hidden] -> [B, dim_hidden, P]
+        x = x.transpose(1, 2)
+        
+        x = self.conv1(x)
+        x = F.silu(x)
+        x = self.dropout(x)
+        
+        x = self.conv2(x)
+        
+        x = x.transpose(1, 2)  # [B, P, dim_hidden]
+        
+        return x
