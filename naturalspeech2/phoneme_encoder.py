@@ -134,26 +134,32 @@ class TransformerEncoderLayer(nn.Module):
         return x
 
 class RMSNorm(nn.Module):
+    """
+    x_norm = x / sqrt(mean(x^2) + eps) * gamma
+    """
     def __init__(self, dim_hidden: int, eps: float = 1e-8):
         super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim_hidden)) # gamma
     
-    def forward(self):
-        pass
+    def forward(self, x):
+        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
+        return (x / rms) * self.weight
 
 
 class RotaryEmbedding(nn.Module):
-    def __init__(self, dim_head: int, max_seq_len: int = 3000, base: float = 10000.0):
+    def __init__(self, dim_head: int, base: float = 10000.0, max_seq_len: int = 3000):
         super().__init__()
         self.dim_head = dim_head
-        self.max_seq_len = max_seq_len
         self.base = base
+        self.max_seq_len = max_seq_len
 
-        cos, sin = self._precompute_rotary_embeddings(max_seq_len, dim_head, base)
+        cos, sin = self._precompute_rotary_embeddings(dim_head, base, max_seq_len)
 
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
-    def _precompute_rotary_embeddings(self, dim_head: int, max_seq_len: int, base: float):
+    def _precompute_rotary_embeddings(self, dim_head: int, base: float, max_seq_len: int):
         pair_indices = torch.arange(0, dim_head, 2, dtype=torch.float32) # equals already 2i
         thetas = 1.0 / (base ** (pair_indices / dim_head))
         positions = torch.arange(max_seq_len, dtype=torch.float32)
@@ -244,7 +250,7 @@ class MultiHeadSelfAttention(nn.Module):
         )
 
         # [B, heads, P, dim_head] -> [B, P, heads, dim_head] -> [B, P, dim_hidden]
-        out = out. transpose(1, 2).contiguous(). view(B, P, -1)
+        out = out.transpose(1, 2).contiguous().view(B, P, -1)
         
         out = self.to_out(out)
 
