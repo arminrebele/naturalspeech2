@@ -3,12 +3,13 @@ from torch.nn.utils.rnn import pad_sequence
 
 
 def expand_phoneme_encodings(
-    phoneme_encodings: torch.Tensor,  # [B, P, H]  # TODO: check shape of phoneme_encodings when implemented
+    phoneme_encodings: torch.Tensor,  # [B, H, P]
     durations: torch.Tensor,          # [B, P]
 ):
     """
     
     """
+    phoneme_encodings = phoneme_encodings.transpose(1, 2)  # [B, P, H]
     B, P, H = phoneme_encodings.shape
     device = phoneme_encodings.device
     durations = durations.to(torch.long)
@@ -32,6 +33,8 @@ def expand_phoneme_encodings(
 
     frame_idx = torch.arange(F_max, device=device).unsqueeze(0)     # [1, F_max]
     frame_mask = (frame_idx < frame_lengths.unsqueeze(1)).unsqueeze(1)  # [B, 1, F_max]
+
+    expanded_phoneme_encodings = expanded_phoneme_encodings.transpose(1, 2)  # [B, H, F_max]
 
     return expanded_phoneme_encodings, frame_mask, frame_lengths
 
