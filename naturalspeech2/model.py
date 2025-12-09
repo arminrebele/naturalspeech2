@@ -111,7 +111,7 @@ class NaturalSpeech2Model(nn.Module):
             durations,
         )
 
-        audio_latents = self.encodec.get_latents(audio)
+        audio_latents = self.encodec.get_latents(audio) # (B, D=128, F)
 
 
         #### Compute Losses ####
