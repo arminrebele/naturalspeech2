@@ -33,9 +33,6 @@ Implementation follows Andrej Karpathy's nanoChat approach, applying RoPE on con
 rather than interleaved pairs, to avoid the rotate_half shuffle overhead.
 """
 
-
-
-from json import encoder
 import torch
 from torch import nn
 import torch.nn.functional as F
