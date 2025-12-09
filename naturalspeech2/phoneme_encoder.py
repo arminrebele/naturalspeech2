@@ -274,10 +274,12 @@ class Conv1DFeedForward(nn.Module):
         self.conv2 = nn.Conv1d(conv1d_filter_size, dim_hidden, 1)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x):
-        
-        # [B, P, dim_hidden] -> [B, dim_hidden, P]
-        x = x.transpose(1, 2)
+    def forward(self, x, mask):
+        # x: [B, P, dim_hidden]
+        # mask: [B, 1, P]
+
+        x = x.transpose(1, 2)      # [B, dim_hidden, P]
+        x = x.masked_fill(~mask, 0.0)  # mask: [B, 1, P]
         
         x = self.conv1(x)
         x = F.silu(x)
