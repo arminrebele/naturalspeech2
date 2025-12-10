@@ -79,6 +79,8 @@ class NaturalSpeech2Model(nn.Module):
         self.forward_sum_loss = ForwardSumLoss()
         self.bin_loss = BinLoss()
 
+        self.speech_prompt_encoder = SpeechPromptEncoder()
+
     @staticmethod
     def _expand_phoneme_encodings(
         phoneme_encodings: torch.Tensor,  # [B, H, P]
@@ -162,7 +164,18 @@ class NaturalSpeech2Model(nn.Module):
         prompt_latents_lengths = torch.tensor([p.shape[-1] for p in prompt_latents], device=device)
         target_latents_lengths = torch.tensor([t.shape[-1] for t in target_latents], device=device)
 
-        return prompt_latents_padded, prompt_latents_lengths, target_latents_padded, target_latents_lengths
+        # create masks from lengths
+        prompt_max_len = prompt_latents_padded.shape[-1]
+        target_max_len = target_latents_padded.shape[-1]
+        
+        prompt_idx = torch.arange(prompt_max_len, device=device).unsqueeze(0)  # [1, F]
+        prompt_latents_mask = (prompt_idx < prompt_latents_lengths.unsqueeze(1)).unsqueeze(1)  # [B, 1, F]
+        
+        target_idx = torch.arange(target_max_len, device=device).unsqueeze(0)  # [1, F]
+        target_latents_mask = (target_idx < target_latents_lengths.unsqueeze(1)).unsqueeze(1)  # [B, 1, F]
+
+        return (prompt_latents_padded, prompt_latents_mask, prompt_latents_lengths,
+                target_latents_padded, target_latents_mask, target_latents_lengths)
 
 
     def forward(
@@ -203,12 +216,21 @@ class NaturalSpeech2Model(nn.Module):
 
         audio_latents = self.encodec.get_latents(audio) # (B, D=128, F)
 
-        prompt_latents, prompt_latents_lengths, target_latents, target_latents_lengths = self._generate_prompt_and_targets(
+        prompt_latents, prompt_latents_mask, prompt_latents_lengths, target_latents, target_latents_mask, target_latents_lengths = self._generate_prompt_and_targets(
             audio_latents,
             audio_lengths,
             self.min_prompt_pct,
             self.max_prompt_pct,
             self.hop_length
+        )
+        # prompt_latents: [B, D, F]             # target_latents: [B, D, F]
+        # prompt_latents_mask: [B, 1, F]        # target_latents_mask: [B, 1, F]
+        # prompt_latents_lengths: [B]           # target_latents_lengths: [B]
+
+        prompt_encodings = self.speech_prompt_encoder(
+            prompt_latents,
+            prompt_latents_mask,
+            prompt_latents_lengths
         )
 
 
