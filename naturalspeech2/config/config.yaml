@@ -41,3 +41,12 @@ model:
     attn_channels: 80
     temperature: 0.0005
     prior_w: 1.0
+
+  # Modul: Speech Prompt Encoder
+  speech_prompt_encoder:
+    transformer_layers: 6
+    attention_heads: 8
+    conv1d_filter_size: 2048
+    conv1_kernel_size: 9
+    dropout: 0.2
+
