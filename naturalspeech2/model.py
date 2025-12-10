@@ -119,7 +119,7 @@ class NaturalSpeech2Model(nn.Module):
         return expanded_phoneme_encodings, frame_mask, frame_lengths
 
     @staticmethod
-    def _generate_prompt_and_targets(self, audio_latents, audio_lengths, min_prompt_pct, max_prompt_pct, hop_length):
+    def _generate_prompt_and_targets(audio_latents, audio_lengths, min_prompt_pct, max_prompt_pct, hop_length):
         """
         audio_latents: [B, D, F]
         """
