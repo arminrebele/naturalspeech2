@@ -39,8 +39,6 @@ class NaturalSpeech2Model(nn.Module):
                  aligner_attn_channels: int = 80,
                  aligner_temperature: float = 0.0005,
                  prior_w: float = 1.0,
-
-                 **kwargs
     ):
         super().__init__()
         self.min_prompt_pct = min_prompt_pct
