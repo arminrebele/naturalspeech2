@@ -86,7 +86,16 @@ class NaturalSpeech2Model(nn.Module):
         self.forward_sum_loss = ForwardSumLoss()
         self.bin_loss = BinLoss()
 
-        self.speech_prompt_encoder = SpeechPromptEncoder()
+        self.speech_prompt_encoder = SpeechPromptEncoder(
+            dim_hidden=dim_hidden,
+            transformer_layers=speech_prompt_encoder_layers,
+            attention_heads=speech_prompt_encoder_heads,
+            conv1d_filter_size=speech_prompt_encoder_filter_size,
+            conv1d_kernel_size=speech_prompt_encoder_kernel_size,
+            dropout=speech_prompt_encoder_dropout,
+            rope_base=rope_base,
+            rope_max_seq_len=rope_max_seq_len,
+        )
 
     @staticmethod
     def _expand_phoneme_encodings(
