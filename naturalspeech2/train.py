@@ -60,6 +60,13 @@ def train(cfg: DictConfig):
         'aligner_attn_channels': cfg.model.aligner.attn_channels,
         'aligner_temperature': cfg.model.aligner.temperature,
         'prior_w': cfg.model.aligner.prior_w,
+
+        # Speech Prompt Encoder parameters
+        'speech_prompt_encoder_layers': cfg.model.speech_prompt_encoder.transformer_layers,
+        'speech_prompt_encoder_heads': cfg.model.speech_prompt_encoder.attention_heads,
+        'speech_prompt_encoder_filter_size': cfg.model.speech_prompt_encoder.conv1d_filter_size,
+        'speech_prompt_encoder_kernel_size': cfg.model.speech_prompt_encoder.conv1d_kernel_size,
+        'speech_prompt_encoder_dropout': cfg.model.speech_prompt_encoder.dropout,
     }
 
     model = NaturalSpeech2Model(**model_args).to(device)
