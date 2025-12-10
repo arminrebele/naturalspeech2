@@ -39,6 +39,13 @@ class NaturalSpeech2Model(nn.Module):
                  aligner_attn_channels: int = 80,
                  aligner_temperature: float = 0.0005,
                  prior_w: float = 1.0,
+
+                 # Speech Prompt Encoder parameters
+                 speech_prompt_encoder_layers: int = 6,
+                 speech_prompt_encoder_heads: int = 8,
+                 speech_prompt_encoder_filter_size: int = 2048,
+                 speech_prompt_encoder_kernel_size: int = 9,
+                 speech_prompt_encoder_dropout: float = 0.2,
     ):
         super().__init__()
         self.min_prompt_pct = min_prompt_pct
