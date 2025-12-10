@@ -6,7 +6,6 @@ from naturalspeech2.encodec import EncodecWrapper
 from naturalspeech2.log_mel_spectrogram import LogMelSpectrogramGenerator
 from naturalspeech2.phoneme_encoder import PhonemeEncoder
 from naturalspeech2.aligner import Aligner, ForwardSumLoss, BinLoss
-from naturalspeech2.utils.utils import expand_phoneme_encodings
 from naturalspeech2.speech_prompt_encoder import SpeechPromptEncoder
 
 
@@ -82,6 +81,44 @@ class NaturalSpeech2Model(nn.Module):
         self.forward_sum_loss = ForwardSumLoss()
         self.bin_loss = BinLoss()
 
+    @staticmethod
+    def _expand_phoneme_encodings(
+        phoneme_encodings: torch.Tensor,  # [B, H, P]
+        durations: torch.Tensor,          # [B, P]
+    ):
+        """
+        
+        """
+        phoneme_encodings = phoneme_encodings.transpose(1, 2)  # [B, P, H]
+        B, P, H = phoneme_encodings.shape
+        device = phoneme_encodings.device
+        durations = durations.to(torch.long)
+        
+        expanded_phoneme_encodings_list = []
+        frame_lengths = []
+
+        for b in range(B):
+            durations_b = durations[b]          # [P]
+            phoneme_encodings_b = phoneme_encodings[b]    # [P, H]
+
+            expanded_phoneme_encodings_b = torch.repeat_interleave(phoneme_encodings_b, durations_b, dim=0)  # [T_b, H]
+
+            expanded_phoneme_encodings_list.append(expanded_phoneme_encodings_b)
+            frame_lengths.append(expanded_phoneme_encodings_b.shape[0])
+
+        frame_lengths = torch.tensor(frame_lengths, device=device, dtype=torch.long)  # [B]
+
+        expanded_phoneme_encodings = pad_sequence(expanded_phoneme_encodings_list, batch_first=True)  # [B, T_max, H]
+        F_max = expanded_phoneme_encodings.shape[1]
+
+        frame_idx = torch.arange(F_max, device=device).unsqueeze(0)     # [1, F_max]
+        frame_mask = (frame_idx < frame_lengths.unsqueeze(1)).unsqueeze(1)  # [B, 1, F_max]
+
+        expanded_phoneme_encodings = expanded_phoneme_encodings.transpose(1, 2)  # [B, H, F_max]
+
+        return expanded_phoneme_encodings, frame_mask, frame_lengths
+
+    @staticmethod
     def _generate_prompt_and_targets(self, audio_latents, audio_lengths, min_prompt_pct, max_prompt_pct, hop_length):
         """
         audio_latents: [B, D, F]
@@ -161,7 +198,7 @@ class NaturalSpeech2Model(nn.Module):
             phoneme_tokens_lengths,
         )
 
-        expanded_phoneme_encodings, frame_mask_expanded, frame_lengths_expanded = expand_phoneme_encodings(
+        expanded_phoneme_encodings, frame_mask_expanded, frame_lengths_expanded = self._expand_phoneme_encodings(
             phoneme_encodings,
             durations,
         )
