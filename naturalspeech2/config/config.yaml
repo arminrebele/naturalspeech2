@@ -17,6 +17,8 @@ model:
   dim_hidden: 512
   rope_base: 10000.0
   rope_max_seq_len: 3000
+  min_prompt_pct: 0.2        # minimum percentage of the audio used as prompt (only training)
+  max_prompt_pct: 0.5        # maximum percentage of the audio used as prompt (only training)
 
   # Modul: Log Mel Spectrogram Generator
   mel:
