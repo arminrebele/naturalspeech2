@@ -127,8 +127,8 @@ class NaturalSpeech2Model(nn.Module):
         downsample_factor = hop_length
         audio_latents_lengths = (audio_lengths / downsample_factor).ceil().long()
 
-        audio_prompt_latents = []
-        audio_target_latents = []
+        prompt_latents = []
+        target_latents = []
 
         for i in range(B):
             audio_latents_length = audio_latents_lengths[i].item()
@@ -152,17 +152,17 @@ class NaturalSpeech2Model(nn.Module):
                 audio_latents_without_padding[:, prompt_end:]
             ], dim=-1)
 
-            audio_prompt_latents.append(prompt)
-            audio_target_latents.append(target)
+            prompt_latents.append(prompt)
+            target_latents.append(target)
         
         # [D, F] -> .t() -> [F, D] -> pad_sequence -> [B, F, D] -> transpose -> [B, D, F]
-        audio_prompt_latents_padded = pad_sequence([p.t() for p in audio_prompt_latents], batch_first=True).transpose(1, 2)
-        audio_target_latents_padded = pad_sequence([t.t() for t in audio_target_latents], batch_first=True).transpose(1, 2)
+        prompt_latents_padded = pad_sequence([p.t() for p in prompt_latents], batch_first=True).transpose(1, 2)
+        target_latents_padded = pad_sequence([t.t() for t in target_latents], batch_first=True).transpose(1, 2)
         
-        audio_prompt_latents_lengths = torch.tensor([p.shape[-1] for p in audio_prompt_latents], device=device)
-        audio_target_latents_lengths = torch.tensor([t.shape[-1] for t in audio_target_latents], device=device)
+        prompt_latents_lengths = torch.tensor([p.shape[-1] for p in prompt_latents], device=device)
+        target_latents_lengths = torch.tensor([t.shape[-1] for t in target_latents], device=device)
 
-        return audio_prompt_latents_padded, audio_prompt_latents_lengths, audio_target_latents_padded, audio_target_latents_lengths
+        return prompt_latents_padded, prompt_latents_lengths, target_latents_padded, target_latents_lengths
 
 
     def forward(
@@ -203,7 +203,7 @@ class NaturalSpeech2Model(nn.Module):
 
         audio_latents = self.encodec.get_latents(audio) # (B, D=128, F)
 
-        audio_prompt_latents, audio_prompt_latents_lengths, audio_target_latents, audio_target_latents_lengths = self._generate_prompt_and_targets(
+        prompt_latents, prompt_latents_lengths, target_latents, target_latents_lengths = self._generate_prompt_and_targets(
             audio_latents,
             audio_lengths,
             self.min_prompt_pct,
