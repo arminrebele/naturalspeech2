@@ -39,6 +39,8 @@ def train(cfg: DictConfig):
         'sampling_rate': cfg.data.sampling_rate,
         'rope_base': cfg.model.rope_base,
         'rope_max_seq_len': cfg.model.rope_max_seq_len,
+        'min_prompt_pct': cfg.model.min_prompt_pct,
+        'max_prompt_pct': cfg.model.max_prompt_pct,
 
         # Log Mel Spectrogram parameters
         'n_fft': cfg.model.mel.n_fft,
