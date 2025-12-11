@@ -68,6 +68,13 @@ def train(cfg: DictConfig):
         'speech_prompt_encoder_filter_size': cfg.model.speech_prompt_encoder.conv1d_filter_size,
         'speech_prompt_encoder_kernel_size': cfg.model.speech_prompt_encoder.conv1d_kernel_size,
         'speech_prompt_encoder_dropout': cfg.model.speech_prompt_encoder.dropout,
+
+        # Duration Predictor parameters
+        'duration_predictor_conv1d_layers': cfg.model.duration_predictor.conv1d_layers,
+        'duration_predictor_conv1d_kernel_size': cfg.model.duration_predictor.conv1d_kernel_size,
+        'duration_predictor_attention_layers': cfg.model.duration_predictor.attention_layers,
+        'duration_predictor_attention_heads': cfg.model.duration_predictor.attention_heads,
+        'duration_predictor_dropout': cfg.model.duration_predictor.dropout,
     }
 
     model = NaturalSpeech2Model(**model_args).to(device)
