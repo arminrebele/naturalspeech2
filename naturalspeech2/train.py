@@ -36,9 +36,12 @@ def train(cfg: DictConfig):
         'device': device,
         'token_vocabulary_size': token_vocabulary_size,
         'dim_hidden': cfg.model.dim_hidden,
+        'dim_latents': cfg.model.dim_latents,
         'sampling_rate': cfg.data.sampling_rate,
         'rope_base': cfg.model.rope_base,
         'rope_max_seq_len': cfg.model.rope_max_seq_len,
+        'min_prompt_pct': cfg.model.min_prompt_pct,
+        'max_prompt_pct': cfg.model.max_prompt_pct,
 
         # Log Mel Spectrogram parameters
         'n_fft': cfg.model.mel.n_fft,
@@ -58,6 +61,13 @@ def train(cfg: DictConfig):
         'aligner_attn_channels': cfg.model.aligner.attn_channels,
         'aligner_temperature': cfg.model.aligner.temperature,
         'prior_w': cfg.model.aligner.prior_w,
+
+        # Speech Prompt Encoder parameters
+        'speech_prompt_encoder_layers': cfg.model.speech_prompt_encoder.transformer_layers,
+        'speech_prompt_encoder_heads': cfg.model.speech_prompt_encoder.attention_heads,
+        'speech_prompt_encoder_filter_size': cfg.model.speech_prompt_encoder.conv1d_filter_size,
+        'speech_prompt_encoder_kernel_size': cfg.model.speech_prompt_encoder.conv1d_kernel_size,
+        'speech_prompt_encoder_dropout': cfg.model.speech_prompt_encoder.dropout,
     }
 
     model = NaturalSpeech2Model(**model_args).to(device)
