@@ -7,6 +7,7 @@ from naturalspeech2.log_mel_spectrogram import LogMelSpectrogramGenerator
 from naturalspeech2.phoneme_encoder import PhonemeEncoder
 from naturalspeech2.aligner import Aligner, ForwardSumLoss, BinLoss
 from naturalspeech2.speech_prompt_encoder import SpeechPromptEncoder
+from naturalspeech2.duration_predictor import DurationPredictor
 
 
 class NaturalSpeech2Model(nn.Module):
@@ -47,6 +48,13 @@ class NaturalSpeech2Model(nn.Module):
                  speech_prompt_encoder_filter_size: int = 2048,
                  speech_prompt_encoder_kernel_size: int = 9,
                  speech_prompt_encoder_dropout: float = 0.2,
+
+                 # Duration Predictor parameters
+                 duration_predictor_conv1d_layers: int = 30,
+                 duration_predictor_conv1d_kernel_size: int = 3,
+                 duration_predictor_attention_layers: int = 10,
+                 duration_predictor_attention_heads: int = 8,
+                 duration_predictor_dropout: float = 0.5,
     ):
         super().__init__()
         self.min_prompt_pct = min_prompt_pct
