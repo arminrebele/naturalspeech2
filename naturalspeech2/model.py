@@ -217,14 +217,16 @@ class NaturalSpeech2Model(nn.Module):
             phoneme_tokens_mask,
             phoneme_tokens_lengths
         )
+        phoneme_encodings_mask = phoneme_tokens_mask
+        phoneme_encodings_lengths = phoneme_tokens_lengths
 
         durations, alignment_hard, alignment_soft, alignment_logprobs, attn_mask, alignment_logits_with_prior = self.aligner(
             audio_encodings,
             frame_mask,
             frame_lengths,
             phoneme_encodings,
-            phoneme_tokens_mask,
-            phoneme_tokens_lengths,
+            phoneme_encodings_mask,
+            phoneme_encodings_lengths,
         )
 
         expanded_phoneme_encodings, frame_mask_expanded, frame_lengths_expanded = self._expand_phoneme_encodings(
@@ -250,6 +252,8 @@ class NaturalSpeech2Model(nn.Module):
             prompt_latents_mask,
             prompt_latents_lengths
         )
+        prompt_encodings_mask = prompt_latents_mask
+        prompt_encodings_lengths = prompt_latents_lengths
 
 
         #### Compute Losses ####
