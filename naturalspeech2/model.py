@@ -236,6 +236,9 @@ class NaturalSpeech2Model(nn.Module):
         )
         phoneme_encodings_mask = phoneme_tokens_mask
         phoneme_encodings_lengths = phoneme_tokens_lengths
+        # phoneme_encodings: [B, dim_hidden, P]
+        # phoneme_encodings_mask: [B, 1, P]
+        # phoneme_encodings_lengths: [B]
 
         durations, alignment_hard, alignment_soft, alignment_logprobs, attn_mask, alignment_logits_with_prior = self.aligner(
             audio_encodings,
@@ -260,9 +263,9 @@ class NaturalSpeech2Model(nn.Module):
             self.max_prompt_pct,
             self.hop_length
         )
-        # prompt_latents: [B, D, F]             # target_latents: [B, D, F]
-        # prompt_latents_mask: [B, 1, F]        # target_latents_mask: [B, 1, F]
-        # prompt_latents_lengths: [B]           # target_latents_lengths: [B]
+        # prompt_latents: [B, dim_hidden, F]             # target_latents: [B, dim_hidden, F]
+        # prompt_latents_mask: [B, 1, F]                 # target_latents_mask: [B, 1, F]
+        # prompt_latents_lengths: [B]                    # target_latents_lengths: [B]
 
         prompt_encodings = self.speech_prompt_encoder(
             prompt_latents,
@@ -271,6 +274,9 @@ class NaturalSpeech2Model(nn.Module):
         )
         prompt_encodings_mask = prompt_latents_mask
         prompt_encodings_lengths = prompt_latents_lengths
+        # prompt_encodings: [B, dim_hidden, F]
+        # prompt_encodings_mask: [B, 1, F]
+        # prompt_encodings_lengths: [B]
 
 
         #### Compute Losses ####
