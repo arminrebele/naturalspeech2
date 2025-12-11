@@ -15,6 +15,7 @@ data:
 model:
   # global model parameters
   dim_hidden: 512
+  dim_latents: 128
   rope_base: 10000.0
   rope_max_seq_len: 3000
   min_prompt_pct: 0.2        # minimum percentage of the audio used as prompt (only training)
