@@ -107,6 +107,15 @@ class NaturalSpeech2Model(nn.Module):
             rope_max_seq_len=rope_max_seq_len,
         )
 
+        self.duration_predictor = DurationPredictor(
+            dim_hidden=dim_hidden,
+            conv1d_layers=duration_predictor_conv1d_layers,
+            conv1d_kernel_size=duration_predictor_conv1d_kernel_size,
+            attention_layers=duration_predictor_attention_layers,
+            attention_heads=duration_predictor_attention_heads,
+            dropout=duration_predictor_dropout,
+        )
+
     @staticmethod
     def _expand_phoneme_encodings(
         phoneme_encodings: torch.Tensor,  # [B, H, P]
