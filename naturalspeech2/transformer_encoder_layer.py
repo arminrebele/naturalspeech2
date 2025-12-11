@@ -41,11 +41,11 @@ class TransformerEncoderLayer(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, x, phoneme_tokens_mask):
-        attn_out = self.multi_head_attention(self.norm1(x), phoneme_tokens_mask)
+    def forward(self, x, mask):
+        attn_out = self.multi_head_attention(self.norm1(x), mask)
         x = x + self.dropout(attn_out)
 
-        ffn_out = self.conv1d_feed_forward(self.norm2(x), phoneme_tokens_mask)
+        ffn_out = self.conv1d_feed_forward(self.norm2(x), mask)
         x = x + self.dropout(ffn_out)
 
         return x
