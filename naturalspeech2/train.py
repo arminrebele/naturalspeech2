@@ -36,6 +36,7 @@ def train(cfg: DictConfig):
         'device': device,
         'token_vocabulary_size': token_vocabulary_size,
         'dim_hidden': cfg.model.dim_hidden,
+        'dim_latents': cfg.model.dim_latents,
         'sampling_rate': cfg.data.sampling_rate,
         'rope_base': cfg.model.rope_base,
         'rope_max_seq_len': cfg.model.rope_max_seq_len,

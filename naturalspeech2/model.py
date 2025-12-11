@@ -15,6 +15,7 @@ class NaturalSpeech2Model(nn.Module):
                  device: str = "cpu",
                  token_vocabulary_size: int = None,
                  dim_hidden: int = 512,
+                 dim_latents: int = 128,
                  sampling_rate: int = 24000,
                  rope_base: float = 10000.0,
                  rope_max_seq_len: int = 3000,
@@ -88,6 +89,7 @@ class NaturalSpeech2Model(nn.Module):
 
         self.speech_prompt_encoder = SpeechPromptEncoder(
             dim_hidden=dim_hidden,
+            dim_latents=dim_latents,
             transformer_layers=speech_prompt_encoder_layers,
             attention_heads=speech_prompt_encoder_heads,
             conv1d_filter_size=speech_prompt_encoder_filter_size,
