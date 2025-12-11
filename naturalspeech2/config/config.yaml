@@ -15,8 +15,11 @@ data:
 model:
   # global model parameters
   dim_hidden: 512
+  dim_latents: 128
   rope_base: 10000.0
   rope_max_seq_len: 3000
+  min_prompt_pct: 0.2        # minimum percentage of the audio used as prompt (only training)
+  max_prompt_pct: 0.5        # maximum percentage of the audio used as prompt (only training)
 
   # Modul: Log Mel Spectrogram Generator
   mel:
@@ -39,3 +42,12 @@ model:
     attn_channels: 80
     temperature: 0.0005
     prior_w: 1.0
+
+  # Modul: Speech Prompt Encoder
+  speech_prompt_encoder:
+    transformer_layers: 6
+    attention_heads: 8
+    conv1d_filter_size: 2048
+    conv1_kernel_size: 9
+    dropout: 0.2
+
