@@ -45,11 +45,11 @@ class TransformerEncoderLayer(nn.Module):
         qmask = mask.transpose(1, 2).to(x.dtype)  # [B, P, 1]
 
         attn_out = self.multi_head_attention(self.norm1(x), mask)
-        x = x + self.dropout(attn_out)
+        x = x + self.dropout(attn_out) # EVALUATE: maybe additional dropout here to aggressive, lower value / drop completly
         x = x * qmask # padding token vector to zero
 
         ffn_out = self.conv1d_feed_forward(self.norm2(x), mask)
-        x = x + self.dropout(ffn_out)
+        x = x + self.dropout(ffn_out) # EVALUATE: maybe additional dropout here to aggressive, lower value / drop completly
         x = x * qmask # padding token vector to zero
 
         return x
