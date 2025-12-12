@@ -223,7 +223,7 @@ class Conv1DFeedForward(nn.Module):
         padding = (conv1d_kernel_size - 1) // 2
         self.conv1 = nn.Conv1d(dim_hidden, conv1d_filter_size, conv1d_kernel_size, padding=padding)
         self.conv2 = nn.Conv1d(conv1d_filter_size, dim_hidden, 1)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout1d(dropout)
 
     def forward(self, x, mask):
         # x: [B, P, dim_hidden]
