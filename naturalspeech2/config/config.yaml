@@ -14,8 +14,8 @@ data:
 
 model:
   # global model parameters
-  dim_hidden: 512
-  dim_latents: 128
+  hidden_dim: 512
+  latent_dim: 128
   rope_base: 10000.0
   rope_max_seq_len: 3000
   min_prompt_pct: 0.2        # minimum percentage of the audio used as prompt (only training)
@@ -34,7 +34,7 @@ model:
     transformer_layers: 6
     attention_heads: 8
     conv1d_filter_size: 2048
-    conv1_kernel_size: 9
+    conv1d_kernel_size: 9
     dropout: 0.2
 
   # Aligner
@@ -48,7 +48,7 @@ model:
     transformer_layers: 6
     attention_heads: 8
     conv1d_filter_size: 2048
-    conv1_kernel_size: 9
+    conv1d_kernel_size: 9
     dropout: 0.2
 
   # Duration Predictor
