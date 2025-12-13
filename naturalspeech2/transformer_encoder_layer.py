@@ -231,22 +231,24 @@ class MultiHeadSelfAttention(nn.Module):
 class Conv1DFeedForward(nn.Module):
     def __init__(
             self,
-            dim_hidden: int,
+            hidden_dim: int,
             conv1d_filter_size: int,
             conv1d_kernel_size: int,
             dropout: float,
     ):
         super().__init__()
         padding = (conv1d_kernel_size - 1) // 2
-        self.conv1 = nn.Conv1d(dim_hidden, conv1d_filter_size, conv1d_kernel_size, padding=padding)
-        self.conv2 = nn.Conv1d(conv1d_filter_size, dim_hidden, 1)
+
+        self.conv1 = nn.Conv1d(hidden_dim, conv1d_filter_size, conv1d_kernel_size, padding=padding)
         self.dropout = nn.Dropout1d(dropout)
+        self.conv2 = nn.Conv1d(conv1d_filter_size, hidden_dim, 1)
 
-    def forward(self, x, mask):
-        # x: [B, P, dim_hidden]
-        # mask: [B, 1, P]
-
-        x = x.transpose(1, 2)      # [B, dim_hidden, P]
+    def forward(
+            self, 
+            x,    # [B, T, D]
+            mask  # [B, 1, T]
+    ):
+        x = rearrange(x, 'b t d -> b d t')  # [B, D, T]
         x = x.masked_fill(~mask, 0.0)  # mask: [B, 1, P]
         
         x = self.conv1(x)
@@ -255,6 +257,6 @@ class Conv1DFeedForward(nn.Module):
         
         x = self.conv2(x)
         
-        x = x.transpose(1, 2)  # [B, P, dim_hidden]
+        x = rearrange(x, 'b d t -> b t d')  # [B, T, D]
         
         return x
