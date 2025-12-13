@@ -10,7 +10,7 @@ class PhonemeEncoder(nn.Module):
     def __init__(
             self,
             token_vocabulary_size: int = None,
-            dim_hidden: int = 512,
+            hidden_dim: int = 512,
             transformer_layers: int = 6,
             attention_heads: int = 8,
             conv1d_filter_size: int = 2048,
@@ -20,12 +20,12 @@ class PhonemeEncoder(nn.Module):
             rope_max_seq_len: int = 3000,
     ):
         super().__init__()
-        self.dim_hidden = dim_hidden
-        self.token_embedding = nn.Embedding(token_vocabulary_size, dim_hidden, padding_idx=0)
+        self.hidden_dim = hidden_dim
+        self.token_embedding = nn.Embedding(token_vocabulary_size, hidden_dim, padding_idx=0)
 
         self.transformer_layers = nn.ModuleList([
             TransformerEncoderLayer(
-                dim_hidden,
+                hidden_dim,
                 attention_heads,
                 conv1d_filter_size, 
                 conv1d_kernel_size, 
@@ -36,7 +36,7 @@ class PhonemeEncoder(nn.Module):
             for _ in range(transformer_layers)
         ])
 
-        self.final_norm = RMSNorm(dim_hidden)
+        self.final_norm = RMSNorm(hidden_dim)
 
     def forward(
             self,
@@ -44,14 +44,14 @@ class PhonemeEncoder(nn.Module):
             phoneme_tokens_mask: torch.Tensor,
             phoneme_tokens_lengths: torch.Tensor,
     ):
-        x = self.token_embedding(phoneme_tokens) # [B, P, dim_hidden]
+        x = self.token_embedding(phoneme_tokens) # [B, P, hidden_dim]
 
         for layer in self.transformer_layers:
             x = layer(x, phoneme_tokens_mask)
         
         x = self.final_norm(x)
 
-        x = x.transpose(1, 2)  # [B, dim_hidden, P]
+        x = x.transpose(1, 2)  # [B, hidden_dim, P]
         
         return x
 
@@ -67,7 +67,7 @@ if __name__ == "__main__":
 
     phoneme_encoder = PhonemeEncoder(
         token_vocabulary_size=vocab_size,
-        dim_hidden=512,
+        hidden_dim=512,
         transformer_layers=6,
         attention_heads=8,
         conv1d_filter_size=2048,
@@ -109,7 +109,7 @@ if __name__ == "__main__":
     with torch.no_grad():
         output = phoneme_encoder(phoneme_tokens, phoneme_tokens_mask, phoneme_tokens_lengths)
     
-    print(f"\nOutput shape: {output.shape}")  # Expected: [B, dim_hidden, P]
+    print(f"\nOutput shape: {output.shape}")  # Expected: [B, hidden_dim, P]
     
     # Verify output values
     print(f"\nOutput statistics:")
