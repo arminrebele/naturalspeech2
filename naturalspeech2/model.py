@@ -15,8 +15,8 @@ class NaturalSpeech2Model(nn.Module):
                  # global parameters
                  device: str = "cpu",
                  token_vocabulary_size: int = None,
-                 dim_hidden: int = 512,
-                 dim_latents: int = 128,
+                 hidden_dim: int = 512,
+                 latent_dim: int = 128,
                  sampling_rate: int = 24000,
                  rope_base: float = 10000.0,
                  rope_max_seq_len: int = 3000,
@@ -74,7 +74,7 @@ class NaturalSpeech2Model(nn.Module):
 
         self.phoneme_encoder = PhonemeEncoder(
             token_vocabulary_size=token_vocabulary_size,
-            dim_hidden=dim_hidden,
+            hidden_dim=hidden_dim,
             transformer_layers=phoneme_encoder_layers,
             attention_heads=phoneme_encoder_heads,
             conv1d_filter_size=phoneme_encoder_filter_size,
@@ -86,7 +86,7 @@ class NaturalSpeech2Model(nn.Module):
 
         self.aligner = Aligner(
             dim_audio=n_mels,
-            dim_hidden=dim_hidden,
+            hidden_dim=hidden_dim,
             attn_channels=aligner_attn_channels,
             temperature=aligner_temperature,
             prior_w=prior_w,
@@ -96,8 +96,8 @@ class NaturalSpeech2Model(nn.Module):
         self.bin_loss = BinLoss()
 
         self.speech_prompt_encoder = SpeechPromptEncoder(
-            dim_hidden=dim_hidden,
-            dim_latents=dim_latents,
+            hidden_dim=hidden_dim,
+            latent_dim=latent_dim,
             transformer_layers=speech_prompt_encoder_layers,
             attention_heads=speech_prompt_encoder_heads,
             conv1d_filter_size=speech_prompt_encoder_filter_size,
@@ -108,7 +108,7 @@ class NaturalSpeech2Model(nn.Module):
         )
 
         self.duration_predictor = DurationPredictor(
-            dim_hidden=dim_hidden,
+            hidden_dim=hidden_dim,
             conv1d_layers=duration_predictor_conv1d_layers,
             conv1d_kernel_size=duration_predictor_conv1d_kernel_size,
             attention_layers=duration_predictor_attention_layers,
@@ -278,6 +278,10 @@ class NaturalSpeech2Model(nn.Module):
         # prompt_encodings_mask: [B, 1, F]
         # prompt_encodings_lengths: [B]
 
+        duration_predictor_durations = self.duration_predictor(
+            phoneme_encodings,
+            phoneme_encodings_mask,
+        )
 
         #### Compute Losses ####
         
