@@ -2,6 +2,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+from einops import rearrange
+
 
 class TransformerEncoderLayer(nn.Module):
     """
@@ -10,7 +12,7 @@ class TransformerEncoderLayer(nn.Module):
     """
     def __init__(
             self,
-            dim_hidden: int,
+            hidden_dim: int,
             attention_heads: int,
             conv1d_filter_size: int,
             conv1d_kernel_size: int,
@@ -20,20 +22,20 @@ class TransformerEncoderLayer(nn.Module):
     ):
         super().__init__()
 
-        self.norm1 = RMSNorm(dim_hidden)
+        self.norm1 = RMSNorm(hidden_dim)
 
         self.multi_head_attention = MultiHeadSelfAttention(
-            dim_hidden,
+            hidden_dim,
             attention_heads,
             dropout,
             rope_base,
             rope_max_seq_len,
         )
 
-        self.norm2 = RMSNorm(dim_hidden)
+        self.norm2 = RMSNorm(hidden_dim)
 
         self.conv1d_feed_forward = Conv1DFeedForward(
-            dim_hidden,
+            hidden_dim,
             conv1d_filter_size,
             conv1d_kernel_size,
             dropout,
@@ -41,7 +43,11 @@ class TransformerEncoderLayer(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
         
-    def forward(self, x, mask):
+    def forward(
+            self, 
+            x, 
+            mask
+    ):
         qmask = mask.transpose(1, 2).to(x.dtype)  # [B, P, 1]
 
         attn_out = self.multi_head_attention(self.norm1(x), mask)
@@ -58,12 +64,19 @@ class RMSNorm(nn.Module):
     """
     x_norm = x / sqrt(mean(x^2) + eps) * gamma
     """
-    def __init__(self, dim_hidden: int, eps: float = 1e-8):
+    def __init__(
+            self,
+            hidden_dim: int, 
+            eps: float = 1e-8
+    ):
         super().__init__()
         self.eps = eps
-        self.weight = nn.Parameter(torch.ones(dim_hidden)) # gamma
+        self.weight = nn.Parameter(torch.ones(hidden_dim)) # gamma
     
-    def forward(self, x):
+    def forward(
+            self, 
+            x
+    ):
         rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
         return (x / rms) * self.weight
 
@@ -103,42 +116,53 @@ rather than interleaved pairs, to avoid the rotate_half shuffle overhead.
 """
 
 class RotaryEmbedding(nn.Module):
-    def __init__(self, dim_head: int, base: float = 10000.0, max_seq_len: int = 3000):
+    def __init__(
+            self, 
+            head_dim: int, 
+            base: float = 10000.0, 
+            max_seq_len: int = 3000
+    ):
         super().__init__()
-        self.dim_head = dim_head
+        self.head_dim = head_dim
         self.base = base
         self.max_seq_len = max_seq_len
 
-        cos, sin = self._precompute_rotary_embeddings(dim_head, base, max_seq_len)
-
+        cos, sin = self._precompute_rotary_embeddings(head_dim, base, max_seq_len)
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
 
-    def _precompute_rotary_embeddings(self, dim_head: int, base: float, max_seq_len: int):
-        pair_indices = torch.arange(0, dim_head, 2, dtype=torch.float32) # equals already 2i
-        thetas = 1.0 / (base ** (pair_indices / dim_head))
+    def _precompute_rotary_embeddings(
+            self, 
+            head_dim: int, 
+            base: float, 
+            max_seq_len: int
+    ):
+        pair_indices = torch.arange(0, head_dim, 2, dtype=torch.float32) # equals already 2i
+        thetas = 1.0 / (base ** (pair_indices / head_dim))
         positions = torch.arange(max_seq_len, dtype=torch.float32)
-        alphas = torch.outer(positions, thetas) # [max_seq_len x dim_head/2]
-
+        
+        alphas = torch.outer(positions, thetas) # [max_seq_len x head_dim/2]
+        
         cos = alphas.cos()
         sin = alphas.sin()
 
-        cos = cos[None, :, None, :] # [1, max_seq_len, 1, dim_head/2]
-        sin = sin[None, :, None, :] # [1, max_seq_len, 1, dim_head/2]
+        cos = rearrange(cos, 't d -> 1 1 t d') # [1, 1, max_seq_len, head_dim/2])
+        sin = rearrange(sin, 't d -> 1 1 t d') # [1, 1, max_seq_len, head_dim/2]
         
         return cos, sin
 
-    def forward(self, seq_len: int):
-        return self.cos[:, :seq_len], self.sin[:, :seq_len]
+    def forward(
+            self, 
+            seq_len: int
+    ):
+        return self.cos[:, :, :seq_len, :], self.sin[:, :, :seq_len, :] # each [1, 1, seq_len, head_dim/2]
 
 def apply_rotary_embeddings(
-        x,    # [B, P, heads, dim_head]
-        cos,  # [1, P, 1, dim_head/2]
-        sin,  # [1, P, 1, dim_head/2]
+        x,    # [B, num_heads, T, head_dim]
+        cos,  # [1, 1, T, head_dim/2]
+        sin,  # [1, 1, T, head_dim/2]
 ):
-    d = x.shape[-1] // 2
-    x1 = x[..., :d]  # [B, P, heads, dim_head/2]
-    x2 = x[..., d:]  # [B, P, heads, dim_head/2]
+    x1, x2 = x.chunk(2, dim=-1)  # each [B, num_heads, T, head_dim/2]
 
     y1 = x1 * cos - x2 * sin
     y2 = x1 * sin + x2 * cos
@@ -149,52 +173,44 @@ def apply_rotary_embeddings(
 class MultiHeadSelfAttention(nn.Module):
     def __init__(
             self,
-            dim_hidden: int,
+            hidden_dim: int,
             attention_heads: int,
             dropout: float,
             rope_base: float,
             rope_max_seq_len: int,
     ):
         super().__init__()
-        self.heads = attention_heads
-        self.dim_head = dim_hidden // attention_heads
+        self.num_heads = attention_heads
+        self.head_dim = hidden_dim // attention_heads
         self.dropout = dropout
-        self.to_qkv = nn.Linear(dim_hidden, dim_hidden * 3, bias=False)
-        self.to_out = nn.Linear(dim_hidden, dim_hidden, bias=False)
+        self.to_qkv = nn.Linear(hidden_dim, hidden_dim * 3, bias=False)
+        self.to_out = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
         self.rotary_embedding = RotaryEmbedding(
-            dim_head=self.dim_head,
+            head_dim =self.head_dim,
             base = rope_base,
             max_seq_len=rope_max_seq_len,
         )
 
-    def forward(self, x, mask):
-        B, P, dim_hidden = x.shape # [B, P, dim_hidden]
-        qkv = self.to_qkv(x) # [B, P, 3 * dim_hidden]
-        q, k, v = qkv.chunk(3, dim=-1) # each [B, P, dim_hidden]
+    def forward(
+            self, 
+            x,      # [B = batch_size, T = seq_len, D = hidden_dim]
+            mask    # [B, 1, T]
+    ):
+        qkv = self.to_qkv(x)            # [B, T, 3 * D]
+        q, k, v = qkv.chunk(3, dim=-1)  # each [B, T, D]
 
-        # reshape for multi-head attention
-        # [B, P, dim_hidden] -> [B, P, heads, dim_head]
-        q = q.view(B, P, self.heads, self.dim_head)
-        k = k.view(B, P, self.heads, self.dim_head)
-        v = v.view(B, P, self.heads, self.dim_head)
+        q = rearrange(q, 'b t (h d) -> b h t d', h=self.num_heads)
+        k = rearrange(k, 'b t (h d) -> b h t d', h=self.num_heads)
+        v = rearrange(v, 'b t (h d) -> b h t d', h=self.num_heads)
 
-        # apply RoPE to Q and K
-        cos, sin = self.rotary_embedding(P)
-        q = apply_rotary_embeddings(q, cos, sin) # [B, P, heads, dim_head]
-        k = apply_rotary_embeddings(k, cos, sin) # [B, P, heads, dim_head]
+        cos, sin = self.rotary_embedding(x.shape[1]) # # [1, T, 1, head_dim/2]
+        q = apply_rotary_embeddings(q, cos, sin) # [B, num_heads, T, head_dim]
+        k = apply_rotary_embeddings(k, cos, sin) # [B, num_heads, T, head_dim]
 
-        # transpose for scaled_dot_product_attention
-        # [B, P, heads, dim_head] -> [B, heads, P, dim_head]
-        q = q.transpose(1, 2)
-        k = k.transpose(1, 2)
-        v = v.transpose(1, 2)
-
-        # mask: [B, 1, P] mit True = gültig, False = Padding
         # scaled_dot_product_attention adds attn_mask to the scores
-        # Also: 0. 0 for valid tokens, -inf for padding
-        # [B, 1, P] -> [B, 1, 1, P] for broadcasting over heads and query positions
-        attn_mask = mask[:, :, None, :]  # [B, 1, 1, P]
+        # 0. 0 for valid tokens, -inf for padding
+        attn_mask = rearrange(mask, 'b 1 t -> b 1 1 t')
         attn_mask = torch.where(attn_mask, 0.0, float('-inf'))
 
         out = F.scaled_dot_product_attention(
@@ -204,12 +220,12 @@ class MultiHeadSelfAttention(nn.Module):
             is_causal=False,  # Encoder = bidirectional
         )
 
-        # [B, heads, P, dim_head] -> [B, P, heads, dim_head] -> [B, P, dim_hidden]
-        out = out.transpose(1, 2).contiguous().view(B, P, -1)
-        
+        out = rearrange(out, 'b h t d -> b t (h d)') # [B, T, D]
+
         out = self.to_out(out)
 
         return out
+
 
 class Conv1DFeedForward(nn.Module):
     def __init__(
