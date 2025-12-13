@@ -1,6 +1,14 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+from naturalspeech2.transformer_encoder_layer import RMSNorm
+
+
+# Dropout1D instead of Dropout for Conv1D layers
+# ausgabe maskieren: out = out.masked_fill(~mask, 0.0)
+# duration predictor forward: nach jedem residul maskeiren: x = (x + layer_out) * phoneme_encodings_mask.to(x.dtype)
+# vor dem final to_duration auch: x = (x + layer_out) * phoneme_encodings_mask.to(x.dtype)
+# conv1d residual connections!
 
 class DurationPredictor(nn.Module):
     def __init__(
@@ -13,11 +21,63 @@ class DurationPredictor(nn.Module):
             dropout: float = 0.5,
     ):
         super().__init__()
+        self.norm1 = RMSNorm(dim_hidden)
 
-    def forward():
+        self.conv1d_layers = Conv1DLayer(
+            dim_hidden,
+            conv1d_kernel_size,
+        )
+
+        self.norm2 = RMSNorm(dim_hidden)
+
+        self.multi_head_cross_attention = MultiHeadCrossAttention(
+            dim_hidden,
+            attention_heads,
+            dropout,
+        )
+
+        self.final_norm = RMSNorm(dim_hidden)
+
+    def forward(
+            self,
+            phoneme_encodings,      # [B, dim_hidden, P]
+            phoneme_encodings_mask, # [B, 1, P]
+            prompt_encodings,       # [B, dim_hidden, F]
+            prompt_encodings_mask   # [B, 1, F]
+    ):
         pass
+        
+        
+        
 
 
+class Conv1DLayer(nn.Module):
+    def __init__(
+            self,
+            dim_hidden: int,
+            conv1d_kernel_size: int,
+    ):
+        super().__init__()
+        padding = (conv1d_kernel_size - 1) // 2
+        self.conv1d = nn.Conv1d(
+            in_channels=dim_hidden,
+            out_channels=dim_hidden,
+            kernel_size=conv1d_kernel_size,
+            padding=padding,
+        )
+    
+    def forward(self, x, mask):
+        # x: [B, dim_hidden, P]
+        # mask: [B, 1, P]
+
+        x = x.masked_fill(~mask, 0.0)
+        x = self.conv1d(x)
+
+        # out maskieren! out = out.masked_fill(~mask, 0.0)
+
+        return x
+
+        
 class MultiHeadCrossAttention(nn.Module):
     """
     Cross-Attention:
@@ -83,5 +143,5 @@ class MultiHeadCrossAttention(nn.Module):
         q_mask = phoneme_encodings_mask.to(out.dtype)  # [B, 1, P]
         out = out * q_mask.transpose(1, 2)             # [B, P, 1] broadcast
 
-        # zurück zu channel-first: [B, P, dim_hidden] -> [B, dim_hidden, P]
+        # [B, P, dim_hidden] -> [B, dim_hidden, P]
         return out.transpose(1, 2)
