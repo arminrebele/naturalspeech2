@@ -29,13 +29,13 @@ class LogMelSpectrogramGenerator(nn.Module):
         self.to_db = torchaudio.transforms.AmplitudeToDB(stype="power")
 
 
-    def forward(self, audio, audio_lengths):
-        """
-        audio: [B, T_max_audio]
-        audio_lengths: [B]
-        """
+    def forward(
+            self, 
+            audio,         # [B, T_max_audio]
+            audio_lengths  # [B]
+    ):
         audio_encodings= self.log_mel_generator(audio)
-        audio_encodings = self.to_db(audio_encodings)  # [B, dim_audio, F]
+        audio_encodings = self.to_db(audio_encodings)  # [B, audio_dim, F]
 
         B, _, F = audio_encodings.shape
 
