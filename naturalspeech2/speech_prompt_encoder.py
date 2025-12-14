@@ -1,12 +1,12 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+
+from einops import rearrange
+
 from naturalspeech2.transformer_encoder_layer import TransformerEncoderLayer, RMSNorm
 
 class SpeechPromptEncoder(nn.Module):
-    """
-    Prompt Encodings -> Projection -> N x TransformerEncoderLayer -> Output
-    """
     def __init__(
             self,
             hidden_dim: int = 512,
@@ -43,15 +43,17 @@ class SpeechPromptEncoder(nn.Module):
             prompt_latents_mask: torch.Tensor,    # [B, 1, F]
             prompt_latents_lengths: torch.Tensor,
     ):
-        x = self.input_projection(prompt_latents)  # [B, hidden_dim, F]
-        x = x.transpose(1, 2)  # [B, F, hidden_dim]
+        x = self.input_projection(prompt_latents)   # [B, hidden_dim, F]
+        x = rearrange(x, 'b d t -> b t d')          # [B, F, hidden_dim]
 
         for layer in self.transformer_layers:
             x = layer(x, prompt_latents_mask)
 
         x = self.final_norm(x)
+    
+        x = rearrange(x, 'b t d -> b d t')  # [B, hidden_dim, F]
 
-        x = x.transpose(1, 2)  # [B, hidden_dim, F]
+        x = x * prompt_latents_mask
 
         return x
 
