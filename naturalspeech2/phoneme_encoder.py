@@ -40,20 +40,20 @@ class PhonemeEncoder(nn.Module):
 
     def forward(
             self,
-            phoneme_tokens: torch.Tensor,
-            phoneme_tokens_mask: torch.Tensor,
-            phoneme_tokens_lengths: torch.Tensor,
+            phoneme_tokens: torch.Tensor,           # [B, P]
+            phoneme_tokens_mask: torch.Tensor,      # [B, 1, P]
+            phoneme_tokens_lengths: torch.Tensor,   # [B]
     ):
-        x = self.token_embedding(phoneme_tokens) # [B, P, hidden_dim]
+        phoneme_tokens_emb = self.token_embedding(phoneme_tokens) # [B, P, hidden_dim]
 
         for layer in self.transformer_layers:
-            x = layer(x, phoneme_tokens_mask)
+            phoneme_tokens_emb = layer(phoneme_tokens_emb, phoneme_tokens_mask)
         
-        x = self.final_norm(x)
+        phoneme_tokens_emb = self.final_norm(phoneme_tokens_emb)
 
-        x = x.transpose(1, 2)  # [B, hidden_dim, P]
+        phoneme_tokens_emb = phoneme_tokens_emb.transpose(1, 2)  # [B, hidden_dim, P]
         
-        return x
+        return phoneme_tokens_emb
 
 
 if __name__ == "__main__":
