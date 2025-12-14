@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torchaudio
-from utils import create_mask_from_lengths
+from naturalspeech2.utils.utils import create_mask_from_lengths
 
 class LogMelSpectrogramGenerator(nn.Module):
     def __init__(
