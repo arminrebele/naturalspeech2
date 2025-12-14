@@ -36,6 +36,9 @@ class LogMelSpectrogramGenerator(nn.Module):
             audio_lengths  # [B]
     ):
         audio_encodings= self.log_mel_generator(audio)
+        
+        # Clamp the values to a minimum of 1e-5 to avoid -inf in log scale, if silence log(0) -> -inf
+        audio_encodings = torch.clamp(audio_encodings, min=1e-5)
         audio_encodings = self.to_db(audio_encodings)  # [B, audio_dim, F]
 
         F = audio_encodings.shape[-1]
