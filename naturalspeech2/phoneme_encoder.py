@@ -7,9 +7,6 @@ from einops import rearrange
 from naturalspeech2.transformer_encoder_layer import TransformerEncoderLayer, RMSNorm
 
 class PhonemeEncoder(nn.Module):
-    """
-    Token-IDs -> Embedding -> N x TransformerEncoderLayer -> Output
-    """
     def __init__(
             self,
             token_vocabulary_size: int = None,
