@@ -249,7 +249,6 @@ class Conv1DFeedForward(nn.Module):
         
         x = self.conv1(x)
         x = F.silu(x)
-        x = self.dropout(x)
         
         x = self.conv2(x)
         
