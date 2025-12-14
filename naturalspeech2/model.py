@@ -223,6 +223,12 @@ class NaturalSpeech2Model(nn.Module):
         phoneme_tokens_mask: torch.Tensor,    # [B, 1, P] | True/False
         phoneme_tokens_lengths: torch.Tensor, # [B]       | int
     ):
+        """
+        B: batch size
+        T: number of audio samples
+        P: seq_len of phonemes
+        F: seq_len of frames
+        """
 
         audio_encodings, frame_mask, frame_lengths = self.log_mel_spectrogram_generator(audio, audio_lengths)
         # audio_encodings: [B, n_mels, F]
