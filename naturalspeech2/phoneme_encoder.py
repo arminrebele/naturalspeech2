@@ -1,6 +1,9 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
+
+from einops import rearrange
+
 from naturalspeech2.transformer_encoder_layer import TransformerEncoderLayer, RMSNorm
 
 class PhonemeEncoder(nn.Module):
@@ -51,7 +54,9 @@ class PhonemeEncoder(nn.Module):
         
         phoneme_tokens_emb = self.final_norm(phoneme_tokens_emb)
 
-        phoneme_tokens_emb = phoneme_tokens_emb.transpose(1, 2)  # [B, hidden_dim, P]
+        phoneme_tokens_emb = rearrange(phoneme_tokens_emb, 'b t d -> b d t')  # [B, hidden_dim, P]
+
+        phoneme_tokens_emb = phoneme_tokens_emb * phoneme_tokens_mask
         
         return phoneme_tokens_emb
 
