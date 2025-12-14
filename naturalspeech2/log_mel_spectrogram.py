@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torchaudio
+from utils import create_mask_from_lengths
 
 class LogMelSpectrogramGenerator(nn.Module):
     def __init__(
@@ -37,14 +38,11 @@ class LogMelSpectrogramGenerator(nn.Module):
         audio_encodings= self.log_mel_generator(audio)
         audio_encodings = self.to_db(audio_encodings)  # [B, audio_dim, F]
 
-        B, _, F = audio_encodings.shape
-
-        device = audio_encodings.device
+        F = audio_encodings.shape[-1]
 
         frame_lengths = 1 + (audio_lengths // self.hop_length)    # [B]
         frame_lengths = frame_lengths.clamp(min=1, max=F) # number of valid frames
 
-        frame_idx = torch.arange(F, device=device).unsqueeze(0)     # [1, F]
-        frame_mask = (frame_idx < frame_lengths.unsqueeze(1)).unsqueeze(1)  # [B, 1, F]
+        frame_mask = create_mask_from_lengths(frame_lengths, max_len=F)  # [B, 1, F]
 
         return audio_encodings, frame_mask, frame_lengths
