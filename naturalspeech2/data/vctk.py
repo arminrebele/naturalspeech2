@@ -7,6 +7,7 @@ from einops import rearrange
 from naturalspeech2.paths import VCTK_DIR, VCTK_PROCESSED_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer, build_token_vocabulary
 from naturalspeech2.data.espeak_phonemizer import EspeakPhonemizer
+from naturalspeech2.utils.utils import create_mask_from_lengths
 
 def phonemize_text(sample, phonemizer):
     sample["phonemes"] = phonemizer(sample["text"])
@@ -107,16 +108,6 @@ def vctk_collate_fn(batch, pad_token_id=0):
         "texts": texts,
         "raw_audios": raw_audios,
     }
-
-def create_mask_from_lengths(
-        lengths: torch.Tensor,   # [B]
-        max_len: int
-):
-    device = lengths.device
-
-    seq_range = torch.arange(max_len, device=device)
-    mask = rearrange(seq_range, 't -> 1 1 t') < rearrange(lengths, 'b -> b 1 1')
-    return mask  # [B, 1, T]
 
 
 if __name__ == "__main__":
