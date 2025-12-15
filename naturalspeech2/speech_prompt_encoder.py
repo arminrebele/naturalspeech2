@@ -20,7 +20,7 @@ class SpeechPromptEncoder(nn.Module):
             rope_max_seq_len: int = 3000,
     ):
         super().__init__()
-        self.input_projection = nn.Conv1d(latent_dim, hidden_dim, kernel_size=1)
+        self.input_projection = nn.Conv1d(latent_dim, hidden_dim, kernel_size=1, bias=False)
 
         self.transformer_layers = nn.ModuleList([
             TransformerEncoderLayer(
