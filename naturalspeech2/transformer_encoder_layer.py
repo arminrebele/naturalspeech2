@@ -230,7 +230,6 @@ class Conv1DFeedForward(nn.Module):
             hidden_dim: int,
             conv1d_filter_size: int,
             conv1d_kernel_size: int,
-            dropout: float,
     ):
         super().__init__()
         padding = (conv1d_kernel_size - 1) // 2
