@@ -17,9 +17,7 @@ class TransformerEncoderLayer(nn.Module):
             rope_max_seq_len: int,
     ):
         super().__init__()
-
         self.norm1 = RMSNorm(hidden_dim)
-
         self.multi_head_attention = MultiHeadSelfAttention(
             hidden_dim,
             attention_heads,
@@ -27,16 +25,9 @@ class TransformerEncoderLayer(nn.Module):
             rope_base,
             rope_max_seq_len,
         )
-
         self.norm2 = RMSNorm(hidden_dim)
-
-        self.conv1d_feed_forward = Conv1DFeedForward(
-            hidden_dim,
-            conv1d_filter_size,
-            conv1d_kernel_size,
-            dropout,
-        )
-
+        self.conv1 = Conv1D(hidden_dim, conv1d_filter_size, conv1d_kernel_size)
+        self.conv2 = Conv1D(conv1d_filter_size, hidden_dim, 1)
         self.dropout = nn.Dropout(dropout)
         
     def forward(
@@ -44,14 +35,21 @@ class TransformerEncoderLayer(nn.Module):
             x,    # [B, T, D]
             mask  # [B, 1, T]
     ):
-        qmask = rearrange(mask, 'b 1 t -> b t 1')
+        qmask = rearrange(mask, 'b 1 t -> b t 1')  # [B, T, 1]
         qmask = qmask.to(x.dtype)
 
         attn_out = self.multi_head_attention(self.norm1(x), mask)  # [B, T, D]
         x = x + self.dropout(attn_out)
         x = x * qmask # padding token vector to zero
+        
+        x_norm = self.norm2(x)
+        x_norm = rearrange(x_norm, 'b t d -> b d t')
 
-        ffn_out = self.conv1d_feed_forward(self.norm2(x), mask)
+        ffn_out = self.conv1(x_norm, mask)
+        ffn_out = F.silu(ffn_out)
+        ffn_out = self.conv2(ffn_out, mask)
+        ffn_out = rearrange(ffn_out, 'b d t -> b t d')
+
         x = x + self.dropout(ffn_out)
         x = x * qmask # padding token vector to zero
 
@@ -224,32 +222,23 @@ class MultiHeadSelfAttention(nn.Module):
         return out
 
 
-class Conv1DFeedForward(nn.Module):
+class Conv1D(nn.Module):
     def __init__(
             self,
             hidden_dim: int,
-            conv1d_filter_size: int,
-            conv1d_kernel_size: int,
+            filter_size: int,
+            kernel_size: int,
     ):
         super().__init__()
-        padding = (conv1d_kernel_size - 1) // 2
-
-        self.conv1 = nn.Conv1d(hidden_dim, conv1d_filter_size, conv1d_kernel_size, padding=padding)
-        self.conv2 = nn.Conv1d(conv1d_filter_size, hidden_dim, 1)
-
+        padding = (kernel_size - 1) // 2
+        self.conv1d = nn.Conv1d(hidden_dim, filter_size, kernel_size, padding=padding)
+    
     def forward(
-            self, 
-            x,    # [B, T, D]
+            self,
+            x,    # [B=batch_size, D=hidden_dim, T=seq_len]
             mask  # [B, 1, T]
     ):
-        x = rearrange(x, 'b t d -> b d t')  # [B, D, T]
-        x = x.masked_fill(~mask, 0.0)  # mask: [B, 1, P]
-        
-        x = self.conv1(x)
-        x = F.silu(x)
-        
-        x = self.conv2(x)
-        
-        x = rearrange(x, 'b d t -> b t d')  # [B, T, D]
-        
+        x = x.masked_fill(~mask, 0.0)
+        x = self.conv1d(x)
         return x
+
