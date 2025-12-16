@@ -20,7 +20,6 @@ class PhonemeEncoder(nn.Module):
             rope_max_seq_len: int = 3000,
     ):
         super().__init__()
-        self.hidden_dim = hidden_dim
         self.token_embedding = nn.Embedding(token_vocabulary_size, hidden_dim, padding_idx=0)
 
         self.transformer_layers = nn.ModuleList([
