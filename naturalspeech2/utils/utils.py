@@ -9,6 +9,6 @@ def create_mask_from_lengths(
 ):
     device = lengths.device
 
-    seq_range = torch.arange(max_len, device=device)
-    mask = rearrange(seq_range, 't -> 1 1 t') < rearrange(lengths, 'b -> b 1 1')
-    return mask  # [B, 1, T]
+    seq_range = torch.arange(max_len, device=device) # creates: [0, 1, 2, ..., max_len-1]
+    mask = rearrange(seq_range, 't -> 1 t 1') < rearrange(lengths, 'b -> b 1 1')
+    return mask  # [B, T, 1]
