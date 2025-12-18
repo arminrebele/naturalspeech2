@@ -7,8 +7,8 @@ from einops import rearrange
 class Aligner(nn.Module):
     def __init__(
         self,
-        dim_audio=80,
-        dim_hidden=512,
+        audio_dim=80,
+        hidden_dim=512,
         attn_channels=80,
         temperature=0.0005,
         prior_w=1.0,
@@ -17,55 +17,53 @@ class Aligner(nn.Module):
         self.prior_w = prior_w
 
         self.aligner_net = AlignerNet(
-            dim_audio = dim_audio,
-            dim_hidden = dim_hidden,
+            audio_dim = audio_dim,
+            hidden_dim = hidden_dim,
             attn_channels = attn_channels,
             temperature = temperature,
         )
 
     def forward(
         self,
-        audio_encodings,          # [B, dim_audio=80, F]
-        frame_mask,               # [B, 1, F]
-        frame_lengths,            # [B]
-        phoneme_encodings,        # [B, dim_hidden=512, P]
-        phoneme_tokens_mask,      # [B, 1, P]
-        phoneme_tokens_lengths,   # [B]
-
+        audio_encodings,            # [B, F, audio_dim=80]
+        frame_mask,                 # [B, F, 1]
+        frame_lengths,              # [B]
+        phoneme_encodings,          # [B, P, hidden_dim=512]
+        phoneme_encodings_mask,     # [B, P, 1]
+        phoneme_encodings_lengths,  # [B]
     ) -> dict[str, torch.Tensor]:
         
-        alignment_soft, alignment_logits = self.aligner_net(audio_encodings, phoneme_encodings, phoneme_tokens_mask)  # [B, 1, F, P]
+        alignment_soft, alignment_logits = self.aligner_net(audio_encodings, phoneme_encodings, phoneme_encodings_mask)  # [B, F, P]
+        
+        attn_mask = frame_mask & rearrange(phoneme_encodings_mask, 'b t 1 -> b 1 t')  # [B, F, P]
 
-        # combine masks [B,1,F] & [B,1,P] -> [B,F,P]
-        frame_mask_2d = frame_mask.squeeze(1).bool()   # [B,F]
-        phoneme_tokens_mask_2d = phoneme_tokens_mask.squeeze(1).bool()   # [B,P]
-        attn_mask = frame_mask_2d.unsqueeze(2) & phoneme_tokens_mask_2d.unsqueeze(1)  # [B,F,P]
-
-        alignment_soft_2d = alignment_soft.squeeze(1)           # [B,F,P]
-        B, F, P = alignment_soft_2d.shape
-        alignment_logprobs = torch.log(alignment_soft_2d + 1e-9) # [B,F,P]
-          
+        B, F, P = alignment_soft.shape
+        alignment_logprobs = torch.log(alignment_soft + 1e-9) # [B,F,P]
+        
         prior_logprobs = compute_beta_binomial_prior(  # [B,F,P]
             frame_lengths,
-            phoneme_tokens_lengths, 
+            phoneme_encodings_lengths, 
             frames_max=F,
-            phoneme_tokens_max=P, 
+            phoneme_encodings_max=P, 
             w=self.prior_w 
         )
 
-        alignment_logits_2d = alignment_logits.squeeze(1)        # [B, F, P]
-        alignment_logits_with_prior = alignment_logits_2d + prior_logprobs # [B, F, P]
-
+        alignment_logits_with_prior = alignment_logits + prior_logprobs # [B, F, P]
         alignment_logprobs_for_viterbi = alignment_logprobs + prior_logprobs # [B,F,P]
 
         with torch.no_grad():
-            alignment_hard = maximum_path(alignment_logprobs_for_viterbi, attn_mask, frame_lengths, phoneme_tokens_lengths)  # [B,F,P]
+            alignment_hard = maximum_path(          # [B,F,P]
+                alignment_logprobs_for_viterbi,
+                attn_mask, 
+                frame_lengths, 
+                phoneme_encodings_lengths
+            )  
             durations = alignment_hard.sum(dim=1).int()   # [B,P]
 
         return (
             durations,                     # [B, P]
             alignment_hard,                # [B, F, P]
-            alignment_soft,                # [B, 1, F, P]
+            alignment_soft,                # [B, F, P]
             alignment_logprobs,            # [B, F, P]
             attn_mask,                     # [B, F, P]
             alignment_logits_with_prior,   # [B, F, P]
@@ -74,64 +72,71 @@ class Aligner(nn.Module):
 
 
 class AlignerNet(nn.Module):
-    def __init__(self, dim_audio=80, dim_hidden=512, attn_channels=80, temperature=0.0005):
+    def __init__(
+            self, 
+            audio_dim=80, 
+            hidden_dim=512, 
+            attn_channels=80, 
+            temperature=0.0005
+    ):
         super().__init__()
         self.temperature = temperature
 
         self.audio_encoder = nn.Sequential(
-            nn.Conv1d(dim_audio, dim_audio*2, kernel_size=3, padding=1),
+            nn.Conv1d(audio_dim, audio_dim*2, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv1d(dim_audio*2, dim_audio, kernel_size=3, padding=1),
+            nn.Conv1d(audio_dim*2, audio_dim, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv1d(dim_audio, attn_channels, kernel_size=1)
+            nn.Conv1d(audio_dim, attn_channels, kernel_size=1)
         )
 
         self.phoneme_encoder = nn.Sequential(
-            nn.Conv1d(dim_hidden, dim_hidden*2, kernel_size=3, padding=1),
+            nn.Conv1d(hidden_dim, hidden_dim*2, kernel_size=3, padding=1),
             nn.ReLU(),
-            nn.Conv1d(dim_hidden*2, attn_channels, kernel_size=1)
+            nn.Conv1d(hidden_dim*2, attn_channels, kernel_size=1)
         )
 
-    def forward(self, audio_encodings, phoneme_encodings, phoneme_tokens_mask):
-        """
-        audio_encodings:     [B, 80, F]
-        phoneme_encodings:   [B, 512, P]
-        phoneme_tokens_mask:  [B, 1, P]
-        """
+    def forward(
+            self,
+            audio_encodings,         # [B, F, 80]
+            phoneme_encodings,       # [B, P, 512]
+            phoneme_encodings_mask   # [B, P, 1]
+    ):
+        # Transpose for Conv1d
+        audio_encodings = rearrange(audio_encodings, 'b t d -> b d t')  # [B, 80, F]
+        phoneme_encodings = rearrange(phoneme_encodings, 'b t d -> b d t')  # [B, 512, P]
 
+        # Apply conv encoders
         audio_features = self.audio_encoder(audio_encodings)   # [B, 80, F]
-
         phoneme_features = self.phoneme_encoder(phoneme_encodings)   # [B, 80, P]
 
         # Transpose for cdist
-        audio_features = rearrange(audio_features, "b c f -> b f c")  # [B, F, 80]
-        phoneme_features = rearrange(phoneme_features, "b c p -> b p c")  # [B, P, 80]
+        audio_features = rearrange(audio_features, "b d t -> b t d")        # [B, F, 80]
+        phoneme_features = rearrange(phoneme_features, "b d t -> b t d")    # [B, P, 80]
         
 
         # L2 distances between frames and phonemes
         alignment_logits = torch.cdist(audio_features, phoneme_features)  # [B, F, P]
-        alignment_logits = rearrange(alignment_logits, "b f p -> b 1 f p")
-        alignment_logits = -alignment_logits / self.temperature # [B, 1, F, P]
+        alignment_logits = -alignment_logits / self.temperature # [B, F, P]
+
         mask_value = -torch.finfo(alignment_logits.dtype).max
-        mask = rearrange(phoneme_tokens_mask.bool(), "b 1 p -> b 1 1 p")
+
+        mask = rearrange(phoneme_encodings_mask.bool(), "b t 1 -> b 1 t")
+
         alignment_logits.masked_fill_(~mask, mask_value)
         
         alignment_soft = alignment_logits.softmax(dim=-1)
 
-        return alignment_soft, alignment_logits  # [B, 1, F, P]
+        return alignment_soft, alignment_logits  # [B, F, P]
 
 
 
 def maximum_path(
-        logprobs: torch.Tensor,      # [B, F, P]
-        attn_mask: torch.Tensor,     # [B, F, P]
-        frame_lengths: torch.Tensor,    # [B]
-        phoneme_tokens_lengths: torch.Tensor  # [B]
+        logprobs: torch.Tensor,               # [B, F, P]
+        attn_mask: torch.Tensor,              # [B, F, P]
+        frame_lengths: torch.Tensor,          # [B]
+        phoneme_encodings_lengths: torch.Tensor  # [B]
 ) -> torch.Tensor:
-    """
-
-    """
-    
     device = logprobs.device
     dtype = logprobs.dtype
 
@@ -160,10 +165,10 @@ def maximum_path(
 
     ### Backtracking ###
     frame_lengths_idx = frame_lengths.long() - 1
-    phoneme_tokens_lengths_idx = phoneme_tokens_lengths.long() - 1
+    phoneme_encodings_lengths_idx = phoneme_encodings_lengths.long() - 1
     batch_indices = torch.arange(B, device=device)
     alignment_hard = torch.zeros_like(path, dtype=torch.bool, device=device) # initialize hard alignment
-    p = phoneme_tokens_lengths_idx # start from the last phoneme token
+    p = phoneme_encodings_lengths_idx # start from the last phoneme token
 
     for f in reversed(range(F)):
         active = (f <= frame_lengths_idx) # check if within valid frame length
@@ -180,9 +185,9 @@ def maximum_path(
 
 def compute_beta_binomial_prior(
     frame_lengths: torch.Tensor,  # [B]
-    phoneme_tokens_lengths: torch.Tensor,  # [B]
+    phoneme_encodings_lengths: torch.Tensor,  # [B]
     frames_max: int,
-    phoneme_tokens_max: int, 
+    phoneme_encodings_max: int, 
     w: float = 1.0
 ) -> torch.Tensor:
     """
@@ -192,11 +197,11 @@ def compute_beta_binomial_prior(
     device = frame_lengths.device
     B = len(frame_lengths) # batch size
 
-    T= frame_lengths.view(B, 1, 1).float()          # [B, 1, 1]
-    N = (phoneme_tokens_lengths.view(B, 1, 1).float()) - 1.0       # [B, 1, 1]
+    T = rearrange(frame_lengths, 'b -> b 1 1').float()          # [B, 1, 1]
+    N = rearrange(phoneme_encodings_lengths, 'b -> b 1 1').float() - 1.0 # [B, 1, 1]
 
     t_grid = torch.arange(1, frames_max + 1, device=device).view(1, -1, 1)  # [1, T, 1]
-    k_grid = torch.arange(0, phoneme_tokens_max, device=device).view(1, 1, -1)  # [1, 1, N]
+    k_grid = torch.arange(0, phoneme_encodings_max, device=device).view(1, 1, -1)  # [1, 1, N]
 
     alpha = w * t_grid                     # [1, T, 1] | w * t
     alpha = torch.clamp(alpha, min=1e-5)
@@ -227,7 +232,7 @@ def compute_beta_binomial_prior(
         + torch.lgamma(beta)
         - torch.lgamma(alpha + beta)
     )
-    log_beta_denominator = log_beta_denominator.expand(B, frames_max, phoneme_tokens_max) # broadcast
+    log_beta_denominator = log_beta_denominator.expand(B, frames_max, phoneme_encodings_max) # broadcast
 
     log_prior = log_binom_coeff + log_beta_numerator - log_beta_denominator  # [B, T, N] | [B, F, P]
     
@@ -253,42 +258,33 @@ class ForwardSumLoss(nn.Module):
 
     def forward(
         self,
-        alignment_logits: torch.Tensor,   # [B, F, P] # must be alignment_logits_with_prior
-        frame_lengths: torch.Tensor,       # [B]
-        phoneme_tokens_lengths: torch.Tensor,  # [B]
+        alignment_logits: torch.Tensor,           # [B, F, P] # must be alignment_logits_with_prior
+        frame_lengths: torch.Tensor,              # [B]
+        phoneme_encodings_lengths: torch.Tensor,  # [B]
     ) -> torch.Tensor:
-        
         device = alignment_logits.device
         B, F, P = alignment_logits.shape
 
-        alignment_logits = alignment_logits.unsqueeze(1)  # [B, 1, F, P]
-
-        alignment_logits_padded = torch.nn.functional.pad(   #  [B, 1, F, P+1]
+        alignment_logits_padded = torch.nn.functional.pad(   #  [B, F, P+1]
             alignment_logits,
-            pad=(1, 0, 0, 0, 0, 0, 0, 0), 
+            pad=(1, 0), 
             value=self.blank_logprob,
         )
 
         losses = []
-
         for b in range(B):
-            T = int(frame_lengths[b].item())            # Frames
-            N = int(phoneme_tokens_lengths[b].item())   # Tokens
+            T = int(frame_lengths[b].item())
+            N = int(phoneme_encodings_lengths[b].item())
 
-            curr = alignment_logits_padded[b:b+1, :, :T, : N + 1]    # [1, 1, T, P+1]
-            curr = curr[0]                                  # [1, T, P+1]
+            curr = alignment_logits_padded[b, :T, :N + 1]    # [T, N+1]
+            curr = rearrange(curr, "t c -> t 1 c")           # [T, 1, N+1]
+            log_probs = self.log_softmax(curr)               # [T, 1, N+1]
 
-            # ctc format [T, B=1, C]
-            curr = curr.permute(1, 0, 2).contiguous()       # [T, 1, P+1]
+            targets = torch.arange(1, N + 1, device=device, dtype=torch.long)  # [N]
+            input_len = torch.tensor([T], device=device, dtype=torch.long)
+            target_len = torch.tensor([N], device=device, dtype=torch.long)
 
-            log_probs = self.log_softmax(curr)              # [T, 1, P+1]
-
-            target = torch.arange(1, N + 1, dtype=torch.long, device=device).unsqueeze(0)  # [1, N]
-
-            input_lengths = torch.tensor([T], dtype=torch.long, device=device)
-            target_lengths = torch.tensor([N], dtype=torch.long, device=device)
-
-            loss_b = self.ctc_loss(log_probs, target, input_lengths, target_lengths)
+            loss_b = self.ctc_loss(log_probs, targets, input_len, target_len)
             losses.append(loss_b)
 
         return torch.stack(losses).mean()
@@ -323,35 +319,38 @@ if __name__ == "__main__":
 
     device = "cpu"
 
-    audio_encodings = torch.randn(B, dim_audio, F, device=device)   # [B, 80, F]
-    phoneme_encodings = torch.randn(B, dim_hidden, P, device=device)  # [B, 512, P]
+    # Inputs [B, T, D]
+    audio_encodings = torch.randn(B, F, dim_audio, device=device)   # [B, F, 80]
+    phoneme_encodings = torch.randn(B, P, dim_hidden, device=device)  # [B, P, 512]
 
     frame_lengths = torch.randint(low=10, high=F + 1, size=(B,), device=device)          # [B]
-    phoneme_tokens_lengths = torch.randint(low=3, high=P + 1, size=(B,), device=device)  # [B]
+    phoneme_encodings_lengths = torch.randint(low=3, high=P + 1, size=(B,), device=device)  # [B]
 
+    # Masks erstellen [B, T]
     frame_idx = torch.arange(F, device=device).unsqueeze(0)          # [1, F]
-    frame_mask = (frame_idx < frame_lengths.unsqueeze(1)).unsqueeze(1)  # [B, 1, F]
-
+    frame_mask = (frame_idx < frame_lengths.unsqueeze(1)).unsqueeze(-1)                  # [B, F, 1]
+    
     phoneme_idx = torch.arange(P, device=device).unsqueeze(0)        # [1, P]
-    phoneme_tokens_mask = (phoneme_idx < phoneme_tokens_lengths.unsqueeze(1)).unsqueeze(1)  # [B, 1, P]
+    phoneme_encodings_mask = (phoneme_idx < phoneme_encodings_lengths.unsqueeze(1)).unsqueeze(-1) # [B, P, 1]
 
     aligner = Aligner(
-        dim_audio=dim_audio,
-        dim_hidden=dim_hidden,
+        dim_audio,
+        dim_hidden,
         attn_channels=80,
         temperature=5e-4,
     ).to(device)
 
-    forward_sum_loss = ForwardSumLoss()
-    bin_loss = BinLoss()
+    forward_sum_loss_fn = ForwardSumLoss()
+    bin_loss_fn = BinLoss()
 
+    # Forward Pass mit [B, T, 1] Masken
     durations, alignment_hard, alignment_soft, alignment_logprobs, attn_mask, alignment_logits_with_prior = aligner(
-            audio_encodings,
-            frame_mask,
-            frame_lengths,
-            phoneme_encodings,
-            phoneme_tokens_mask,
-            phoneme_tokens_lengths,
+            audio_encodings=audio_encodings,
+            frame_mask=frame_mask,
+            frame_lengths=frame_lengths,
+            phoneme_encodings=phoneme_encodings,
+            phoneme_encodings_mask=phoneme_encodings_mask,
+            phoneme_encodings_lengths=phoneme_encodings_lengths,
         )
     
     print("durations shape:", durations.shape)
@@ -362,23 +361,12 @@ if __name__ == "__main__":
     print("alignment_logits_with_prior shape:", alignment_logits_with_prior.shape)
 
     print("durations:", durations)
-    print("\n alignment_hard:\n", alignment_hard)
-    print("\n alignment_soft:\n", alignment_soft)
-    print("\n alignment_logprobs:\n", alignment_logprobs)
-    print("\n attn_mask:\n", attn_mask)
-    print("\n alignment_logits_with_prior:\n", alignment_logits_with_prior)
     
-    forward_sum_loss = forward_sum_loss(
+    # Loss Calculation
+    loss_forward_sum = forward_sum_loss_fn(
         alignment_logits_with_prior,
         frame_lengths,
-        phoneme_tokens_lengths
+        phoneme_encodings_lengths
     )
 
-    print("ForwardSumLoss:", forward_sum_loss.item())
-
-    bin_loss = bin_loss(
-        alignment_logprobs,
-        alignment_hard
-    )
-
-    print("BinLoss:", bin_loss.item())
+    print("ForwardSumLoss:", loss_forward_sum.item())
