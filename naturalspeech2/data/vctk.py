@@ -80,7 +80,7 @@ def vctk_collate_fn(batch, pad_token_id=0):
     audio_padded = pad_sequence(audio_tensors, batch_first=True, padding_value=0.0)  # [B, T]
 
     max_audio_len = audio_padded.shape[1]
-    audio_mask = create_mask_from_lengths(audio_lengths, max_audio_len) # [B, 1, T]
+    audio_mask = create_mask_from_lengths(audio_lengths, max_audio_len) # [B, T, 1]
 
     phoneme_tokens_tensors = [torch.tensor(item["phoneme_tokens"]) for item in batch]   # list of tensor with variable length
     phoneme_tokens_lengths = torch.tensor([len(tensor) for tensor in phoneme_tokens_tensors])
@@ -91,18 +91,18 @@ def vctk_collate_fn(batch, pad_token_id=0):
     )
 
     max_tokens_len = phoneme_tokens_padded.shape[1]
-    phoneme_tokens_mask = create_mask_from_lengths(phoneme_tokens_lengths, max_tokens_len) # [B, 1, P]
+    phoneme_tokens_mask = create_mask_from_lengths(phoneme_tokens_lengths, max_tokens_len) # [B, P, 1]
 
     raw_audios = [item["audio"] for item in batch]
     texts = [item["text"] for item in batch]
     
     return {
         "audio": audio_padded,                      # [B, T]
-        "audio_mask": audio_mask,                   # [B, 1, T]  
+        "audio_mask": audio_mask,                   # [B, T, 1]  
         "audio_lengths": audio_lengths,             # [B]  
         
         "phoneme_tokens": phoneme_tokens_padded,                # [B, P]
-        "phoneme_tokens_mask": phoneme_tokens_mask,             # [B, 1, P]
+        "phoneme_tokens_mask": phoneme_tokens_mask,             # [B, P, 1]
         "phoneme_tokens_lengths": phoneme_tokens_lengths,       # [B]
 
         "texts": texts,
