@@ -39,19 +39,21 @@ class SpeechPromptEncoder(nn.Module):
 
     def forward(
             self,
-            prompt_latents: torch.Tensor,         # [B, latent_dim, F]
-            prompt_latents_mask: torch.Tensor,    # [B, 1, F]
+            prompt_latents: torch.Tensor,         # [B, F, latent_dim]
+            prompt_latents_mask: torch.Tensor,    # [B, F, 1]
             prompt_latents_lengths: torch.Tensor,
     ):
-        x = self.input_projection(prompt_latents)   # [B, hidden_dim, F]
+        prompt_latents = rearrange(prompt_latents, 'b t d -> b d t')  # [B, latent_dim, F]
+        prompt_latents_mask = rearrange(prompt_latents_mask, 'b t 1 -> b 1 t')  # [B, 1, F]
+
+        x = self.input_projection(prompt_latents, prompt_latents_mask)   # [B, hidden_dim, F]
         x = rearrange(x, 'b d t -> b t d')          # [B, F, hidden_dim]
+        prompt_latents_mask = rearrange(prompt_latents_mask, 'b 1 t -> b t 1')  # [B, F, 1]
 
         for layer in self.transformer_layers:
             x = layer(x, prompt_latents_mask)
 
         x = self.final_norm(x)
-    
-        x = rearrange(x, 'b t d -> b d t')  # [B, hidden_dim, F]
 
         x = x * prompt_latents_mask
 
