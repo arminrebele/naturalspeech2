@@ -121,10 +121,9 @@ class NaturalSpeech2Model(nn.Module):
 
     @staticmethod
     def _expand_phoneme_encodings(
-        phoneme_encodings: torch.Tensor,  # [B, hidden_dim, P]
+        phoneme_encodings: torch.Tensor,  # [B, P, dim_hidden]
         durations: torch.Tensor,          # [B, P]
     ):
-        phoneme_encodings = rearrange(phoneme_encodings, 'b h t -> b t h') # [B, P, hidden_dim]
         B, P, H = phoneme_encodings.shape
         device = phoneme_encodings.device
         durations = durations.to(torch.long)
@@ -146,22 +145,20 @@ class NaturalSpeech2Model(nn.Module):
         expanded_phoneme_encodings = pad_sequence(expanded_phoneme_encodings_list, batch_first=True)  # [B, F, hidden_dim]
         F_max = expanded_phoneme_encodings.shape[1]
 
-        frame_mask = create_mask_from_lengths(frame_lengths, max_len=F_max)  # [B, 1, F]
-
-        expanded_phoneme_encodings = rearrange(expanded_phoneme_encodings, 'b t h -> b h t')
+        frame_mask = create_mask_from_lengths(frame_lengths, max_len=F_max)  # [B, F, 1]
 
         return expanded_phoneme_encodings, frame_mask, frame_lengths
 
     @staticmethod
     def _generate_prompts_and_targets(
-        audio_latents: torch.Tensor,     # [B, hidden_dim, F]
+        audio_latents: torch.Tensor,     # [B, F, hidden_dim]
         audio_lengths: torch.Tensor,     # [B]
         min_prompt_pct: float,
         max_prompt_pct: float,
         hop_length: int
     ):
         device = audio_latents.device
-        B, D, F = audio_latents.shape
+        B, F, D = audio_latents.shape
         
         # hop_length in this case the downsample factor from audio samples to audio latents
         audio_latents_lengths = (audio_lengths / hop_length).ceil().long()
@@ -171,7 +168,7 @@ class NaturalSpeech2Model(nn.Module):
 
         for i in range(B):
             audio_latents_length = audio_latents_lengths[i].item()
-            audio_latents_without_padding = audio_latents[i, :, :audio_latents_length] # [D, F] | F = audio latents length without padding
+            audio_latents_without_padding = audio_latents[i, :audio_latents_length, :] # [F, D] | F = audio latents length without padding
             
             min_len = int(audio_latents_length * min_prompt_pct) # minimum number of frames for the speech prompt
             max_len = int(audio_latents_length * max_prompt_pct) # maximum number of frames for the speech prompt
@@ -183,41 +180,30 @@ class NaturalSpeech2Model(nn.Module):
             prompt_start = torch.randint(low=0, high=max_start + 1, size=(1,)).item()
             prompt_end = prompt_start + prompt_len
 
-            prompt = audio_latents_without_padding[:, prompt_start:prompt_end] # [D, F] | F = prompt_len
+            prompt = audio_latents_without_padding[prompt_start:prompt_end, :] # [F, D] | F = prompt_len
 
             # target: everything before and after the prompt concatenated
             target = torch.cat([
-                audio_latents_without_padding[:, :prompt_start], 
-                audio_latents_without_padding[:, prompt_end:]
-            ], dim=-1)
+                audio_latents_without_padding[:prompt_start, :], 
+                audio_latents_without_padding[prompt_end:, :]
+            ], dim=0)
 
             prompt_latents_list.append(prompt)
             target_latents_list.append(target)
 
-        prompt_latents_padded = pad_sequence(
-            [rearrange(p, 'd t -> t d') for p in prompt_latents_list],
-            batch_first=True
-        ) # [B, F, D]
-
-        prompt_latents_padded = rearrange(prompt_latents_padded, 'b t d -> b d t')
-
-        target_latents_padded = pad_sequence(
-            [rearrange(target_latent, 'd t -> t d') for target_latent in target_latents_list], 
-            batch_first=True
-        ) # [B, F, D]
-
-        target_latents_padded = rearrange(target_latents_padded, 'b t d -> b d t')
+        prompt_latents_padded = pad_sequence(prompt_latents_list, batch_first=True)  # [B, F, D]
+        target_latents_padded = pad_sequence(target_latents_list, batch_first=True)  # [B, F, D]
 
 
-        prompt_latents_lengths = torch.tensor([p.shape[-1] for p in prompt_latents_list], device=device)  # [B]
-        prompt_max_len = prompt_latents_padded.shape[-1]
+        prompt_latents_lengths = torch.tensor([p.shape[0] for p in prompt_latents_list], device=device)  # [B]
+        prompt_max_len = prompt_latents_padded.shape[1]
         prompt_latents_mask = create_mask_from_lengths(
             prompt_latents_lengths,
             max_len=prompt_max_len
         )
 
-        target_latents_lengths = torch.tensor([t.shape[-1] for t in target_latents_list], device=device)  # [B]
-        target_max_len = target_latents_padded.shape[-1]
+        target_latents_lengths = torch.tensor([t.shape[0] for t in target_latents_list], device=device)  # [B]
+        target_max_len = target_latents_padded.shape[1]
         target_latents_mask = create_mask_from_lengths(
             target_latents_lengths,
             max_len=target_max_len
@@ -230,11 +216,11 @@ class NaturalSpeech2Model(nn.Module):
     def forward(
         self,
         audio: torch.Tensor,                  # [B, T]    | float
-        audio_mask: torch.Tensor,             # [B, 1, T] | True/False
+        audio_mask: torch.Tensor,             # [B, T, 1] | True/False
         audio_lengths: torch.Tensor,          # [B]       | int
 
         phoneme_tokens: torch.Tensor,         # [B, P]    | int
-        phoneme_tokens_mask: torch.Tensor,    # [B, 1, P] | True/False
+        phoneme_tokens_mask: torch.Tensor,    # [B, P, 1] | True/False
         phoneme_tokens_lengths: torch.Tensor, # [B]       | int
     ):
         """
@@ -245,20 +231,17 @@ class NaturalSpeech2Model(nn.Module):
         """
 
         audio_encodings, frame_mask, frame_lengths = self.log_mel_spectrogram_generator(audio, audio_lengths)
-        # audio_encodings: [B, n_mels, F]
-        # frame_mask: [B, 1, F]
+        # audio_encodings: [B, F, n_mels]
+        # frame_mask: [B, F, 1]
         # frame_lengths: [B]
 
-        phoneme_encodings = self.phoneme_encoder(   # [B, hidden_dim, P]
+        phoneme_encodings = self.phoneme_encoder(           # [B, P, hidden_dim]
             phoneme_tokens,
             phoneme_tokens_mask,
             phoneme_tokens_lengths
         )
-        phoneme_encodings_mask = phoneme_tokens_mask
-        phoneme_encodings_lengths = phoneme_tokens_lengths
-        # phoneme_encodings: [B, hidden_dim, P]
-        # phoneme_encodings_mask: [B, 1, P]
-        # phoneme_encodings_lengths: [B]
+        phoneme_encodings_mask = phoneme_tokens_mask        # [B, P, 1]
+        phoneme_encodings_lengths = phoneme_tokens_lengths  # [B]
 
         durations, alignment_hard, alignment_soft, alignment_logprobs, attn_mask, alignment_logits_with_prior = self.aligner(
             audio_encodings,
@@ -273,11 +256,11 @@ class NaturalSpeech2Model(nn.Module):
             phoneme_encodings,
             durations,
         )
-        # expanded_phoneme_encodings: [B, hidden_dim, F]
-        # frame_mask_expanded: [B, 1, F]
+        # expanded_phoneme_encodings: [B, F, dim_hidden]
+        # frame_mask_expanded: [B, F, 1]
         # frame_lengths_expanded: [B]
 
-        audio_latents = self.encodec.get_latents(audio) # (B, D=128, F)
+        audio_latents = self.encodec.get_latents(audio) # (B, F, D=128)
 
         prompt_latents, prompt_latents_mask, prompt_latents_lengths, target_latents, target_latents_mask, target_latents_lengths = self._generate_prompts_and_targets(
             audio_latents,
@@ -286,24 +269,23 @@ class NaturalSpeech2Model(nn.Module):
             self.max_prompt_pct,
             self.hop_length
         )
-        # prompt_latents: [B, hidden_dim, F]             # target_latents: [B, hidden_dim, F]
-        # prompt_latents_mask: [B, 1, F]                 # target_latents_mask: [B, 1, F]
+        # prompt_latents: [B, F, hidden_dim]             # target_latents: [B, F, hidden_dim]
+        # prompt_latents_mask: [B, F, 1]                 # target_latents_mask: [B, F, 1]
         # prompt_latents_lengths: [B]                    # target_latents_lengths: [B]
 
-        prompt_encodings = self.speech_prompt_encoder(
+        prompt_encodings = self.speech_prompt_encoder(      # [B, F, hidden_dim]
             prompt_latents,
             prompt_latents_mask,
             prompt_latents_lengths
         )
-        prompt_encodings_mask = prompt_latents_mask
-        prompt_encodings_lengths = prompt_latents_lengths
-        # prompt_encodings: [B, dim_hidden, F]
-        # prompt_encodings_mask: [B, 1, F]
-        # prompt_encodings_lengths: [B]
+        prompt_encodings_mask = prompt_latents_mask         # [B, F, 1]
+        prompt_encodings_lengths = prompt_latents_lengths   # [B]
 
         duration_predictor_durations = self.duration_predictor(
             phoneme_encodings,
             phoneme_encodings_mask,
+            prompt_encodings,
+            prompt_encodings_mask
         )
 
         #### Compute Losses ####
