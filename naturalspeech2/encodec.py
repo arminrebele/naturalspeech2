@@ -1,6 +1,8 @@
 import torch
 from transformers import EncodecModel, AutoProcessor
 
+from einops import rearrange
+
 from naturalspeech2.paths import ENCODEC_24KHZ_DIR
 
 
@@ -60,6 +62,7 @@ class EncodecWrapper:
         audio_codes, _ = self.encode(audio) # (C=1, B, Q, F)
         audio_codes_qbt = audio_codes.squeeze(0).permute(1, 0, 2).contiguous() # (Q, B, F)
         latents = self.model.quantizer.decode(audio_codes_qbt)  # (B, D=128, F)
+        latents = rearrange(latents, "b d f -> b f d")          # [B, F, D]
         return latents
 
     @torch.no_grad()
@@ -69,5 +72,6 @@ class EncodecWrapper:
         return self.model.decode(audio_codes.to(self.device), audio_scales)
 
     @torch.no_grad()
-    def decode_from_latents(self, latents):
+    def decode_from_latents(self, latents): # latents: [B, F, D]
+        latents = rearrange(latents, "b f d -> b d f")  # [B, D, F]
         return self.model.decoder(latents.to(self.device))
