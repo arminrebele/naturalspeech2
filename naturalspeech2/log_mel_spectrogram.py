@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torchaudio
+from einops import rearrange
 from naturalspeech2.utils.utils import create_mask_from_lengths
 
 class LogMelSpectrogramGenerator(nn.Module):
@@ -32,20 +33,21 @@ class LogMelSpectrogramGenerator(nn.Module):
 
     def forward(
             self, 
-            audio,         # [B, T_max_audio]
+            audio,         # [B, T]  | T = max audio length
             audio_lengths  # [B]
     ):
-        audio_encodings= self.log_mel_generator(audio)
+        audio_encodings= self.log_mel_generator(audio) # [B, n_mels, F]
         
         # Clamp the values to a minimum of 1e-5 to avoid -inf in log scale, if silence log(0) -> -inf
         audio_encodings = torch.clamp(audio_encodings, min=1e-5)
-        audio_encodings = self.to_db(audio_encodings)  # [B, audio_dim, F]
+        audio_encodings = self.to_db(audio_encodings)  # [B, n_mels, F]
+        audio_encodings = rearrange(audio_encodings, 'b d t -> b t d')  # [B, F, n_mels]
 
-        F = audio_encodings.shape[-1]
+        F = audio_encodings.shape[1]
 
         frame_lengths = 1 + (audio_lengths // self.hop_length)    # [B]
         frame_lengths = frame_lengths.clamp(min=1, max=F) # number of valid frames
 
-        frame_mask = create_mask_from_lengths(frame_lengths, max_len=F)  # [B, 1, F]
+        frame_mask = create_mask_from_lengths(frame_lengths, max_len=F)  # [B, F, 1]
 
         return audio_encodings, frame_mask, frame_lengths
