@@ -31,14 +31,13 @@ class Aligner(nn.Module):
         phoneme_encodings,          # [B, P, hidden_dim=512]
         phoneme_encodings_mask,     # [B, P, 1]
         phoneme_encodings_lengths,  # [B]
-    ) -> dict[str, torch.Tensor]:
+    ):
         
-        alignment_soft, alignment_logits = self.aligner_net(audio_encodings, phoneme_encodings, phoneme_encodings_mask)  # [B, F, P]
+        alignment_logprobs, alignment_soft, alignment_logits = self.aligner_net(audio_encodings, phoneme_encodings, phoneme_encodings_mask)  # [B, F, P]
         
         attn_mask = frame_mask & rearrange(phoneme_encodings_mask, 'b t 1 -> b 1 t')  # [B, F, P]
 
         B, F, P = alignment_soft.shape
-        alignment_logprobs = torch.log(alignment_soft + 1e-9) # [B,F,P]
         
         prior_logprobs = compute_beta_binomial_prior(  # [B,F,P]
             frame_lengths,
@@ -125,9 +124,10 @@ class AlignerNet(nn.Module):
 
         alignment_logits.masked_fill_(~mask, mask_value)
         
-        alignment_soft = alignment_logits.softmax(dim=-1)
+        alignment_logprobs = alignment_logits.log_softmax(dim=-1)
+        alignment_soft = alignment_logprobs.exp()  
 
-        return alignment_soft, alignment_logits  # [B, F, P]
+        return alignment_logprobs, alignment_soft, alignment_logits  # [B, F, P]
 
 
 
