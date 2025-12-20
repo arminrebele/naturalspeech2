@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from einops import rearrange
 
-from naturalspeech2.transformer_encoder_layer import TransformerEncoderLayer, RMSNorm
+from naturalspeech2.modules import TransformerEncoderLayer, RMSNorm
 
 class PhonemeEncoder(nn.Module):
     def __init__(
