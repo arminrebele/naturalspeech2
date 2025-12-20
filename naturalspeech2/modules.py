@@ -217,9 +217,7 @@ class MultiHeadSelfAttention(nn.Module):
         )
 
         out = rearrange(out, 'b h t d -> b t (h d)') # [B, T, D]
-
         out = self.to_out(out)
-
         return out
 
 
@@ -259,7 +257,7 @@ class MultiHeadCrossAttention(nn.Module):
             q, k, v,
             attn_mask=attn_mask,
             dropout_p=self.dropout if self.training else 0.0,
-            is_causal=False,  # Encoder = bidirectional
+            is_causal=False,
         )
 
         out = rearrange(out, 'b h t d -> b t (h d)') # [B, T, D]
