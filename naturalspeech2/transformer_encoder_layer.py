@@ -33,25 +33,26 @@ class TransformerEncoderLayer(nn.Module):
     def forward(
             self, 
             x,    # [B, T, D]
-            mask  # [B, 1, T]
+            mask  # [B, T, 1]
     ):
-        qmask = rearrange(mask, 'b 1 t -> b t 1')  # [B, T, 1]
-        qmask = qmask.to(x.dtype)
+        mask = mask.to(x.dtype)
 
         attn_out = self.multi_head_attention(self.norm1(x), mask)  # [B, T, D]
         x = x + self.dropout(attn_out)
-        x = x * qmask # padding token vector to zero
+        x = x * mask # padding token vector to zero
         
         x_norm = self.norm2(x)
         x_norm = rearrange(x_norm, 'b t d -> b d t')
+        mask = rearrange(mask, 'b t 1 -> b 1 t')
 
         ffn_out = self.conv1(x_norm, mask)
         ffn_out = F.silu(ffn_out)
         ffn_out = self.conv2(ffn_out, mask)
         ffn_out = rearrange(ffn_out, 'b d t -> b t d')
+        mask = rearrange(mask, 'b 1 t -> b t 1')
 
         x = x + self.dropout(ffn_out)
-        x = x * qmask # padding token vector to zero
+        x = x * mask # padding token vector to zero
 
         return x
 
@@ -70,7 +71,7 @@ class RMSNorm(nn.Module):
     
     def forward(
             self, 
-            x
+            x       # [B, T, D]
     ):
         rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
         return (x / rms) * self.weight
@@ -190,7 +191,7 @@ class MultiHeadSelfAttention(nn.Module):
     def forward(
             self, 
             x,      # [B = batch_size, T = seq_len, D = hidden_dim]
-            mask    # [B, 1, T]
+            mask    # [B, T, 1]
     ):
         qkv = self.to_qkv(x)            # [B, T, 3 * D]
         q, k, v = qkv.chunk(3, dim=-1)  # each [B, T, D]
@@ -205,7 +206,7 @@ class MultiHeadSelfAttention(nn.Module):
 
         # scaled_dot_product_attention adds attn_mask to the scores
         # 0. 0 for valid tokens, -inf for padding
-        attn_mask = rearrange(mask, 'b 1 t -> b 1 1 t')
+        attn_mask = rearrange(mask, 'b t 1 -> b 1 1 t')
         attn_mask = torch.where(attn_mask, 0.0, float('-inf'))
 
         out = F.scaled_dot_product_attention(
@@ -222,6 +223,52 @@ class MultiHeadSelfAttention(nn.Module):
         return out
 
 
+class MultiHeadCrossAttention(nn.Module):
+    def __init__(
+            self,
+            hidden_dim: int,
+            attention_heads: int,
+            dropout: float
+    ):
+        super().__init__()
+        self.num_heads = attention_heads
+        self.head_dim = hidden_dim // attention_heads
+        self.dropout = dropout
+        self.to_q = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.to_kv = nn.Linear(hidden_dim, hidden_dim * 2, bias=False)
+        self.to_out = nn.Linear(hidden_dim, hidden_dim, bias=False)
+
+    def forward(
+            self,
+            x_q,        # [B, T, D]
+            x_kv,       # [B, T, D]
+            kv_mask,    # [B, T, 1]
+    ):
+        q = self.to_q(x_q)
+        kv = self.to_kv(x_kv)
+        k, v = kv.chunk(2, dim=-1)
+
+        q = rearrange(q, 'b t (h d) -> b h t d', h=self.num_heads)
+        k = rearrange(k, 'b t (h d) -> b h t d', h=self.num_heads)
+        v = rearrange(v, 'b t (h d) -> b h t d', h=self.num_heads)
+
+        attn_mask = rearrange(kv_mask, 'b t 1 -> b 1 1 t')
+        attn_mask = torch.where(attn_mask, 0.0, float('-inf'))
+        
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout if self.training else 0.0,
+            is_causal=False,  # Encoder = bidirectional
+        )
+
+        out = rearrange(out, 'b h t d -> b t (h d)') # [B, T, D]
+        out = self.to_out(out)
+        return out
+
+
+
+
 class Conv1D(nn.Module):
     def __init__(
             self,
@@ -235,7 +282,7 @@ class Conv1D(nn.Module):
     
     def forward(
             self,
-            x,    # [B=batch_size, D=hidden_dim, T=seq_len]
+            x,    # [B, D, T]
             mask  # [B, 1, T]
     ):
         x = x.masked_fill(~mask, 0.0)
