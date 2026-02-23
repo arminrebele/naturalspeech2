@@ -47,7 +47,7 @@ class EspeakPhonemizer:
 
 
 if __name__ == "__main__":
-    text = "123 Hello, world! This is a test."
+    text = "This is a test!"
     phonemizer = EspeakPhonemizer()
     phonemized_text = phonemizer(text)
     print(phonemized_text)
