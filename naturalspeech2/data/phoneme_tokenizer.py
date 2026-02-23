@@ -66,14 +66,14 @@ def build_token_vocabulary(
 
 if __name__ == "__main__":
 
-    # Code to build token vocabulary based on VCTK dataset
-    from naturalspeech2.data.vctk import VCTKDataset
-    dataset = VCTKDataset()
-    #dataset.dataset = dataset.dataset.select(range(200))
-    token_vocabulary = build_token_vocabulary(dataset)
-    print(len(token_vocabulary))
+    # # Code to build token vocabulary based on VCTK dataset
+    # from naturalspeech2.data.vctk import VCTKDataset
+    # dataset = VCTKDataset()
+    # #dataset.dataset = dataset.dataset.select(range(200))
+    # token_vocabulary = build_token_vocabulary(dataset)
+    # print(len(token_vocabulary))
 
     # Test code to verify tokenizer
     tokenizer = PhonemeTokenizer()
-    text = "123 Hello, world! This is a test."
+    text = "This is a test!"
     print(tokenizer(text))

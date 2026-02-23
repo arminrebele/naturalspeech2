@@ -14,14 +14,14 @@ data:
 
 model:
   # global model parameters
-  dim_hidden: 512
-  dim_latents: 128
+  hidden_dim: 512
+  latent_dim: 128
   rope_base: 10000.0
   rope_max_seq_len: 3000
   min_prompt_pct: 0.2        # minimum percentage of the audio used as prompt (only training)
   max_prompt_pct: 0.5        # maximum percentage of the audio used as prompt (only training)
 
-  # Modul: Log Mel Spectrogram Generator
+  # Log Mel Spectrogram Generator
   mel:
     n_fft: 1024
     hop_length: 320
@@ -29,25 +29,33 @@ model:
     f_min: 0.0
     f_max: null
   
-  # Modul: Phoneme Encoder
+  # Phoneme Encoder
   phoneme_encoder:
     transformer_layers: 6
     attention_heads: 8
     conv1d_filter_size: 2048
-    conv1_kernel_size: 9
+    conv1d_kernel_size: 9
     dropout: 0.2
 
-  # Modul: Aligner
+  # Aligner
   aligner:
     attn_channels: 80
     temperature: 0.0005
     prior_w: 1.0
 
-  # Modul: Speech Prompt Encoder
+  # Speech Prompt Encoder
   speech_prompt_encoder:
     transformer_layers: 6
     attention_heads: 8
     conv1d_filter_size: 2048
-    conv1_kernel_size: 9
+    conv1d_kernel_size: 9
     dropout: 0.2
+
+  # Duration Predictor
+  duration_predictor:
+    conv1d_layers: 30
+    conv1d_kernel_size: 3
+    attention_layers: 10
+    attention_heads: 8
+    dropout: 0.5
 

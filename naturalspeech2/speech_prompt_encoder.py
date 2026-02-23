@@ -1,16 +1,16 @@
 import torch
 from torch import nn
 import torch.nn.functional as F
-from naturalspeech2.transformer_encoder_layer import TransformerEncoderLayer, RMSNorm
+
+from einops import rearrange
+
+from naturalspeech2.modules import TransformerEncoderLayer, RMSNorm
 
 class SpeechPromptEncoder(nn.Module):
-    """
-    Prompt Encodings -> Projection -> N x TransformerEncoderLayer -> Output
-    """
     def __init__(
             self,
-            dim_hidden: int = 512,
-            dim_latents: int = 128,
+            hidden_dim: int = 512,
+            latent_dim: int = 128,
             transformer_layers: int = 6,
             attention_heads: int = 8,
             conv1d_filter_size: int = 2048,
@@ -20,11 +20,11 @@ class SpeechPromptEncoder(nn.Module):
             rope_max_seq_len: int = 3000,
     ):
         super().__init__()
-        self.input_projection = nn.Conv1d(dim_latents, dim_hidden, kernel_size=1)
+        self.input_projection = nn.Conv1d(latent_dim, hidden_dim, kernel_size=1, bias=False)
 
         self.transformer_layers = nn.ModuleList([
             TransformerEncoderLayer(
-                dim_hidden,
+                hidden_dim,
                 attention_heads,
                 conv1d_filter_size, 
                 conv1d_kernel_size, 
@@ -35,23 +35,27 @@ class SpeechPromptEncoder(nn.Module):
             for _ in range(transformer_layers)
         ])
 
-        self.final_norm = RMSNorm(dim_hidden)
+        self.final_norm = RMSNorm(hidden_dim)
 
     def forward(
             self,
-            prompt_latents: torch.Tensor,         # [B, dim_latents, F]
-            prompt_latents_mask: torch.Tensor,    # [B, 1, F]
+            prompt_latents: torch.Tensor,         # [B, F, latent_dim]
+            prompt_latents_mask: torch.Tensor,    # [B, F, 1]
             prompt_latents_lengths: torch.Tensor,
     ):
-        x = self.input_projection(prompt_latents)  # [B, dim_hidden, F]
-        x = x.transpose(1, 2)  # [B, F, dim_hidden]
+        prompt_latents = rearrange(prompt_latents, 'b t d -> b d t')  # [B, latent_dim, F]
+        prompt_latents_mask = rearrange(prompt_latents_mask, 'b t 1 -> b 1 t')  # [B, 1, F]
+
+        x = self.input_projection(prompt_latents, prompt_latents_mask)   # [B, hidden_dim, F]
+        x = rearrange(x, 'b d t -> b t d')          # [B, F, hidden_dim]
+        prompt_latents_mask = rearrange(prompt_latents_mask, 'b 1 t -> b t 1')  # [B, F, 1]
 
         for layer in self.transformer_layers:
             x = layer(x, prompt_latents_mask)
 
         x = self.final_norm(x)
 
-        x = x.transpose(1, 2)  # [B, dim_hidden, F]
+        x = x * prompt_latents_mask
 
         return x
 
@@ -61,14 +65,14 @@ if __name__ == "__main__":
 
     B = 4
     F = 50
-    dim_latents = 128
-    dim_hidden = 512
+    latent_dim = 128
+    hidden_dim = 512
     
     device = "mps" if torch.backends.mps.is_available() else "cpu"
 
     speech_prompt_encoder = SpeechPromptEncoder(
-        dim_hidden=dim_hidden,
-        dim_latents=dim_latents,
+        hidden_dim=hidden_dim,
+        latent_dim=latent_dim,
         transformer_layers=6,
         attention_heads=8,
         conv1d_filter_size=2048,
@@ -76,7 +80,7 @@ if __name__ == "__main__":
         dropout=0.2,
     ).to(device)
 
-    prompt_latents = torch.randn(B, dim_latents, F, device=device)
+    prompt_latents = torch.randn(B, latent_dim, F, device=device)
     prompt_latents_lengths = torch.randint(low=int(F*0.5), high=F + 1, size=(B,), device=device)
     
     # Create mask
@@ -100,8 +104,8 @@ if __name__ == "__main__":
             prompt_latents_lengths
         )
 
-    print(f"  Output shape: {output.shape}")  # Expected: [B, dim_hidden, F]
-    assert output.shape == (B, dim_hidden, F)
+    print(f"  Output shape: {output.shape}")  # Expected: [B, hidden_dim, F]
+    assert output.shape == (B, hidden_dim, F)
     
     # --- Output Verification ---
     print(f"\nOutput Statistics:")

@@ -2,10 +2,12 @@ import torch
 from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 from datasets import load_dataset, load_from_disk, Audio
+from einops import rearrange
 
 from naturalspeech2.paths import VCTK_DIR, VCTK_PROCESSED_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer, build_token_vocabulary
 from naturalspeech2.data.espeak_phonemizer import EspeakPhonemizer
+from naturalspeech2.utils.utils import create_mask_from_lengths
 
 def phonemize_text(sample, phonemizer):
     sample["phonemes"] = phonemizer(sample["text"])
@@ -75,9 +77,10 @@ def vctk_collate_fn(batch, pad_token_id=0):
 
     audio_tensors = [torch.tensor(item["audio"]) for item in batch]
     audio_lengths = torch.tensor([len(tensor) for tensor in audio_tensors])
-    audio_padded = pad_sequence(audio_tensors, batch_first=True, padding_value=0.0)
+    audio_padded = pad_sequence(audio_tensors, batch_first=True, padding_value=0.0)  # [B, T]
+
     max_audio_len = audio_padded.shape[1]
-    audio_mask = (torch.arange(max_audio_len).unsqueeze(0) < audio_lengths.unsqueeze(1)).unsqueeze(1)
+    audio_mask = create_mask_from_lengths(audio_lengths, max_audio_len) # [B, T, 1]
 
     phoneme_tokens_tensors = [torch.tensor(item["phoneme_tokens"]) for item in batch]   # list of tensor with variable length
     phoneme_tokens_lengths = torch.tensor([len(tensor) for tensor in phoneme_tokens_tensors])
@@ -86,24 +89,26 @@ def vctk_collate_fn(batch, pad_token_id=0):
         batch_first=True, 
         padding_value=pad_token_id
     )
+
     max_tokens_len = phoneme_tokens_padded.shape[1]
-    phoneme_tokens_mask = (torch.arange(max_tokens_len).unsqueeze(0) < phoneme_tokens_lengths.unsqueeze(1)).unsqueeze(1)
+    phoneme_tokens_mask = create_mask_from_lengths(phoneme_tokens_lengths, max_tokens_len) # [B, P, 1]
 
     raw_audios = [item["audio"] for item in batch]
     texts = [item["text"] for item in batch]
     
     return {
-        "audio": audio_padded,                      # [B, T_max_audio]
-        "audio_mask": audio_mask,                   # [B, 1, T_max_audio]  
+        "audio": audio_padded,                      # [B, T]
+        "audio_mask": audio_mask,                   # [B, T, 1]  
         "audio_lengths": audio_lengths,             # [B]  
         
-        "phoneme_tokens": phoneme_tokens_padded,                # [B, T_max_token_seq]
-        "phoneme_tokens_mask": phoneme_tokens_mask,             # [B, 1, T_max_token_seq]
+        "phoneme_tokens": phoneme_tokens_padded,                # [B, P]
+        "phoneme_tokens_mask": phoneme_tokens_mask,             # [B, P, 1]
         "phoneme_tokens_lengths": phoneme_tokens_lengths,       # [B]
 
         "texts": texts,
         "raw_audios": raw_audios,
     }
+
 
 if __name__ == "__main__":
 

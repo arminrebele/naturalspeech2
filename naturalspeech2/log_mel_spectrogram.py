@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 import torchaudio
+from einops import rearrange
+from naturalspeech2.utils.utils import create_mask_from_lengths
 
 class LogMelSpectrogramGenerator(nn.Module):
     def __init__(
@@ -29,22 +31,23 @@ class LogMelSpectrogramGenerator(nn.Module):
         self.to_db = torchaudio.transforms.AmplitudeToDB(stype="power")
 
 
-    def forward(self, audio, audio_lengths):
-        """
-        audio: [B, T_max_audio]
-        audio_lengths: [B]
-        """
-        audio_encodings= self.log_mel_generator(audio)
-        audio_encodings = self.to_db(audio_encodings)  # [B, dim_audio, F]
+    def forward(
+            self, 
+            audio,         # [B, T]  | T = max audio length
+            audio_lengths  # [B]
+    ):
+        audio_encodings= self.log_mel_generator(audio) # [B, n_mels, F]
+        
+        # Clamp the values to a minimum of 1e-5 to avoid -inf in log scale, if silence log(0) -> -inf
+        audio_encodings = torch.clamp(audio_encodings, min=1e-5)
+        audio_encodings = self.to_db(audio_encodings)  # [B, n_mels, F]
+        audio_encodings = rearrange(audio_encodings, 'b d t -> b t d')  # [B, F, n_mels]
 
-        B, _, F = audio_encodings.shape
-
-        device = audio_encodings.device
+        F = audio_encodings.shape[1]
 
         frame_lengths = 1 + (audio_lengths // self.hop_length)    # [B]
         frame_lengths = frame_lengths.clamp(min=1, max=F) # number of valid frames
 
-        frame_idx = torch.arange(F, device=device).unsqueeze(0)     # [1, F]
-        frame_mask = (frame_idx < frame_lengths.unsqueeze(1)).unsqueeze(1)  # [B, 1, F]
+        frame_mask = create_mask_from_lengths(frame_lengths, max_len=F)  # [B, F, 1]
 
         return audio_encodings, frame_mask, frame_lengths
