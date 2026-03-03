@@ -1,7 +1,7 @@
 from pathlib import Path
 
-PACKAGE_ROOT = Path(__file__).resolve().parent    # Audiodeepfakedetection-DDIM-Inversion/audiodeepfakedetection_ddim_inversion
-PROJECT_ROOT = PACKAGE_ROOT.parent                # Audiodeepfakedetection-DDIM-Inversion
+PACKAGE_ROOT = Path(__file__).resolve().parent    # NATURALSPEECH2/naturalspeech2
+PROJECT_ROOT = PACKAGE_ROOT.parent                # NATURALSPEECH2
 
 DATA_DIR = PROJECT_ROOT / "data"
 VCTK_DIR = DATA_DIR / "vctk"

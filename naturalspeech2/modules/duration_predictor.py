@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from einops import rearrange
 
-from naturalspeech2.modules import RMSNorm, MultiHeadCrossAttention, Conv1D
+from naturalspeech2.modules.layers import RMSNorm, MultiHeadCrossAttention, Conv1D
 
 
 # ausgabe maskieren: out = out.masked_fill(~mask, 0.0)

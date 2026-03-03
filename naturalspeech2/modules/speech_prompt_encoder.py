@@ -4,7 +4,7 @@ import torch.nn.functional as F
 
 from einops import rearrange
 
-from naturalspeech2.modules import TransformerEncoderLayer, RMSNorm
+from naturalspeech2.modules.layers import TransformerEncoderLayer, RMSNorm
 
 class SpeechPromptEncoder(nn.Module):
     def __init__(

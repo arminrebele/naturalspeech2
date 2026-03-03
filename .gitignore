@@ -1,7 +1,6 @@
 .DS_Store
 
-data/
-!/naturalspeech2/data/
+/data/
 
 notebooks/
 models/

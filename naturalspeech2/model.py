@@ -4,12 +4,12 @@ from torch.nn.utils.rnn import pad_sequence
 
 from einops import rearrange
 
-from naturalspeech2.encodec import EncodecWrapper
-from naturalspeech2.log_mel_spectrogram import LogMelSpectrogramGenerator
-from naturalspeech2.phoneme_encoder import PhonemeEncoder
-from naturalspeech2.aligner import Aligner, ForwardSumLoss, BinLoss
-from naturalspeech2.speech_prompt_encoder import SpeechPromptEncoder
-from naturalspeech2.duration_predictor import DurationPredictor
+from naturalspeech2.modules.encodec import EncodecWrapper
+from naturalspeech2.modules.log_mel_spectrogram import LogMelSpectrogramGenerator
+from naturalspeech2.modules.phoneme_encoder import PhonemeEncoder
+from naturalspeech2.modules.aligner import Aligner, ForwardSumLoss, BinLoss
+from naturalspeech2.modules.speech_prompt_encoder import SpeechPromptEncoder
+from naturalspeech2.modules.duration_predictor import DurationPredictor
 from naturalspeech2.utils.utils import create_mask_from_lengths
 
 
@@ -309,8 +309,3 @@ class NaturalSpeech2Model(nn.Module):
             "loss": loss,
         }
     
-
-
-
-
-
