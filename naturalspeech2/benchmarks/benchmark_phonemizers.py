@@ -2,7 +2,7 @@ import time
 from tqdm import tqdm
 from datasets import load_dataset
 
-from naturalspeech2.testing.espeak_phonemizer import EspeakPhonemizer
+from naturalspeech2.benchmarks.espeak_phonemizer import EspeakPhonemizer
 from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
 
 def benchmark():
