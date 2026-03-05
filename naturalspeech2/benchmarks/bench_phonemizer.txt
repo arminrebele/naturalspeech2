@@ -1,0 +1,21 @@
+Collecting 1000 samples for benchmarking...
+Benchmarking on 1000 sentences.
+
+Initializing EspeakPhonemizer (Old approach)...
+Initializing PhonemizerWrapper (New approach)...
+
+Running EspeakPhonemizer...
+100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1000/1000 [02:25<00:00,  6.85it/s]
+
+Running PhonemizerWrapper...
+100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████| 1000/1000 [00:00<00:00, 4117.08it/s]
+
+--- Results ---
+EspeakPhonemizer (Old): 145.9030 seconds (0.1459 s/sentence)
+PhonemizerWrapper (New): 0.2434 seconds (0.0002 s/sentence)
+Speedup: 599.52x
+
+--- Output Comparison (First Sample) ---
+Text: Please call Stella.
+Old: ['p', 'l', 'ˈiː', 'z', ' ', 'k', 'ˈɔː', 'l', ' ', 's', 't', 'ˈɛ', 'l', 'ə', '.']
+New: ['p', 'l', 'ˈ', 'iː', 'z', ' ', 'k', 'ˈ', 'ɔː', 'l', ' ', 's', 't', 'ˈ', 'ɛ', 'l', 'ə', '.']

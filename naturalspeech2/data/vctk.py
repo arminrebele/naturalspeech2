@@ -4,9 +4,9 @@ from torch.nn.utils.rnn import pad_sequence
 from datasets import load_dataset, load_from_disk, Audio
 from einops import rearrange
 
-from naturalspeech2.paths import VCTK_DIR, VCTK_PROCESSED_DIR
+from naturalspeech2.paths import VCTK_PROCESSED_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer, build_token_vocabulary
-from naturalspeech2.data.espeak_phonemizer import EspeakPhonemizer
+from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
 from naturalspeech2.utils.utils import create_mask_from_lengths
 
 def phonemize_text(sample, phonemizer):
@@ -18,19 +18,17 @@ def tokenize_text(sample, phoneme_tokenizer):
     return sample
 
 class VCTKDataset(Dataset):
-    def __init__(self,phonemizer: EspeakPhonemizer = None, sampling_rate=24000, num_proc=4):
+    def __init__(self, phonemizer: PhonemizerWrapper = None, sampling_rate=24000, num_proc=4):
         self.sampling_rate = sampling_rate
         self.num_proc = num_proc
-        self.phonemizer = phonemizer or EspeakPhonemizer()
+        self.phonemizer = phonemizer or PhonemizerWrapper()
         self.dataset = self._process_dataset()
 
     def _process_dataset(self):
         try:
             return load_from_disk(str(VCTK_PROCESSED_DIR))
         except Exception:
-            VCTK_DIR.mkdir(parents=True, exist_ok=True)
-
-            dataset = load_dataset("sanchit-gandhi/vctk", split="train", cache_dir=str(VCTK_DIR))
+            dataset = load_dataset("sanchit-gandhi/vctk", split="train")                    # !!! default cache_dir
             dataset = dataset.filter(lambda file: "_mic2" in file, input_columns=["file"])
             dataset = dataset.cast_column("audio", Audio(sampling_rate=self.sampling_rate))
 

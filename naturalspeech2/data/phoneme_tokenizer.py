@@ -3,20 +3,18 @@ import sys
 from tqdm import tqdm
 from collections.abc import Iterable
 
-from naturalspeech2.data.espeak_phonemizer import EspeakPhonemizer
+from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
 from naturalspeech2.paths import TOKEN_VOCABULARY_PATH
-
-SPECIAL_TOKENS = ["<pad>", "<unk>", "<bos>", "<eos>"]
-
 
 
 class PhonemeTokenizer:
-    def __init__(self, phonemizer: EspeakPhonemizer = None, token_vocabulary_path: str = TOKEN_VOCABULARY_PATH):
-        self.phonemizer = phonemizer or EspeakPhonemizer()
+    def __init__(self, phonemizer: PhonemizerWrapper = None, token_vocabulary_path: str = TOKEN_VOCABULARY_PATH):
+        self.phonemizer = phonemizer or PhonemizerWrapper()
         self.token_vocabulary_path = token_vocabulary_path
         self.token_vocabulary = {} # token to id
         self.id_to_token = {}
         self._load_token_vocabulary()
+        self.unk_id = self.token_vocabulary.get("<unk>")
 
     def _load_token_vocabulary(self):
         try:
@@ -38,18 +36,17 @@ class PhonemeTokenizer:
         elif isinstance(input_data, list):
             phonemes = input_data
         tokens =  ["<bos>"] + phonemes + ["<eos>"]
-        unk_id = self.token_vocabulary.get("<unk>")
-        return [self.token_vocabulary.get(token, unk_id) for token in tokens]
+        return [self.token_vocabulary.get(token, self.unk_id) for token in tokens]
 
     def decode_tokens(self, token_ids: list[int]) -> list[str]:
-        """Wandelt Token-IDs zurück in Tokens (Phoneme oder Sonderzeichen)."""
+        """Converts token-IDs back into strings (phonemes or special characters)."""
         return [self.id_to_token.get(i, "<unk>") for i in token_ids]
 
 
 
 def build_token_vocabulary(
         dataset: Iterable[dict],
-        special_tokens: list[str] = SPECIAL_TOKENS, 
+        special_tokens: list[str] = ["<pad>", "<unk>", "<bos>", "<eos>"], 
         save_path: str = TOKEN_VOCABULARY_PATH) -> dict[str, int]:
     
     tokens_from_text = set()
