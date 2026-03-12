@@ -4,32 +4,47 @@ from torch.utils.data import DataLoader
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from naturalspeech2.data.vctk import VCTKDataset, vctk_collate_fn
+from naturalspeech2.data.dataset import DatasetWrapper, custom_collate_fn, BucketedBatchSampler
 from naturalspeech2.model import NaturalSpeech2Model
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 
 @hydra.main(version_base=None, config_path="config", config_name="config")
 def train(cfg: DictConfig):
 
-    if cfg.training.device == "auto":
-        device = "mps" if torch.backends.mps.is_available() else ("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = cfg.training.device
-    print(f"Using device: {device}")
+    if not torch.cuda.is_available():
+        raise RuntimeError("This script requires an NVIDIA GPU and CUDA installed, but none were detected.")
+    device = cfg.training.device 
 
-    tokenizer = PhonemeTokenizer()
-    token_vocabulary_size = tokenizer.token_vocabulary_size 
+    dataset = DatasetWrapper(
+        dataset_source=cfg.dataset.source,
+        dataset_name=cfg.dataset.name,
+        text_column=cfg.dataset.text_column,
+        audio_column=cfg.dataset.audio_column,
+        filter_column=cfg.dataset.get("filter_column"),
+        filter_substring=cfg.dataset.get("filter_substring"),
+        token_vocabulary_path=cfg.dataset.token_vocabulary_path,
+        sampling_rate=cfg.dataloader.sampling_rate,
+        num_proc_phonemize=cfg.dataloader.num_proc_phonemize,
+        num_proc_tokenize=cfg.dataloader.num_proc_tokenize,
+    )
 
-    dataset = VCTKDataset(
-        sampling_rate=cfg.data.sampling_rate,
-        num_proc=cfg.data.num_proc
+    tokenizer = PhonemeTokenizer(token_vocabulary_path=dataset.token_vocabulary_path, with_backend=False)
+    token_vocabulary_size = tokenizer.token_vocabulary_size
+
+    sampler = BucketedBatchSampler(
+        dataset,
+        batch_size=cfg.training.batch_size,
+        drop_last=True,
+        shuffle=cfg.dataloader.shuffle,
+        block_size_multiplier=cfg.dataloader.block_size_multiplier
     )
 
     loader = DataLoader(
         dataset, 
-        batch_size=cfg.data.batch_size, 
-        shuffle=cfg.data.shuffle, 
-        collate_fn=vctk_collate_fn
+        batch_sampler=sampler, 
+        collate_fn=custom_collate_fn,
+        num_workers=cfg.dataloader.num_workers,
+        pin_memory=True
     )
 
     model_args = {
@@ -37,7 +52,7 @@ def train(cfg: DictConfig):
         'token_vocabulary_size': token_vocabulary_size,
         'hidden_dim': cfg.model.hidden_dim,
         'latent_dim': cfg.model.latent_dim,
-        'sampling_rate': cfg.data.sampling_rate,
+        'sampling_rate': cfg.dataloader.sampling_rate,
         'rope_base': cfg.model.rope_base,
         'rope_max_seq_len': cfg.model.rope_max_seq_len,
         'min_prompt_pct': cfg.model.min_prompt_pct,

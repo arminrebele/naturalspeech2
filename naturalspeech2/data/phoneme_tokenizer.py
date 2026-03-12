@@ -4,12 +4,14 @@ from tqdm import tqdm
 from collections.abc import Iterable
 
 from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
-from naturalspeech2.paths import TOKEN_VOCABULARY_PATH
 
 
 class PhonemeTokenizer:
-    def __init__(self, phonemizer: PhonemizerWrapper = None, token_vocabulary_path: str = TOKEN_VOCABULARY_PATH):
-        self.phonemizer = phonemizer or PhonemizerWrapper()
+    def __init__(self, phonemizer: PhonemizerWrapper = None, token_vocabulary_path: str = None, with_backend: bool = True):
+        self.phonemizer = phonemizer
+        if self.phonemizer is None and with_backend:
+            self.phonemizer = PhonemizerWrapper()
+            
         self.token_vocabulary_path = token_vocabulary_path
         self.token_vocabulary = {} # token to id
         self.id_to_token = {}
@@ -17,12 +19,8 @@ class PhonemeTokenizer:
         self.unk_id = self.token_vocabulary.get("<unk>")
 
     def _load_token_vocabulary(self):
-        try:
-            with open(self.token_vocabulary_path, 'r', encoding='utf-8') as f:
-                self.token_vocabulary = json.load(f)
-        except FileNotFoundError:
-            print(f"ERROR: {self.token_vocabulary_path} not found", file=sys.stderr)
-            raise
+        if self.token_vocabulary_path is None:
+            raise ValueError("token_vocabulary_path must be provided")
 
         self.id_to_token = {v: k for k, v in self.token_vocabulary.items()}
 
@@ -47,7 +45,7 @@ class PhonemeTokenizer:
 def build_token_vocabulary(
         dataset: Iterable[dict],
         special_tokens: list[str] = ["<pad>", "<unk>", "<bos>", "<eos>"], 
-        save_path: str = TOKEN_VOCABULARY_PATH) -> dict[str, int]:
+        save_path: str = None) -> dict[str, int]:
     
     tokens_from_text = set()
     for sample in tqdm(dataset, desc="Building token vocabulary"):
@@ -55,6 +53,9 @@ def build_token_vocabulary(
 
     tokens = special_tokens + sorted(tokens_from_text)
     token_vocabulary = {token: idx for idx, token in enumerate(tokens)}
+
+    if save_path is None:
+        raise ValueError("save_path must be provided")
 
     with open(save_path, "w", encoding="utf-8") as f:
         json.dump(token_vocabulary, f, ensure_ascii=False, indent=2)
@@ -71,6 +72,7 @@ if __name__ == "__main__":
     # print(len(token_vocabulary))
 
     # Test code to verify tokenizer
-    tokenizer = PhonemeTokenizer()
-    text = "This is a test!"
-    print(tokenizer(text))
+    # tokenizer = PhonemeTokenizer(token_vocabulary_path="path/to/vocab.json")
+    # text = "This is a test!"
+    # print(tokenizer(text))
+    pass
