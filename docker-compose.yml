@@ -1,0 +1,15 @@
+services:
+  ns2:
+    build: .
+    volumes:
+      - .:/workspace
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # This keeps the container's bash shell alive if started in the background
+    tty: true
+    stdin_open: true
