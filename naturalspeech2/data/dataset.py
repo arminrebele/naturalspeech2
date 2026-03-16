@@ -1,5 +1,8 @@
+import json
+import logging
 from pathlib import Path
 import numpy as np
+import pyarrow as pa
 import torch
 from torch.utils.data import Dataset, Sampler
 import torchaudio
@@ -91,7 +94,13 @@ class DatasetWrapper(Dataset):
     def _process_dataset(self):
         try:
             return load_from_disk(str(self.processed_dir))
-        except Exception:
+        except (
+            FileNotFoundError, 
+            json.JSONDecodeError, 
+            pa.ArrowInvalid, 
+            pa.ArrowIOError
+        ) as e:
+            logging.info(f"Local dataset unavailable or corrupted ({type(e).__name__}). Triggering preprocessing...")
             dataset = load_dataset(self.dataset_source, split="train", cache_dir=str(self.cache_dir))
             # Add index before filtering to keep track of original rows
             dataset = dataset.add_column("original_index", range(len(dataset)))
