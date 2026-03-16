@@ -5,3 +5,4 @@ num_workers: 8
 sampling_rate: 24000
 shuffle: true
 block_size_multiplier: 20
+resample_on_the_fly: false

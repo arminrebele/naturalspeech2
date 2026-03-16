@@ -18,12 +18,14 @@ def train(cfg: DictConfig):
     dataset = DatasetWrapper(
         dataset_source=cfg.dataset.source,
         dataset_name=cfg.dataset.name,
+        split=cfg.dataset.split,
         text_column=cfg.dataset.text_column,
         audio_column=cfg.dataset.audio_column,
-        filter_column=cfg.dataset.get("filter_column"),
-        filter_substring=cfg.dataset.get("filter_substring"),
+        filter_column=cfg.dataset.filter_column,
+        filter_substring=cfg.dataset.filter_substring,
         token_vocabulary_path=cfg.dataset.token_vocabulary_path,
         sampling_rate=cfg.dataloader.sampling_rate,
+        resample_on_the_fly=cfg.dataloader.resample_on_the_fly,
         num_proc_phonemize=cfg.dataloader.num_proc_phonemize,
         num_proc_tokenize=cfg.dataloader.num_proc_tokenize,
     )

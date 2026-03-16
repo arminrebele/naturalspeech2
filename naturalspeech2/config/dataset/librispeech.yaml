@@ -1,6 +1,7 @@
 # @package _group_
 name: "LibriSpeech"
 source: "parler-tts/mls_eng"
+split: "train[:50%]"
 text_column: "transcript"
 audio_column: "audio"
 filter_column: null

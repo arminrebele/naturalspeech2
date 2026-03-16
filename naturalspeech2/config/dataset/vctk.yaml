@@ -1,6 +1,7 @@
 # @package _group_
 name: "VCTK"
 source: "sanchit-gandhi/vctk"
+split: "train"
 text_column: "text"
 audio_column: "audio"
 filter_column: "file"

@@ -35,6 +35,18 @@ def tokenize_batch(batch, phoneme_tokenizer):
     batch["phoneme_tokens"] = [phoneme_tokenizer(p) for p in batch["phonemes"]]
     return batch
 
+def get_audio_metadata_batched(batch, target_sr):
+    # This function calculates the audio length as if it were resampled.
+    # By using torchaudio.info, we only read the file headers, avoiding full decoding.
+    lengths = []
+    for audio_path in batch["audio"]:
+        info = torchaudio.info(audio_path)
+        resampled_length = int(info.num_frames * (target_sr / info.sample_rate))
+        lengths.append(resampled_length)
+        
+    return {"audio_length": lengths}
+
+
 def resample_and_save_audio(sample, target_sr, resampled_dir):
     # Get the resampled audio array.
     resampled_array = sample["audio"]["array"]
@@ -60,24 +72,28 @@ class DatasetWrapper(Dataset):
         self,
         dataset_source: str,
         dataset_name: str,
+        split: str = "train",
         text_column: str = "text",
         audio_column: str = "audio",
         filter_column: str = None,
         filter_substring: str = None,
         token_vocabulary_path: str = None,
         sampling_rate=24000,
+        resample_on_the_fly=False,
         num_proc_phonemize=24,
         num_proc_tokenize=4,
     ):
         super().__init__()
         self.dataset_source = dataset_source
         self.dataset_name = dataset_name
+        self.split = split
         self.text_column = text_column
         self.audio_column = audio_column
         self.filter_column = filter_column
         self.filter_substring = filter_substring
         
         self.sampling_rate = sampling_rate
+        self.resample_on_the_fly = resample_on_the_fly
         self.num_proc_phonemize = num_proc_phonemize
         self.num_proc_tokenize = num_proc_tokenize
         
@@ -87,8 +103,11 @@ class DatasetWrapper(Dataset):
         self.cache_dir = self.dataset_dir / "cache"
         self.token_vocabulary_path = token_vocabulary_path
         if self.token_vocabulary_path is None:
-            self.token_vocabulary_path = self.dataset_dir / "token_vocabulary.json"
+            self.token_vocabulary_path = DATA_DIR / f"{self.dataset_name}_token_vocabulary.json"
         
+        # Pre-assign the appropriate get_audio function to avoid if/else overhead in __getitem__
+        self._get_audio = self._get_audio_on_the_fly if self.resample_on_the_fly else self._get_audio_pre_resampled
+
         self.dataset = self._process_dataset()
 
     def _process_dataset(self):
@@ -101,7 +120,9 @@ class DatasetWrapper(Dataset):
             pa.ArrowIOError
         ) as e:
             logging.info(f"Local dataset unavailable or corrupted ({type(e).__name__}). Triggering preprocessing...")
-            dataset = load_dataset(self.dataset_source, split="train", cache_dir=str(self.cache_dir))
+
+            logging.info(f"Loading dataset '{self.dataset_name}' with split '{self.split}'...")
+            dataset = load_dataset(self.dataset_source, split=self.split, cache_dir=str(self.cache_dir))
             # Add index before filtering to keep track of original rows
             dataset = dataset.add_column("original_index", range(len(dataset)))
             
@@ -111,24 +132,39 @@ class DatasetWrapper(Dataset):
             dataset = dataset.rename_column(self.text_column, "text")
             dataset = dataset.rename_column(self.audio_column, "audio")
 
-            # 1. Cast to Audio to leverage HF's on-the-fly resampling during the map operation.
-            dataset = dataset.cast_column("audio", Audio(sampling_rate=self.sampling_rate))
-            
-            # Create the directory for resampled audio
-            self.resampled_dir.mkdir(parents=True, exist_ok=True)
+            if self.resample_on_the_fly:
+                logging.info("`resample_on_the_fly` is True. Calculating resampled audio lengths without saving.")
+                # 1. Cast audio to string immediately so HF doesn't decode the files into memory
+                dataset = dataset.cast_column("audio", Value("string"))
+                dataset = dataset.map(
+                    get_audio_metadata_batched,
+                    batched=True,
+                    fn_kwargs={"target_sr": self.sampling_rate},
+                    num_proc=self.num_proc_tokenize,
+                    desc="Calculating audio lengths",
+                )
+            else:
+                logging.info("`resample_on_the_fly` is False. Pre-resampling and saving audio files.")
+                # 1. Cast to Audio to leverage HF's on-the-fly resampling during the map operation.
+                dataset = dataset.cast_column("audio", Audio(sampling_rate=self.sampling_rate))
+                
+                # Create the directory for resampled audio
+                self.resampled_dir.mkdir(parents=True, exist_ok=True)
 
-            # 2. Map the function to resample and save each audio file to a new location.
-            dataset = dataset.map(
-                resample_and_save_audio,
-                remove_columns=["audio"],                       # Remove original audio dict column
-                fn_kwargs={"target_sr": self.sampling_rate, "resampled_dir": self.resampled_dir},
-                num_proc=self.num_proc_phonemize,               # Use the phonemize proc count as it's a heavy task
-                desc="Resampling and saving audio",
-            )
-            
-            # 3. Rename the path column back to 'audio' and ensure it's treated as a string
-            dataset = dataset.rename_column("audio_path", "audio")
-            dataset = dataset.cast_column("audio", Value("string"))
+                # 2. Map the function to resample and save each audio file to a new location.
+                dataset = dataset.map(
+                    resample_and_save_audio,
+                    remove_columns=["audio"],                       # Remove original audio dict column
+                    fn_kwargs={"target_sr": self.sampling_rate, "resampled_dir": self.resampled_dir},
+                    num_proc=self.num_proc_phonemize,               # Use the phonemize proc count as it's a heavy task
+                    desc="Resampling and saving audio",
+                )
+                
+                # Rename the path column back to 'audio'
+                dataset = dataset.rename_column("audio_path", "audio")
+                
+                # Ensure the audio column is treated as a string path from here on
+                dataset = dataset.cast_column("audio", Value("string"))
             
             dataset = dataset.map(
                 phonemize_batch,
@@ -137,7 +173,12 @@ class DatasetWrapper(Dataset):
                 desc="Phonemizing transcripts",
             )
 
-            build_token_vocabulary(dataset, save_path=str(self.token_vocabulary_path))
+            if not Path(self.token_vocabulary_path).is_file():
+                logging.info(f"Token vocabulary not found. Building new token vocabulary at {self.token_vocabulary_path}...")
+                build_token_vocabulary(dataset, save_path=str(self.token_vocabulary_path))
+            else:
+                logging.info(f"Using existing token vocabulary from {self.token_vocabulary_path}.")
+
             # Initialize tokenizer without backend so it is picklable
             phoneme_tokenizer = PhonemeTokenizer(phonemizer=None, token_vocabulary_path=str(self.token_vocabulary_path), with_backend=False)
     
@@ -164,15 +205,27 @@ class DatasetWrapper(Dataset):
     def __len__(self):
         return len(self.dataset)
 
+    def _get_audio_on_the_fly(self, audio_path):
+        audio, original_sr = torchaudio.load(audio_path)
+        if original_sr != self.sampling_rate:
+            # Use torchaudio's functional resample for on-the-fly processing
+            audio = torchaudio.functional.resample(audio, orig_freq=original_sr, new_freq=self.sampling_rate)
+        return audio[0]
+
+    def _get_audio_pre_resampled(self, audio_path):
+        audio, _ = torchaudio.load(audio_path)
+        return audio[0]
+
     def __getitem__(self, idx):
         item = self.dataset[idx]
-        # Load audio on the fly from the path.
-        audio, sr = torchaudio.load(item["audio"])
+        
+        audio = self._get_audio(item["audio"])
+
         return {
-            "audio": audio[0], # [T] 
+            "audio": audio, # [T] 
             "phoneme_tokens": item["phoneme_tokens"],
             "original_index": item["original_index"],
-            "audio_length": item["audio_length"],
+            "audio_length": audio.shape[-1],
         }
 
 class BucketedBatchSampler(Sampler):
