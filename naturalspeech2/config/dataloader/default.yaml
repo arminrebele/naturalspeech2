@@ -1,7 +1,7 @@
 # @package _group_
 num_proc_phonemize: 24
 num_proc_tokenize: 4
-num_workers: 2
+num_workers: 8
 sampling_rate: 24000
 shuffle: true
 block_size_multiplier: 20
