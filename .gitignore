@@ -10,6 +10,8 @@ __pycache__/
 .venv/
 
 .env
-*.log
 
 docker-compose.override.yml
+*.log
+outputs/
+multirun/

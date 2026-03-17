@@ -14,6 +14,8 @@ models/
 # Secrets & Logs
 .env
 *.log
+outputs/
+multirun/
 
 # Docs & Docker Meta
 *.md
