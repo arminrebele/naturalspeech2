@@ -9,7 +9,7 @@ from naturalspeech2.data.dataset import DatasetWrapper, custom_collate_fn, Bucke
 from naturalspeech2.model import NaturalSpeech2Model
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 
-@hydra.main(version_base=None, config_path="../config", config_name="config")
+@hydra.main(version_base=None, config_path="../../config", config_name="config")
 def benchmark(cfg: DictConfig):
     if not torch.cuda.is_available():
         raise RuntimeError("NVIDIA GPU required for benchmarking.")
@@ -50,14 +50,47 @@ def benchmark(cfg: DictConfig):
     )
 
     print("--- Initializing Model ---")
-    # We initialize a dummy model with minimal parameters just to simulate the forward/backward pass time
-    model = NaturalSpeech2Model(
-        device=device,
-        token_vocabulary_size=tokenizer.token_vocabulary_size,
-        hidden_dim=cfg.model.hidden_dim,
-        latent_dim=cfg.model.latent_dim,
-        sampling_rate=cfg.dataloader.sampling_rate
-    ).to(device)
+    # Mirror train.py parameters exactly to guarantee realistic GPU timing for the bottleneck calculation
+    model_args = {
+        'device': device,
+        'token_vocabulary_size': tokenizer.token_vocabulary_size,
+        'hidden_dim': cfg.model.hidden_dim,
+        'latent_dim': cfg.model.latent_dim,
+        'sampling_rate': cfg.dataloader.sampling_rate,
+        'rope_base': cfg.model.rope_base,
+        'rope_max_seq_len': cfg.model.rope_max_seq_len,
+        'min_prompt_pct': cfg.model.min_prompt_pct,
+        'max_prompt_pct': cfg.model.max_prompt_pct,
+
+        'n_fft': cfg.model.mel.n_fft,
+        'hop_length': cfg.model.mel.hop_length,
+        'n_mels': cfg.model.mel.n_mels,
+        'f_min': cfg.model.mel.f_min,
+        'f_max': cfg.model.mel.f_max,
+
+        'phoneme_encoder_layers': cfg.model.phoneme_encoder.transformer_layers,
+        'phoneme_encoder_heads': cfg.model.phoneme_encoder.attention_heads,
+        'phoneme_encoder_filter_size': cfg.model.phoneme_encoder.conv1d_filter_size,
+        'phoneme_encoder_kernel_size': cfg.model.phoneme_encoder.conv1d_kernel_size,
+        'phoneme_encoder_dropout': cfg.model.phoneme_encoder.dropout,
+
+        'aligner_attn_channels': cfg.model.aligner.attn_channels,
+        'aligner_temperature': cfg.model.aligner.temperature,
+        'prior_w': cfg.model.aligner.prior_w,
+
+        'speech_prompt_encoder_layers': cfg.model.speech_prompt_encoder.transformer_layers,
+        'speech_prompt_encoder_heads': cfg.model.speech_prompt_encoder.attention_heads,
+        'speech_prompt_encoder_filter_size': cfg.model.speech_prompt_encoder.conv1d_filter_size,
+        'speech_prompt_encoder_kernel_size': cfg.model.speech_prompt_encoder.conv1d_kernel_size,
+        'speech_prompt_encoder_dropout': cfg.model.speech_prompt_encoder.dropout,
+
+        'duration_predictor_conv1d_layers': cfg.model.duration_predictor.conv1d_layers,
+        'duration_predictor_conv1d_kernel_size': cfg.model.duration_predictor.conv1d_kernel_size,
+        'duration_predictor_attention_layers': cfg.model.duration_predictor.attention_layers,
+        'duration_predictor_attention_heads': cfg.model.duration_predictor.attention_heads,
+        'duration_predictor_dropout': cfg.model.duration_predictor.dropout,
+    }
+    model = NaturalSpeech2Model(**model_args).to(device)
     
     print("Compiling model...")
     model = torch.compile(model)
