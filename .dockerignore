@@ -1,0 +1,25 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Data & Weights
+/data/
+models/
+
+# Secrets & Logs
+.env
+*.log
+
+# Docs & Docker Meta
+*.md
+/assets/
+docker-compose*.yml
+
+# Dev & Research scripts
+benchmarks/
+research/
