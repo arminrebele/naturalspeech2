@@ -1,5 +1,8 @@
 import json
+import shutil
 import logging
+import gc
+import io
 from pathlib import Path
 import numpy as np
 import pyarrow as pa
@@ -39,8 +42,9 @@ def get_audio_metadata_batched(batch, target_sr):
     # This function calculates the audio length as if it were resampled.
     # By using torchaudio.info, we only read the file headers, avoiding full decoding.
     lengths = []
-    for audio_path in batch["audio"]:
-        info = torchaudio.info(audio_path)
+    for audio_dict in batch["audio"]:
+        # audio_dict["bytes"] contains the raw embedded file bytes from the Parquet/Arrow file
+        info = torchaudio.info(io.BytesIO(audio_dict["bytes"]))
         resampled_length = int(info.num_frames * (target_sr / info.sample_rate))
         lengths.append(resampled_length)
         
@@ -51,9 +55,8 @@ def resample_and_save_audio(sample, target_sr, resampled_dir):
     # Get the resampled audio array.
     resampled_array = sample["audio"]["array"]
     
-    # Create a unique path for the new file
-    original_path = Path(sample["file"])
-    new_filename = f"{original_path.stem}_resampled.flac"
+    # Create a unique path for the new file using the dataset index
+    new_filename = f"{sample['original_index']}_resampled.flac"
     new_path = resampled_dir / new_filename
 
     # Save the resampled audio to the new path as FLAC
@@ -112,7 +115,9 @@ class DatasetWrapper(Dataset):
 
     def _process_dataset(self):
         try:
-            return load_from_disk(str(self.processed_dir))
+            dataset = load_from_disk(str(self.processed_dir))
+            logging.info(f"Successfully loaded processed dataset from {self.processed_dir}")
+            return dataset
         except (
             FileNotFoundError, 
             json.JSONDecodeError, 
@@ -125,17 +130,19 @@ class DatasetWrapper(Dataset):
             dataset = load_dataset(self.dataset_source, split=self.split, cache_dir=str(self.cache_dir))
             # Add index before filtering to keep track of original rows
             dataset = dataset.add_column("original_index", range(len(dataset)))
+            dataset.cleanup_cache_files()
             
             if self.filter_column and self.filter_substring:
                 dataset = dataset.filter(lambda x: self.filter_substring in x, input_columns=[self.filter_column])
+                dataset.cleanup_cache_files()
 
             dataset = dataset.rename_column(self.text_column, "text")
             dataset = dataset.rename_column(self.audio_column, "audio")
 
             if self.resample_on_the_fly:
                 logging.info("`resample_on_the_fly` is True. Calculating resampled audio lengths without saving.")
-                # 1. Cast audio to string immediately so HF doesn't decode the files into memory
-                dataset = dataset.cast_column("audio", Value("string"))
+                # Tell HF not to decode the array, but keep the raw bytes available
+                dataset = dataset.cast_column("audio", Audio(decode=False))
                 dataset = dataset.map(
                     get_audio_metadata_batched,
                     batched=True,
@@ -143,6 +150,7 @@ class DatasetWrapper(Dataset):
                     num_proc=self.num_proc_tokenize,
                     desc="Calculating audio lengths",
                 )
+                dataset.cleanup_cache_files()
             else:
                 logging.info("`resample_on_the_fly` is False. Pre-resampling and saving audio files.")
                 # 1. Cast to Audio to leverage HF's on-the-fly resampling during the map operation.
@@ -165,6 +173,7 @@ class DatasetWrapper(Dataset):
                 
                 # Ensure the audio column is treated as a string path from here on
                 dataset = dataset.cast_column("audio", Value("string"))
+                dataset.cleanup_cache_files()
             
             dataset = dataset.map(
                 phonemize_batch,
@@ -172,6 +181,7 @@ class DatasetWrapper(Dataset):
                 num_proc=self.num_proc_phonemize,
                 desc="Phonemizing transcripts",
             )
+            dataset.cleanup_cache_files()
 
             if not Path(self.token_vocabulary_path).is_file():
                 logging.info(f"Token vocabulary not found. Building new token vocabulary at {self.token_vocabulary_path}...")
@@ -189,24 +199,32 @@ class DatasetWrapper(Dataset):
                 num_proc=self.num_proc_tokenize,
                 desc="Tokenizing transcripts",
             )
+            dataset.cleanup_cache_files()
 
             # Keep only the columns needed for training to save space
             dataset = dataset.select_columns(["audio", "audio_length", "phoneme_tokens", "original_index"])
+            dataset.cleanup_cache_files()
 
             self.processed_dir.mkdir(parents=True, exist_ok=True)
             dataset.save_to_disk(str(self.processed_dir))
 
-            # Clean up all intermediate cache files created during the process
-            print("Cleaning up intermediate cache files...")
-            dataset.cleanup_cache_files()
+            logging.info(f"Completely deleting project cache directory: {self.cache_dir}")
+            del dataset
+            gc.collect()  # Force garbage collection to release file handles
+            try:
+                shutil.rmtree(self.cache_dir)
+            except Exception as e:
+                logging.warning(f"Failed to completely delete cache directory: {e}")
             
-            return dataset
+            logging.info(f"Loading standalone dataset from {self.processed_dir} into memory...")
+            return load_from_disk(str(self.processed_dir))
 
     def __len__(self):
         return len(self.dataset)
 
-    def _get_audio_on_the_fly(self, audio_path):
-        audio, original_sr = torchaudio.load(audio_path)
+    def _get_audio_on_the_fly(self, audio_dict):
+        # Decode the embedded bytes on the fly
+        audio, original_sr = torchaudio.load(io.BytesIO(audio_dict["bytes"]))
         if original_sr != self.sampling_rate:
             # Use torchaudio's functional resample for on-the-fly processing
             audio = torchaudio.functional.resample(audio, orig_freq=original_sr, new_freq=self.sampling_rate)
@@ -301,19 +319,49 @@ def custom_collate_fn(batch, pad_token_id=0):
 
 
 if __name__ == "__main__":
+    from torch.utils.data import DataLoader
 
-    # test code to verify dataset loading
-    dataset = DatasetWrapper(dataset_source="sanchit-gandhi/vctk", dataset_name="VCTK", filter_column="file", filter_substring="_mic2")
-    print(len(dataset))
+    # Set logging to INFO to see the processing steps in the terminal
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
+    logging.info("Initializing DatasetWrapper for VCTK...")
+    dataset = DatasetWrapper(
+        dataset_source="sanchit-gandhi/vctk", 
+        dataset_name="VCTK", 
+        split="train",
+        text_column="text",
+        audio_column="audio",
+        filter_column="file", 
+        filter_substring="_mic2",
+        sampling_rate=24000,
+        resample_on_the_fly=False,  # Try True or False!
+        num_proc_phonemize=24,
+        num_proc_tokenize=4,
+    )
+    
+    logging.info(f"Dataset initialized successfully with length: {len(dataset)}")
+
+    # Test individual sample retrieval
     sample = dataset[0]
-    print(sample)
-    print(f"Sample keys: {sample.keys()}")
-    print(f"Audio shape: {sample['audio'].shape}")
+    logging.info(f"Sample 0 keys: {sample.keys()}")
+    logging.info(f"Sample 0 Audio shape: {sample['audio'].shape}")
+    logging.info(f"Sample 0 Phoneme tokens length: {len(sample['phoneme_tokens'])}")
 
-    # Test Sampler
+    # Test Sampler and DataLoader
+    logging.info("Testing BucketedBatchSampler and DataLoader...")
     sampler = BucketedBatchSampler(dataset, batch_size=4, shuffle=True)
-    print(f"Number of batches: {len(sampler)}")
-    for batch_indices in sampler:
-        print(f"Batch indices: {batch_indices}")
+    loader = DataLoader(
+        dataset, 
+        batch_sampler=sampler, 
+        collate_fn=custom_collate_fn,
+        num_workers=0
+    )
+    
+    for batch in loader:
+        logging.info(f"Batch keys: {batch.keys()}")
+        logging.info(f"Batched audio shape: {batch['audio'].shape}")
+        logging.info(f"Batched audio_mask shape: {batch['audio_mask'].shape}")
+        logging.info(f"Batched phoneme_tokens shape: {batch['phoneme_tokens'].shape}")
         break
+        
+    logging.info("Dataset and DataLoader tests completed successfully! ✅")
