@@ -2,7 +2,7 @@ import torch
 from torch.utils.data import DataLoader
 
 import hydra
-from omegaconf import DictConfig, OmegaConf
+from omegaconf import DictConfig
 
 from naturalspeech2.data.dataset import DatasetWrapper, custom_collate_fn, BucketedBatchSampler
 from naturalspeech2.model import NaturalSpeech2Model

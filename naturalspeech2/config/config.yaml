@@ -1,6 +1,6 @@
 defaults:
   - _self_
-  - dataset: vctk
+  - dataset: librispeech
   - dataloader: default
   - model: base
   - training: ns2_paper
