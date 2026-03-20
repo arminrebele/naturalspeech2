@@ -2,5 +2,4 @@
 device: "cuda"
 learning_rate: 0
 steps: 0
-batch_size: 4
-gradient_accumulation_steps: 1
+gradient_accumulation_steps: 1  # static might not make sense due to dynamic batch sizes

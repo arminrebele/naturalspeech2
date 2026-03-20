@@ -9,36 +9,38 @@ import pyarrow as pa
 import torch
 from torch.utils.data import Dataset, Sampler
 import torchaudio
-from torch.nn.utils.rnn import pad_sequence
-from datasets import load_dataset, load_from_disk, Audio, Value
+from datasets import load_dataset, load_from_disk, Audio, Value, Dataset as HFDataset
 from einops import rearrange
+from typing import Any, Optional, Iterator
 
 from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer, build_token_vocabulary
 from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
 from naturalspeech2.utils.utils import create_mask_from_lengths
 
+logger = logging.getLogger(__name__)
 
 # Global cache for worker processes
 _PHONEMIZER_INSTANCE = None
 
-def get_worker_phonemizer():
+def get_worker_phonemizer() -> PhonemizerWrapper:
     global _PHONEMIZER_INSTANCE
     if _PHONEMIZER_INSTANCE is None:
         _PHONEMIZER_INSTANCE = PhonemizerWrapper()
     return _PHONEMIZER_INSTANCE
 
 
-def phonemize_batch(batch):
+def phonemize_batch(batch: dict[str, list[Any]]) -> dict[str, list[Any]]:
     phonemizer = get_worker_phonemizer()
     batch["phonemes"] = [phonemizer(text) for text in batch["text"]]
     return batch
 
-def tokenize_batch(batch, phoneme_tokenizer):
+def tokenize_batch(batch: dict[str, list[Any]], phoneme_tokenizer: PhonemeTokenizer) -> dict[str, list[Any]]:
     batch["phoneme_tokens"] = [phoneme_tokenizer(p) for p in batch["phonemes"]]
+    batch["phoneme_tokens_length"] = [len(p) for p in batch["phoneme_tokens"]]
     return batch
 
-def get_audio_metadata_batched(batch, target_sr):
+def get_audio_metadata_batched(batch: dict[str, list[Any]], target_sr: int) -> dict[str, list[int]]:
     # This function calculates the audio length as if it were resampled.
     # By using torchaudio.info, we only read the file headers, avoiding full decoding.
     lengths = []
@@ -51,7 +53,7 @@ def get_audio_metadata_batched(batch, target_sr):
     return {"audio_length": lengths}
 
 
-def resample_and_save_audio(sample, target_sr, resampled_dir):
+def resample_and_save_audio(sample: dict[str, Any], target_sr: int, resampled_dir: Path) -> dict[str, Any]:
     # Get the resampled audio array.
     resampled_array = sample["audio"]["array"]
     
@@ -78,13 +80,13 @@ class DatasetWrapper(Dataset):
         split: str = "train",
         text_column: str = "text",
         audio_column: str = "audio",
-        filter_column: str = None,
-        filter_substring: str = None,
-        token_vocabulary_path: str = None,
-        sampling_rate=24000,
-        resample_on_the_fly=False,
-        num_proc_phonemize=24,
-        num_proc_tokenize=4,
+        filter_column: Optional[str] = None,
+        filter_substring: Optional[str] = None,
+        token_vocabulary_path: Optional[str] = None,
+        sampling_rate: int = 24000,
+        resample_on_the_fly: bool = False,
+        num_proc_phonemize: int = 24,
+        num_proc_tokenize: int = 4,
     ):
         super().__init__()
         self.dataset_source = dataset_source
@@ -113,10 +115,10 @@ class DatasetWrapper(Dataset):
 
         self.dataset = self._process_dataset()
 
-    def _process_dataset(self):
+    def _process_dataset(self) -> HFDataset:
         try:
             dataset = load_from_disk(str(self.processed_dir))
-            logging.info(f"Successfully loaded processed dataset from {self.processed_dir}")
+            logger.info(f"Successfully loaded processed dataset from {self.processed_dir}")
             return dataset
         except (
             FileNotFoundError, 
@@ -124,9 +126,9 @@ class DatasetWrapper(Dataset):
             pa.ArrowInvalid, 
             pa.ArrowIOError
         ) as e:
-            logging.info(f"Local dataset unavailable or corrupted ({type(e).__name__}). Triggering preprocessing...")
+            logger.info(f"Local dataset unavailable or corrupted ({type(e).__name__}). Triggering preprocessing...")
 
-            logging.info(f"Loading dataset '{self.dataset_name}' with split '{self.split}'...")
+            logger.info(f"Loading dataset '{self.dataset_name}' with split '{self.split}'...")
             dataset = load_dataset(self.dataset_source, split=self.split, cache_dir=str(self.cache_dir))
             # Add index before filtering to keep track of original rows
             dataset = dataset.add_column("original_index", range(len(dataset)))
@@ -140,7 +142,7 @@ class DatasetWrapper(Dataset):
             dataset = dataset.rename_column(self.audio_column, "audio")
 
             if self.resample_on_the_fly:
-                logging.info("`resample_on_the_fly` is True. Calculating resampled audio lengths without saving.")
+                logger.info("`resample_on_the_fly` is True. Calculating resampled audio lengths without saving.")
                 # Tell HF not to decode the array, but keep the raw bytes available
                 dataset = dataset.cast_column("audio", Audio(decode=False))
                 dataset = dataset.map(
@@ -152,7 +154,7 @@ class DatasetWrapper(Dataset):
                 )
                 dataset.cleanup_cache_files()
             else:
-                logging.info("`resample_on_the_fly` is False. Pre-resampling and saving audio files.")
+                logger.info("`resample_on_the_fly` is False. Pre-resampling and saving audio files.")
                 # 1. Cast to Audio to leverage HF's on-the-fly resampling during the map operation.
                 dataset = dataset.cast_column("audio", Audio(sampling_rate=self.sampling_rate))
                 
@@ -184,10 +186,10 @@ class DatasetWrapper(Dataset):
             dataset.cleanup_cache_files()
 
             if not Path(self.token_vocabulary_path).is_file():
-                logging.info(f"Token vocabulary not found. Building new token vocabulary at {self.token_vocabulary_path}...")
+                logger.info(f"Token vocabulary not found. Building new token vocabulary at {self.token_vocabulary_path}...")
                 build_token_vocabulary(dataset, save_path=str(self.token_vocabulary_path))
             else:
-                logging.info(f"Using existing token vocabulary from {self.token_vocabulary_path}.")
+                logger.info(f"Using existing token vocabulary from {self.token_vocabulary_path}.")
 
             # Initialize tokenizer without backend so it is picklable
             phoneme_tokenizer = PhonemeTokenizer(phonemizer=None, token_vocabulary_path=str(self.token_vocabulary_path), with_backend=False)
@@ -202,27 +204,27 @@ class DatasetWrapper(Dataset):
             dataset.cleanup_cache_files()
 
             # Keep only the columns needed for training to save space
-            dataset = dataset.select_columns(["audio", "audio_length", "phoneme_tokens", "original_index"])
+            dataset = dataset.select_columns(["audio", "audio_length", "phoneme_tokens", "phoneme_tokens_length", "original_index"])
             dataset.cleanup_cache_files()
 
             self.processed_dir.mkdir(parents=True, exist_ok=True)
             dataset.save_to_disk(str(self.processed_dir))
 
-            logging.info(f"Completely deleting project cache directory: {self.cache_dir}")
+            logger.info(f"Completely deleting project cache directory: {self.cache_dir}")
             del dataset
             gc.collect()  # Force garbage collection to release file handles
             try:
                 shutil.rmtree(self.cache_dir)
             except Exception as e:
-                logging.warning(f"Failed to completely delete cache directory: {e}")
+                logger.warning(f"Failed to completely delete cache directory: {e}")
             
-            logging.info(f"Loading standalone dataset from {self.processed_dir} into memory...")
+            logger.info(f"Loading standalone dataset from {self.processed_dir} into memory...")
             return load_from_disk(str(self.processed_dir))
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.dataset)
 
-    def _get_audio_on_the_fly(self, audio_dict):
+    def _get_audio_on_the_fly(self, audio_dict: dict[str, Any]) -> torch.Tensor:
         # Decode the embedded bytes on the fly
         audio, original_sr = torchaudio.load(io.BytesIO(audio_dict["bytes"]))
         if original_sr != self.sampling_rate:
@@ -230,11 +232,11 @@ class DatasetWrapper(Dataset):
             audio = torchaudio.functional.resample(audio, orig_freq=original_sr, new_freq=self.sampling_rate)
         return audio[0]
 
-    def _get_audio_pre_resampled(self, audio_path):
+    def _get_audio_pre_resampled(self, audio_path: str) -> torch.Tensor:
         audio, _ = torchaudio.load(audio_path)
         return audio[0]
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int) -> dict[str, Any]:
         item = self.dataset[idx]
         
         audio = self._get_audio(item["audio"])
@@ -242,80 +244,164 @@ class DatasetWrapper(Dataset):
         return {
             "audio": audio, # [T] 
             "phoneme_tokens": item["phoneme_tokens"],
+            "phoneme_tokens_length": item["phoneme_tokens_length"],
             "original_index": item["original_index"],
             "audio_length": audio.shape[-1],
         }
 
-class BucketedBatchSampler(Sampler):
-    def __init__(self, dataset, batch_size, drop_last=True, shuffle=True, block_size_multiplier=20):
+class DynamicBucketedBatchSampler(Sampler):
+    """
+    A Sampler that yields batches of dynamic sizes to maximize VRAM utilization.
+    It groups sequences by length, looks up the corresponding bucket, and chunks
+    the dataset using the allowed batch_size for that specific bucket.
+    """
+    def __init__(
+        self, 
+        dataset: Dataset, 
+        bucket_mapping: list[dict[str, int]], 
+        drop_last: bool = True, 
+        shuffle: bool = True
+    ):
         self.dataset = dataset
-        self.batch_size = batch_size
         self.drop_last = drop_last
         self.shuffle = shuffle
-        self.block_size_multiplier = block_size_multiplier
         
-        # Access lengths directly from the Arrow dataset
-        self.lengths = dataset.dataset["audio_length"]
-
-    def __iter__(self):
-        # 1. Sort by length
-        indices = np.argsort(self.lengths)
+        # Ensure buckets are strictly sorted by audio_length from smallest to largest
+        self.bucket_mapping = sorted(bucket_mapping, key=lambda x: x['audio_length'])
         
-        # 2. Block/Bucket Shuffle
-        if self.shuffle and self.block_size_multiplier > 1:
-            block_size = self.batch_size * self.block_size_multiplier
-            indices = indices.copy() # Copy to avoid side effects if cached
-            for i in range(0, len(indices), block_size):
-                end = min(i + block_size, len(indices))
-                np.random.shuffle(indices[i:end])
+        # Strictly group all sequence indices into their assigned buckets at initialization
+        self.bucket_to_indices = {i: [] for i in range(len(self.bucket_mapping))}
+        
+        # Extract the lengths directly as a NumPy array
+        lengths_arr = np.array(dataset.dataset["audio_length"])
+        bucket_boundaries = np.array([b['audio_length'] for b in self.bucket_mapping])
+        
+        # Assignment of all sequences to buckets
+        bucket_indices = np.searchsorted(bucket_boundaries, lengths_arr)
+        
+        # Check for sequences that exceed the maximum bucket length
+        invalid_mask = bucket_indices == len(bucket_boundaries)
+        if np.any(invalid_mask):
+            invalid_idx = np.where(invalid_mask)[0][0]
+            max_len = bucket_boundaries[-1]
+            raise ValueError(
+                f"Sequence at index {invalid_idx} with length {lengths_arr[invalid_idx]} exceeds "
+                f"the maximum defined bucket length ({max_len})."
+            )
+            
+        for b_idx in range(len(self.bucket_mapping)):
+            self.bucket_to_indices[b_idx] = np.where(bucket_indices == b_idx)[0].tolist()
 
-        # 3. Create batches
+        # Pre-calculate the exact number of batches for tqdm / DataLoader len()
+        self._num_batches = self._compute_len()
+
+    def _compute_len(self) -> int:
+        num_batches = 0
+        for b_idx, indices in self.bucket_to_indices.items():
+            bs = self.bucket_mapping[b_idx]['batch_size']
+            if self.drop_last:
+                num_batches += len(indices) // bs
+            else:
+                num_batches += (len(indices) + bs - 1) // bs
+        return num_batches
+
+    def __iter__(self) -> Iterator[list[int]]:
         batches = []
-        for i in range(0, len(indices), self.batch_size):
-            batch = indices[i : i + self.batch_size]
-            if len(batch) < self.batch_size and self.drop_last:
-                continue
-            batches.append(batch.tolist())
         
-        # 4. Shuffle the batches order
+        # Build batches directly from the isolated buckets
+        for b_idx, indices in self.bucket_to_indices.items():
+            bs = self.bucket_mapping[b_idx]['batch_size']
+            
+            # Shuffling within the bucket handles block randomization perfectly
+            bucket_indices = list(indices)
+            if self.shuffle:
+                np.random.shuffle(bucket_indices)
+            
+            # Strict chunking ensures batch size is absolutely identical
+            for i in range(0, len(bucket_indices), bs):
+                batch = bucket_indices[i : i + bs]
+                
+                if len(batch) == bs:
+                    batches.append(batch)
+                elif not self.drop_last:
+                    # Warning: If drop_last=False, this final incomplete batch WILL cause a graph recompile!
+                    batches.append(batch)
+        
+        # Shuffle the global batch order so the model doesn't see sizes sequentially
         if self.shuffle:
             np.random.shuffle(batches)
             
         for batch in batches:
             yield batch
 
-    def __len__(self):
-        return len(self.dataset) // self.batch_size if self.drop_last else (len(self.dataset) + self.batch_size - 1) // self.batch_size
+    def __len__(self) -> int:
+        return self._num_batches
 
-def custom_collate_fn(batch, pad_token_id=0):
-    # Audio is already a tensor from __getitem__
-    audio_tensors = [item["audio"] for item in batch]
-    audio_lengths = torch.tensor([item["audio_length"] for item in batch])
-    audio_padded = pad_sequence(audio_tensors, batch_first=True, padding_value=0.0)  # [B, T]
 
-    max_audio_len = audio_padded.shape[1]
-    audio_mask = create_mask_from_lengths(audio_lengths, max_audio_len) # [B, T, 1]
+class BucketedCollateFn:
+    """
+    A callable Collate Function that receives the bucket mapping. 
+    It snaps the padding to exactly the predefined bucket dimensions, drastically
+    reducing graph recompilations in torch.compile().
+    """
+    def __init__(self, bucket_mapping: list[dict[str, int]], pad_token_id: int = 0):
+        self.bucket_mapping = sorted(bucket_mapping, key=lambda x: x['audio_length'])
+        self.pad_token_id = pad_token_id
 
-    phoneme_tokens_tensors = [torch.tensor(item["phoneme_tokens"]) for item in batch]   # list of tensor with variable length
-    phoneme_tokens_lengths = torch.tensor([len(tensor) for tensor in phoneme_tokens_tensors])
-    phoneme_tokens_padded= pad_sequence(
-        phoneme_tokens_tensors,
-        batch_first=True, 
-        padding_value=pad_token_id
-    )
-
-    max_tokens_len = phoneme_tokens_padded.shape[1]
-    phoneme_tokens_mask = create_mask_from_lengths(phoneme_tokens_lengths, max_tokens_len) # [B, P, 1]
-    
-    return {
-        "audio": audio_padded,                      # [B, T]
-        "audio_mask": audio_mask,                   # [B, T, 1]  
-        "audio_lengths": audio_lengths,             # [B]  
+    def __call__(self, batch: list[dict[str, Any]]) -> dict[str, torch.Tensor]:
+        audio_tensors = [item["audio"] for item in batch]
+        audio_lengths = torch.tensor([item["audio_length"] for item in batch])
         
-        "phoneme_tokens": phoneme_tokens_padded,                # [B, P]
-        "phoneme_tokens_mask": phoneme_tokens_mask,             # [B, P, 1]
-        "phoneme_tokens_lengths": phoneme_tokens_lengths,       # [B]
-    }
+        phoneme_tokens_tensors = [torch.tensor(item["phoneme_tokens"]) for item in batch]
+        phoneme_tokens_lengths = torch.tensor([item["phoneme_tokens_length"] for item in batch])
+
+        batch_max_audio = audio_lengths.max().item()
+        batch_max_phoneme = phoneme_tokens_lengths.max().item()
+
+        assigned = False
+        for bucket in self.bucket_mapping:
+            if batch_max_audio <= bucket['audio_length']:
+                target_audio_len = bucket['audio_length']
+                target_phoneme_len = bucket['phoneme_length']
+                assigned = True
+                break
+                
+        if not assigned:
+            max_len = self.bucket_mapping[-1]['audio_length']
+            raise ValueError(
+                f"Batch contains a sequence of length {batch_max_audio}, "
+                f"which exceeds the maximum bucket size ({max_len})."
+            )
+            
+        if batch_max_phoneme > target_phoneme_len:
+            raise ValueError(
+                f"Batch contains a phoneme sequence of length {batch_max_phoneme}, "
+                f"which exceeds the bucket's paired phoneme length ({target_phoneme_len})."
+            )
+
+        B = len(batch)
+
+        audio_padded = torch.zeros((B, target_audio_len), dtype=audio_tensors[0].dtype)
+        for i, t in enumerate(audio_tensors):
+            audio_padded[i, :t.shape[0]] = t
+
+        audio_mask = create_mask_from_lengths(audio_lengths, target_audio_len) # [B, T, 1]
+
+        phoneme_padded = torch.full((B, target_phoneme_len), self.pad_token_id, dtype=phoneme_tokens_tensors[0].dtype)
+        for i, t in enumerate(phoneme_tokens_tensors):
+            phoneme_padded[i, :t.shape[0]] = t
+
+        phoneme_tokens_mask = create_mask_from_lengths(phoneme_tokens_lengths, target_phoneme_len) # [B, P, 1]
+        
+        return {
+            "audio": audio_padded,                      # [B, static_T]
+            "audio_mask": audio_mask,                   # [B, static_T, 1]  
+            "audio_lengths": audio_lengths,             # [B]  
+            
+            "phoneme_tokens": phoneme_padded,           # [B, static_P]
+            "phoneme_tokens_mask": phoneme_tokens_mask, # [B, static_P, 1]
+            "phoneme_tokens_lengths": phoneme_tokens_lengths, # [B]
+        }
 
 
 if __name__ == "__main__":
@@ -324,7 +410,7 @@ if __name__ == "__main__":
     # Set logging to INFO to see the processing steps in the terminal
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    logging.info("Initializing DatasetWrapper for VCTK...")
+    logger.info("Initializing DatasetWrapper for VCTK...")
     dataset = DatasetWrapper(
         dataset_source="sanchit-gandhi/vctk", 
         dataset_name="VCTK", 
@@ -339,29 +425,35 @@ if __name__ == "__main__":
         num_proc_tokenize=4,
     )
     
-    logging.info(f"Dataset initialized successfully with length: {len(dataset)}")
+    logger.info(f"Dataset initialized successfully with length: {len(dataset)}")
 
     # Test individual sample retrieval
     sample = dataset[0]
-    logging.info(f"Sample 0 keys: {sample.keys()}")
-    logging.info(f"Sample 0 Audio shape: {sample['audio'].shape}")
-    logging.info(f"Sample 0 Phoneme tokens length: {len(sample['phoneme_tokens'])}")
+    logger.info(f"Sample 0 keys: {sample.keys()}")
+    logger.info(f"Sample 0 Audio shape: {sample['audio'].shape}")
+    logger.info(f"Sample 0 Phoneme tokens length: {len(sample['phoneme_tokens'])}")
 
     # Test Sampler and DataLoader
-    logging.info("Testing BucketedBatchSampler and DataLoader...")
-    sampler = BucketedBatchSampler(dataset, batch_size=4, shuffle=True)
+    logger.info("Testing DynamicBucketedBatchSampler and DataLoader...")
+    bucket_mapping = [
+        {"audio_length": 120000, "phoneme_length": 65, "batch_size": 4},
+        {"audio_length": 240000, "phoneme_length": 110, "batch_size": 2},
+        {"audio_length": 480000, "phoneme_length": 250, "batch_size": 1}
+    ]
+    sampler = DynamicBucketedBatchSampler(dataset, bucket_mapping=bucket_mapping, shuffle=True)
+    collate_fn = BucketedCollateFn(bucket_mapping=bucket_mapping)
     loader = DataLoader(
         dataset, 
         batch_sampler=sampler, 
-        collate_fn=custom_collate_fn,
+        collate_fn=collate_fn,
         num_workers=0
     )
     
     for batch in loader:
-        logging.info(f"Batch keys: {batch.keys()}")
-        logging.info(f"Batched audio shape: {batch['audio'].shape}")
-        logging.info(f"Batched audio_mask shape: {batch['audio_mask'].shape}")
-        logging.info(f"Batched phoneme_tokens shape: {batch['phoneme_tokens'].shape}")
+        logger.info(f"Batch keys: {batch.keys()}")
+        logger.info(f"Batched audio shape: {batch['audio'].shape}")
+        logger.info(f"Batched audio_mask shape: {batch['audio_mask'].shape}")
+        logger.info(f"Batched phoneme_tokens shape: {batch['phoneme_tokens'].shape}")
         break
         
-    logging.info("Dataset and DataLoader tests completed successfully! ✅")
+    logger.info("Dataset and DataLoader tests completed successfully! ✅")

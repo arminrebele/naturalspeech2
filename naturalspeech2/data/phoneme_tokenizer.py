@@ -1,5 +1,4 @@
 import json
-import sys
 from tqdm import tqdm
 from collections.abc import Iterable
 

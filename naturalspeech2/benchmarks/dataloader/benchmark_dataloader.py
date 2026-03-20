@@ -3,9 +3,9 @@ import torch
 import numpy as np
 from torch.utils.data import DataLoader
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
-from naturalspeech2.data.dataset import DatasetWrapper, custom_collate_fn, BucketedBatchSampler
+from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, DynamicBucketedBatchSampler
 from naturalspeech2.model import NaturalSpeech2Model
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 
@@ -33,18 +33,20 @@ def benchmark(cfg: DictConfig):
 
     tokenizer = PhonemeTokenizer(token_vocabulary_path=dataset.token_vocabulary_path, with_backend=False)
 
-    sampler = BucketedBatchSampler(
+    bucket_mapping = OmegaConf.to_container(cfg.dataloader.bucket_mapping, resolve=True)
+
+    sampler = DynamicBucketedBatchSampler(
         dataset,
-        batch_size=cfg.training.batch_size,
+        bucket_mapping=bucket_mapping,
         drop_last=True,
-        shuffle=cfg.dataloader.shuffle,
-        block_size_multiplier=cfg.dataloader.block_size_multiplier
+        shuffle=cfg.dataloader.shuffle
     )
+    collate_fn = BucketedCollateFn(bucket_mapping=bucket_mapping)
 
     loader = DataLoader(
         dataset, 
         batch_sampler=sampler, 
-        collate_fn=custom_collate_fn,
+        collate_fn=collate_fn,
         num_workers=cfg.dataloader.num_workers,
         pin_memory=True
     )

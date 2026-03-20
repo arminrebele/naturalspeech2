@@ -4,5 +4,9 @@ num_proc_tokenize: 4
 num_workers: 8
 sampling_rate: 24000
 shuffle: true
-block_size_multiplier: 20
 resample_on_the_fly: false
+drop_last: true # Warning: False can cause graph recompiles for incomplete batches
+bucket_mapping:
+  - {audio_length: 120000, phoneme_length: 65, batch_size: 64}
+  - {audio_length: 240000, phoneme_length: 110, batch_size: 32}
+  - {audio_length: 360000, phoneme_length: 165, batch_size: 16}
