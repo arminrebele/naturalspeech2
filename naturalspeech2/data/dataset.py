@@ -257,7 +257,7 @@ class DynamicBucketedBatchSampler(Sampler):
     """
     def __init__(
         self, 
-        dataset: Dataset, 
+        dataset: DatasetWrapper, 
         bucket_mapping: list[dict[str, int]], 
         drop_last: bool = True, 
         shuffle: bool = True
