@@ -301,11 +301,34 @@ class NaturalSpeech2Model(nn.Module):
             alignment_hard
         )
 
-        loss = forward_sum_loss + bin_loss
-
         return {
             "forward_sum_loss": forward_sum_loss,
             "bin_loss": bin_loss,
-            "loss": loss,
         }
+
+    @torch.no_grad()
+    def generate(self, text_tokens: torch.Tensor = None, **kwargs):
+        """
+        Placeholder for future generation method.
+        Should return generated audio tensor [B, T].
+        """
+        return torch.randn(1, 24000, device=self.encodec.device)
+
+    def configure_optimizers(self, weight_decay, learning_rate, betas):
+        # Start with all candidate parameters
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+        
+        # Create optim groups. Tensors that are 2D or higher (Matmuls + Embeddings) decay.
+        # 1D tensors (Biases and LayerNorms) do not decay.
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        
+        # Hardcode fused=True
+        return torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, fused=True)
+
     

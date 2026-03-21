@@ -1,7 +1,8 @@
 # @package _group_
 name: "LibriSpeech"
 source: "parler-tts/mls_eng"
-split: "train"                # or "train[:50%]" for a smaller subset
+train_split: "train"                # or "train[:50%]" for a smaller subset
+val_split: "dev"
 text_column: "transcript"
 audio_column: "audio"
 filter_column: null

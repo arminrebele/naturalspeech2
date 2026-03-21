@@ -7,5 +7,6 @@ DATA_DIR = PROJECT_ROOT / "data"
 
 MODELS_DIR = PROJECT_ROOT / "models"
 ENCODEC_24KHZ_DIR = MODELS_DIR / "encodec_24khz"
+CHECKPOINTS_DIR = MODELS_DIR / "checkpoints"
 
 CONFIG_DIR = PACKAGE_ROOT / "config"
