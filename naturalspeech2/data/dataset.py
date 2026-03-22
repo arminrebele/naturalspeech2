@@ -260,11 +260,15 @@ class DynamicBucketedBatchSampler(Sampler):
         dataset: DatasetWrapper, 
         bucket_mapping: list[dict[str, int]], 
         drop_last: bool = True, 
-        shuffle: bool = True
+        shuffle: bool = True,
+        seed: int = 42
     ):
         self.dataset = dataset
         self.drop_last = drop_last
         self.shuffle = shuffle
+        self.seed = seed
+        self.epoch = 0
+        self.start_batch_idx = 0
         
         # Ensure buckets are strictly sorted by audio_length from smallest to largest
         self.bucket_mapping = sorted(bucket_mapping, key=lambda x: x['audio_length'])
@@ -307,6 +311,7 @@ class DynamicBucketedBatchSampler(Sampler):
 
     def __iter__(self) -> Iterator[list[int]]:
         batches = []
+        rng = np.random.default_rng(self.seed + self.epoch)
         
         # Build batches directly from the isolated buckets
         for b_idx, indices in self.bucket_to_indices.items():
@@ -315,7 +320,7 @@ class DynamicBucketedBatchSampler(Sampler):
             # Shuffling within the bucket handles block randomization perfectly
             bucket_indices = list(indices)
             if self.shuffle:
-                np.random.shuffle(bucket_indices)
+                rng.shuffle(bucket_indices)
             
             # Strict chunking ensures batch size is absolutely identical
             for i in range(0, len(bucket_indices), bs):
@@ -329,14 +334,21 @@ class DynamicBucketedBatchSampler(Sampler):
         
         # Shuffle the global batch order so the model doesn't see sizes sequentially
         if self.shuffle:
-            np.random.shuffle(batches)
+            rng.shuffle(batches)
             
-        for batch in batches:
+        # Instantly fast-forward by slicing the list of batch indices
+        batches_to_yield = batches[self.start_batch_idx:]
+        for batch in batches_to_yield:
             yield batch
 
     def __len__(self) -> int:
         return self._num_batches
 
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+        
+    def set_start_batch_idx(self, batch_idx: int):
+        self.start_batch_idx = batch_idx
 
 class BucketedCollateFn:
     """

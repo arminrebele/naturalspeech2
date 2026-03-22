@@ -45,20 +45,25 @@ def get_lr(it, cfg):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coeff * (learning_rate - min_lr)
 
-def get_batch(loader_iter, loader, device):
-    """Fetches a batch and continuously handles StopIteration for infinite loading."""
-    try:
-        batch = next(loader_iter)
-    except StopIteration:
-        loader_iter = iter(loader)
-        batch = next(loader_iter)
+def get_infinite_batches(loader, device, start_epoch=0, start_batch_idx=0):
+    """Continuously yields batches while tracking and setting dataloader state for instant resuming."""
+    epoch = start_epoch
+    sampler = loader.batch_sampler
+    sampler.set_epoch(epoch)
+    sampler.set_start_batch_idx(start_batch_idx)
     
-    # Move immediately to device asynchronously
-    for k, v in batch.items():
-        if isinstance(v, torch.Tensor):
-            batch[k] = v.to(device, non_blocking=True)
+    while True:
+        for batch_idx, batch in enumerate(loader, start=sampler.start_batch_idx):
+            # Move immediately to device asynchronously
+            for k, v in batch.items():
+                if isinstance(v, torch.Tensor):
+                    batch[k] = v.to(device, non_blocking=True)
+            yield batch, epoch, batch_idx
             
-    return loader_iter, batch
+        # Epoch finished
+        epoch += 1
+        sampler.set_epoch(epoch)
+        sampler.set_start_batch_idx(0)
 
 @torch.no_grad()
 def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, device):
@@ -68,7 +73,16 @@ def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, dev
         loader_iter = iter(loader)
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            loader_iter, batch = get_batch(loader_iter, loader, device)
+            try:
+                batch = next(loader_iter)
+            except StopIteration:
+                loader_iter = iter(loader)
+                batch = next(loader_iter)
+                
+            for k_b, v in batch.items():
+                if isinstance(v, torch.Tensor):
+                    batch[k_b] = v.to(device, non_blocking=True)
+                    
             with torch.autocast(device_type=device.split(':')[0], dtype=torch.bfloat16):
                 loss_dict = model(**batch)
                 total_loss, _ = loss_wrapper(loss_dict)
@@ -178,6 +192,8 @@ def train(cfg: DictConfig):
     # State initialization variables
     iter_num = 0
     best_val_loss = 1e9
+    start_epoch = 0
+    start_batch_idx = 0
     
     # Instantiate Model
     if cfg.training.init_from == 'scratch':
@@ -197,6 +213,8 @@ def train(cfg: DictConfig):
         model.load_state_dict(state_dict)
         iter_num = checkpoint['iter_num'] + 1
         best_val_loss = checkpoint['best_val_loss']
+        start_epoch = checkpoint.get('epoch', 0)
+        start_batch_idx = checkpoint.get('batch_idx', 0) # Already points to the next batch due to pre-fetch
         
     model.to(device)
     loss_wrapper = LossWrapper().to(device)
@@ -230,8 +248,8 @@ def train(cfg: DictConfig):
             resume="allow" if resume_wandb_id else None
         )
 
-    train_iter = iter(train_loader)
-    train_iter, batch = get_batch(train_iter, train_loader, device)
+    batch_generator = get_infinite_batches(train_loader, device, start_epoch, start_batch_idx)
+    batch, current_epoch, current_batch_idx = next(batch_generator)
     
     t0 = time.perf_counter()
     logger.info("Starting training loop...")
@@ -255,8 +273,19 @@ def train(cfg: DictConfig):
                 
             if iter_num > 0 and losses['val'] < best_val_loss:
                 best_val_loss = losses['val']
-                logger.info(f"Saving new best model to {CHECKPOINTS_DIR}")
-                save_model(unoptimized_model, CHECKPOINTS_DIR / 'ckpt_best.safetensors')
+                logger.info(f"Saving new best model to {CHECKPOINTS_DIR} (Atomic Save)")
+                
+                best_path = CHECKPOINTS_DIR / 'ckpt_best.safetensors'
+                best_tmp_path = CHECKPOINTS_DIR / 'ckpt_best.tmp.safetensors'
+                best_bak_path = CHECKPOINTS_DIR / 'ckpt_best_bak.safetensors'
+                
+                # 1. Save to a temporary file
+                save_model(unoptimized_model, best_tmp_path)
+                # 2. Backup the previous best file if it exists
+                if best_path.exists():
+                    best_path.replace(best_bak_path)
+                # 3. Rename temp file to final destination (atomic)
+                best_tmp_path.replace(best_path)
 
         # -----------------------------
         # Forward & Backward Pass
@@ -266,7 +295,7 @@ def train(cfg: DictConfig):
             loss, logged_losses = loss_wrapper(loss_dict)
             
         # Asynchronous pre-fetch of the next batch while backward pass computes
-        train_iter, batch = get_batch(train_iter, train_loader, device)
+        batch, current_epoch, current_batch_idx = next(batch_generator)
         
         loss.backward()
         
@@ -297,8 +326,18 @@ def train(cfg: DictConfig):
                     'iter_num': iter_num,
                     'best_val_loss': best_val_loss,
                     'wandb_id': wandb.run.id if cfg.wandb.log else None,
+                    'epoch': current_epoch,
+                    'batch_idx': current_batch_idx, # Index of the pre-fetched batch for the upcoming step
                 }
-                torch.save(checkpoint_data, CHECKPOINTS_DIR / 'ckpt.pt')
+                
+                ckpt_path = CHECKPOINTS_DIR / 'ckpt.pt'
+                ckpt_tmp_path = CHECKPOINTS_DIR / 'ckpt.pt.tmp'
+                ckpt_bak_path = CHECKPOINTS_DIR / 'ckpt_bak.pt'
+                
+                torch.save(checkpoint_data, ckpt_tmp_path)
+                if ckpt_path.exists():
+                    ckpt_path.replace(ckpt_bak_path)
+                ckpt_tmp_path.replace(ckpt_path)
                 
             if cfg.wandb.log:
                 log_payload = {
