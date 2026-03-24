@@ -1,5 +1,6 @@
 import hydra
 from omegaconf import DictConfig
+from pathlib import Path
 import numpy as np
 import logging
 
@@ -67,7 +68,8 @@ def compute_optimal_buckets_dp(lengths: np.ndarray, max_buckets: int):
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def benchmark_buckets(cfg: DictConfig):
     # Set up file logging to easily save and copy the optimal buckets later
-    file_handler = logging.FileHandler("optimal_buckets_output.log", mode="w")
+    log_file = Path(__file__).parent / "optimal_buckets_output.log"
+    file_handler = logging.FileHandler(log_file, mode="w")
     file_handler.setLevel(logging.INFO)
     formatter = logging.Formatter("%(message)s")
     file_handler.setFormatter(formatter)
@@ -78,7 +80,7 @@ def benchmark_buckets(cfg: DictConfig):
     dataset = DatasetWrapper(
         dataset_source=cfg.dataset.source,
         dataset_name=cfg.dataset.name,
-        split=cfg.dataset.split,
+        split=cfg.dataset.train_split,
         text_column=cfg.dataset.text_column,
         audio_column=cfg.dataset.audio_column,
         filter_column=cfg.dataset.filter_column,

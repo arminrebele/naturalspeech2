@@ -1,5 +1,7 @@
 import time
+import logging
 import torch
+from pathlib import Path
 import numpy as np
 from torch.utils.data import DataLoader
 import hydra
@@ -9,17 +11,27 @@ from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, Dynam
 from naturalspeech2.model import NaturalSpeech2Model
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 
+logger = logging.getLogger(__name__)
+
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def benchmark(cfg: DictConfig):
+    log_file = Path(__file__).parent / "benchmark_dataloader.log"
+    file_handler = logging.FileHandler(log_file, mode="w")
+    file_handler.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(message)s")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+    logger.setLevel(logging.INFO)
+
     if not torch.cuda.is_available():
         raise RuntimeError("NVIDIA GPU required for benchmarking.")
     device = cfg.training.device 
 
-    print("--- Initializing Dataset ---")
+    logger.info("--- Initializing Dataset ---")
     dataset = DatasetWrapper(
         dataset_source=cfg.dataset.source,
         dataset_name=cfg.dataset.name,
-        split=cfg.dataset.split,
+        split=cfg.dataset.train_split,
         text_column=cfg.dataset.text_column,
         audio_column=cfg.dataset.audio_column,
         filter_column=cfg.dataset.filter_column,
@@ -51,7 +63,7 @@ def benchmark(cfg: DictConfig):
         pin_memory=True
     )
 
-    print("--- Initializing Model ---")
+    logger.info("--- Initializing Model ---")
     # Mirror train.py parameters exactly to guarantee realistic GPU timing for the bottleneck calculation
     model_args = {
         'device': device,
@@ -94,7 +106,7 @@ def benchmark(cfg: DictConfig):
     }
     model = NaturalSpeech2Model(**model_args).to(device)
     
-    print("Compiling model...")
+    logger.info("Compiling model...")
     model = torch.compile(model)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=True)
@@ -105,8 +117,8 @@ def benchmark(cfg: DictConfig):
     gpu_times = []
     starved_steps = 0
 
-    print(f"\nStarting benchmark: {num_benchmark_steps} steps ({warmup_steps} warmup)")
-    print(f"Workers: {cfg.dataloader.num_workers} | Resample On-The-Fly: {cfg.dataloader.resample_on_the_fly}")
+    logger.info(f"\nStarting benchmark: {num_benchmark_steps} steps ({warmup_steps} warmup)")
+    logger.info(f"Workers: {cfg.dataloader.num_workers} | Resample On-The-Fly: {cfg.dataloader.resample_on_the_fly}")
     
     loader_iter = iter(loader)
 
@@ -138,11 +150,11 @@ def benchmark(cfg: DictConfig):
             if dt > gt:
                 starved_steps += 1
 
-    print("\n--- Benchmark Results ---")
-    print(f"Data Loading Time : {np.mean(data_times):.4f}s avg | P95: {np.percentile(data_times, 95):.4f}s")
-    print(f"GPU Process Time  : {np.mean(gpu_times):.4f}s avg | P95: {np.percentile(gpu_times, 95):.4f}s")
-    print(f"Starvation Rate   : {(starved_steps / num_benchmark_steps) * 100:.1f}% ({starved_steps}/{num_benchmark_steps} steps)")
-    print(f"Overall Status    : {'STARVED ❌' if np.mean(data_times) > np.mean(gpu_times) else 'HEALTHY ✅'}")
+    logger.info("\n--- Benchmark Results ---")
+    logger.info(f"Data Loading Time : {np.mean(data_times):.4f}s avg | P95: {np.percentile(data_times, 95):.4f}s")
+    logger.info(f"GPU Process Time  : {np.mean(gpu_times):.4f}s avg | P95: {np.percentile(gpu_times, 95):.4f}s")
+    logger.info(f"Starvation Rate   : {(starved_steps / num_benchmark_steps) * 100:.1f}% ({starved_steps}/{num_benchmark_steps} steps)")
+    logger.info(f"Overall Status    : {'STARVED ❌' if np.mean(data_times) > np.mean(gpu_times) else 'HEALTHY ✅'}")
 
 if __name__ == "__main__":
     benchmark()

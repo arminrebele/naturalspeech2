@@ -1,6 +1,7 @@
 import os
 import sys
 import subprocess
+from pathlib import Path
 import logging
 import torch
 import hydra
@@ -170,7 +171,8 @@ def main(cfg: DictConfig) -> None:
         return
         
     # Setup Orchestrator Logging to File
-    file_handler = logging.FileHandler("max_batch_sizes_output.log", mode="w")
+    log_file = Path(__file__).parent / "max_batch_sizes_output.log"
+    file_handler = logging.FileHandler(log_file, mode="w")
     file_handler.setLevel(logging.INFO)
     formatter = logging.Formatter("%(message)s")
     file_handler.setFormatter(formatter)

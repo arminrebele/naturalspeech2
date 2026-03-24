@@ -2,6 +2,7 @@ import os
 import random
 import time
 import logging
+from pathlib import Path
 import torch
 import hydra
 from omegaconf import DictConfig
@@ -15,7 +16,8 @@ logger = logging.getLogger(__name__)
 
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def stress_test(cfg: DictConfig):
-    file_handler = logging.FileHandler("stress_test_fragmentation.log", mode="w")
+    log_file = Path(__file__).parent / "stress_test_fragmentation.log"
+    file_handler = logging.FileHandler(log_file, mode="w")
     file_handler.setLevel(logging.INFO)
     formatter = logging.Formatter("%(message)s")
     file_handler.setFormatter(formatter)
