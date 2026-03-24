@@ -6,10 +6,11 @@ import logging
 import torch
 import hydra
 from einops import rearrange
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
+from naturalspeech2.utils.utils import LossWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -104,12 +105,17 @@ def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, ba
         model = torch.compile(model)
         optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=True)
         
+        loss_wrapper = LossWrapper(
+            loss_weights=OmegaConf.to_container(cfg.model.loss_weights, resolve=True),
+            loss_warmup_steps=OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
+        ).to(device)
+        
         # Perform 5 forward/backward steps to ensure steady-state memory allocation
         for _ in range(5):
             batch = generate_dummy_batch(batch_size, audio_samples, phoneme_samples, vocab_size, device)
             optimizer.zero_grad(set_to_none=True)
             outputs = model(**batch)
-            loss = outputs['loss']
+            loss, _ = loss_wrapper(outputs)
             loss.backward()
             optimizer.step()
             torch.cuda.synchronize()

@@ -44,3 +44,18 @@ duration_predictor:
   attention_layers: 10
   attention_heads: 8
   dropout: 0.5
+
+# Loss Balancing Weights
+loss_weights:
+  diffusion_loss: 1.0
+  duration_predictor_loss: 1.0
+  pitch_predictor_loss: 1.0
+  aligner_loss: 1.0
+  forward_sum_loss: 1.0
+  bin_loss: 1.0
+
+loss_warmup_steps:
+  diffusion_loss: 1000
+  duration_predictor_loss: 1000
+  pitch_predictor_loss: 1000
+  aligner_loss: 0

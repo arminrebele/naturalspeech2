@@ -217,7 +217,10 @@ def train(cfg: DictConfig):
         start_batch_idx = checkpoint.get('batch_idx', 0) # Already points to the next batch due to pre-fetch
         
     model.to(device)
-    loss_wrapper = LossWrapper().to(device)
+    loss_wrapper = LossWrapper(
+        loss_weights=OmegaConf.to_container(cfg.model.loss_weights, resolve=True),
+        loss_warmup_steps=OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
+    ).to(device)
     
     optimizer = model.configure_optimizers(
         cfg.training.weight_decay, 
@@ -253,7 +256,7 @@ def train(cfg: DictConfig):
     
     t0 = time.perf_counter()
     logger.info("Starting training loop...")
-    for iter_num in range(iter_num, cfg.training.max_iters + 1):
+    for iter_num in range(iter_num, cfg.training.max_iters):
         
         # Apply LR scheduling
         lr = get_lr(iter_num, cfg) if cfg.training.decay_lr else cfg.training.learning_rate
@@ -292,7 +295,7 @@ def train(cfg: DictConfig):
         # -----------------------------
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
             loss_dict = model(**batch)
-            loss, logged_losses = loss_wrapper(loss_dict)
+            loss, logged_losses = loss_wrapper(loss_dict, step=iter_num)
             
         # Asynchronous pre-fetch of the next batch while backward pass computes
         batch, current_epoch, current_batch_idx = next(batch_generator)

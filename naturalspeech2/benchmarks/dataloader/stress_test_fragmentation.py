@@ -5,12 +5,13 @@ import logging
 from pathlib import Path
 import torch
 import hydra
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 import torch._dynamo
 from naturalspeech2.benchmarks.dataloader.find_max_batch_sizes import generate_dummy_batch
 from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
+from naturalspeech2.utils.utils import LossWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,11 @@ def stress_test(cfg: DictConfig):
     model = torch.compile(model)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=True)
     
+    loss_wrapper = LossWrapper(
+        loss_weights=OmegaConf.to_container(cfg.model.loss_weights, resolve=True),
+        loss_warmup_steps=OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
+    ).to(device)
+    
     num_iterations = 500
     logger.info(f"\nStarting {num_iterations} iterations of forced shape fragmentation...")
     
@@ -96,7 +102,7 @@ def stress_test(cfg: DictConfig):
         try:
             optimizer.zero_grad(set_to_none=True)
             outputs = model(**batch)
-            loss = outputs['loss']
+            loss, _ = loss_wrapper(outputs)
             loss.backward()
             optimizer.step()
             torch.cuda.synchronize()

@@ -10,6 +10,7 @@ from omegaconf import DictConfig, OmegaConf
 from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, DynamicBucketedBatchSampler
 from naturalspeech2.model import NaturalSpeech2Model
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
+from naturalspeech2.utils.utils import LossWrapper
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,11 @@ def benchmark(cfg: DictConfig):
     
     logger.info("Compiling model...")
     model = torch.compile(model)
+    
+    loss_wrapper = LossWrapper(
+        loss_weights=OmegaConf.to_container(cfg.model.loss_weights, resolve=True),
+        loss_warmup_steps=OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
+    ).to(device)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=True)
 
@@ -135,7 +141,7 @@ def benchmark(cfg: DictConfig):
         start_gpu = time.perf_counter()
         optimizer.zero_grad(set_to_none=True)
         outputs = model(**batch)
-        loss = outputs['loss']
+        loss, _ = loss_wrapper(outputs)
         loss.backward()
         optimizer.step()
         torch.cuda.synchronize() # Crucial for accurate GPU timing

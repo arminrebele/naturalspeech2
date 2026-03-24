@@ -302,8 +302,13 @@ class NaturalSpeech2Model(nn.Module):
         )
 
         return {
-            "forward_sum_loss": forward_sum_loss,
-            "bin_loss": bin_loss,
+            "diffusion_loss": None,                 # placeholder for future diffusion loss
+            "duration_predictor_loss": None,        # placeholder for future duration predictor loss
+            "pitch_predictor_loss": None,           # placeholder for future pitch predictor loss
+            "aligner_loss":{
+                "forward_sum_loss": forward_sum_loss,
+                "bin_loss": bin_loss,
+            }
         }
 
     @torch.no_grad()
