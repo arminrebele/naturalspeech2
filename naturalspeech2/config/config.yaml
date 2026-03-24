@@ -3,4 +3,4 @@ defaults:
   - dataset: librispeech
   - dataloader: default
   - model: base
-  - training: ns2_paper
+  - training: full_run
