@@ -2,7 +2,7 @@
 name: "LibriSpeech"
 source: "parler-tts/mls_eng"
 train_split: "train"                # or "train[:50%]" for a smaller subset
-val_split: "dev"
+val_split: "test"
 text_column: "transcript"
 audio_column: "audio"
 filter_column: null

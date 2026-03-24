@@ -312,12 +312,20 @@ class NaturalSpeech2Model(nn.Module):
         }
 
     @torch.no_grad()
-    def generate(self, text_tokens: torch.Tensor = None, **kwargs):
+    def generate(
+        self,
+        audio: torch.Tensor,                  # [B, T]    | float
+        audio_mask: torch.Tensor,             # [B, T, 1] | True/False
+        audio_lengths: torch.Tensor,          # [B]       | int
+        phoneme_tokens: torch.Tensor,         # [B, P]    | int
+        phoneme_tokens_mask: torch.Tensor,    # [B, P, 1] | True/False
+        phoneme_tokens_lengths: torch.Tensor, # [B]       | int
+        **kwargs
+    ):
         """
         Placeholder for future generation method.
-        Should return generated audio tensor [B, T].
         """
-        return torch.randn(1, 24000, device=self.encodec.device)
+        return torch.randn_like(audio)
 
     def configure_optimizers(self, weight_decay, learning_rate, betas):
         # Start with all candidate parameters

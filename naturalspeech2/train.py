@@ -1,6 +1,7 @@
 import os
 import time
 import math
+import random
 import logging
 from dotenv import load_dotenv
 
@@ -16,6 +17,7 @@ from safetensors.torch import save_model
 
 from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, DynamicBucketedBatchSampler
 from naturalspeech2.model import NaturalSpeech2Model
+from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.utils.utils import LossWrapper
 from naturalspeech2.paths import CHECKPOINTS_DIR
@@ -71,7 +73,9 @@ def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, dev
     model.eval()
     for split, loader in [('train', train_loader), ('val', val_loader)]:
         loader_iter = iter(loader)
-        losses = torch.zeros(eval_iters)
+        total_loss_sum = 0.0
+        log_dict_sums = {}
+        
         for k in range(eval_iters):
             try:
                 batch = next(loader_iter)
@@ -80,14 +84,20 @@ def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, dev
                 batch = next(loader_iter)
                 
             for k_b, v in batch.items():
-                if isinstance(v, torch.Tensor):
-                    batch[k_b] = v.to(device, non_blocking=True)
+                batch[k_b] = v.to(device, non_blocking=True)
                     
             with torch.autocast(device_type=device.split(':')[0], dtype=torch.bfloat16):
                 loss_dict = model(**batch)
-                total_loss, _ = loss_wrapper(loss_dict)
-            losses[k] = total_loss.item()
-        out[split] = losses.mean().item()
+                total_loss, logged_losses = loss_wrapper(loss_dict)
+                
+            total_loss_sum += total_loss.item()
+            for key, val in logged_losses.items():
+                log_dict_sums[key] = log_dict_sums.get(key, 0.0) + val
+                
+        out[split] = {
+            'total_loss': total_loss_sum / eval_iters,
+            'logged_losses': {key: val / eval_iters for key, val in log_dict_sums.items()}
+        }
     model.train()
     return out
 
@@ -138,10 +148,41 @@ def train(cfg: DictConfig):
     
     logger.info("Initializing DataLoaders...")
     train_loader, train_dataset = create_dataloader(cfg, cfg.dataset.train_split, cfg.dataset.token_vocabulary_path)
-    val_loader, _ = create_dataloader(cfg, cfg.dataset.val_split, train_dataset.token_vocabulary_path)
+    val_loader, val_dataset = create_dataloader(cfg, cfg.dataset.val_split, train_dataset.token_vocabulary_path)
 
     tokenizer = PhonemeTokenizer(token_vocabulary_path=train_dataset.token_vocabulary_path, with_backend=False)
     token_vocabulary_size = tokenizer.token_vocabulary_size
+
+    # Setup static generation prompts for evaluation
+    logger.info("Initializing custom text prompts for generation testing...")
+    phonemizer = PhonemizerWrapper()
+    
+    custom_prompts = [
+        "Hello, world! This is a test.", # Short (~3s)
+        "The quick brown fox jumps over the lazy dog, while the sun sets.", # Medium (~6s)
+        ("Natural speech synthesis has come a long way in recent years. "
+         "Today, we can generate highly realistic human voices from just a "
+         "few seconds of reference audio, opening up new possibilities for "
+         "accessibility and content creation."), # Long (~15s)
+        ("In the early days of artificial intelligence, text to speech systems "
+         "sounded incredibly robotic and lacked emotional nuance. Researchers "
+         "spent decades studying human phonetics, prosody, and intonation. "
+         "Now, thanks to advanced deep learning techniques, diffusion models, "
+         "and massive datasets, the boundaries between synthesized and natural "
+         "voices are becoming indistinguishable. This marks a paradigm shift "
+         "in how we interact with technology on a daily basis.") # Very long (~30s)
+    ]
+    max_bucket_phonemes = cfg.dataloader.bucket_mapping[-1].phoneme_length
+    custom_prompt_tokens = []
+    for prompt in custom_prompts:
+        phonemes = phonemizer(prompt)
+        tokens = tokenizer(phonemes)
+        if len(tokens) > max_bucket_phonemes:
+            logger.warning(f"Truncating generation prompt from {len(tokens)} to max bucket length {max_bucket_phonemes}")
+            tokens = tokens[:max_bucket_phonemes]
+        custom_prompt_tokens.append(tokens)
+        
+    test_collate_fn = BucketedCollateFn(bucket_mapping=OmegaConf.to_container(cfg.dataloader.bucket_mapping, resolve=True))
 
     # Build Model Args Dict
     model_args = {
@@ -268,14 +309,63 @@ def train(cfg: DictConfig):
         # -----------------------------
         if iter_num % cfg.training.eval_interval == 0:
             losses = estimate_loss(model, train_loader, val_loader, loss_wrapper, cfg.training.eval_iters, device)
-            logger.info(f"Step {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            logger.info(f"Step {iter_num}: train loss {losses['train']['total_loss']:.4f}, val loss {losses['val']['total_loss']:.4f}")
             
             if cfg.wandb.log:
-                # TODO: Generation testing could go here via unoptimized_model.generate() or model.generate()
-                pass
+                eval_payload = {
+                    "eval/iter": iter_num,
+                    "eval/lr": lr,
+                    "eval/train/total_loss": losses['train']['total_loss'],
+                    "eval/val/total_loss": losses['val']['total_loss'],
+                }
                 
-            if iter_num > 0 and losses['val'] < best_val_loss:
-                best_val_loss = losses['val']
+                for k, v in losses['train']['logged_losses'].items():
+                    eval_payload[f"eval/train/losses/{k}"] = v
+                for k, v in losses['val']['logged_losses'].items():
+                    eval_payload[f"eval/val/losses/{k}"] = v
+
+                # --- Generation Testing ---
+                # Dynamically construct test batch from random validation samples
+                target_bucket = cfg.dataloader.bucket_mapping[-1]
+                target_bs = target_bucket.batch_size
+                max_bucket_audio = target_bucket.audio_length
+                
+                test_indices = random.sample(range(len(val_dataset)), target_bs)
+                test_samples = [val_dataset[i] for i in test_indices]
+                
+                for i in range(len(test_samples)):
+                    # Truncate audio if it exceeds max bucket to avoid collate_fn crash
+                    if test_samples[i]["audio_length"] > max_bucket_audio:
+                        test_samples[i]["audio"] = test_samples[i]["audio"][:max_bucket_audio]
+                        test_samples[i]["audio_length"] = max_bucket_audio
+                        
+                    test_samples[i]["phoneme_tokens"] = custom_prompt_tokens[i % len(custom_prompt_tokens)]
+                    test_samples[i]["phoneme_tokens_length"] = len(test_samples[i]["phoneme_tokens"])
+                
+                # Force the collate_fn to pad everything to the exact largest bucket dimensions
+                test_samples[0]["audio_length"] = max_bucket_audio
+                test_samples[0]["phoneme_tokens_length"] = max_bucket_phonemes
+                
+                test_batch = test_collate_fn(test_samples)
+                test_batch = {k_b: v.to(device) for k_b, v in test_batch.items()}
+
+                logger.info("Generating audio samples for evaluation...")
+                generated_audios = unoptimized_model.generate(**test_batch)
+                
+                wandb_audios = []
+                # Log up to 4 generation examples to prevent excessive network payload
+                for i in range(min(4, generated_audios.shape[0])):
+                    # Move to CPU, cast to float32 (required for torchaudio/wandb), and numpy
+                    audio_np = generated_audios[i].cpu().to(torch.float32).numpy()
+                    wandb_audios.append(
+                        wandb.Audio(audio_np, sample_rate=cfg.dataloader.sampling_rate, caption=f"Gen Sample {i}")
+                    )
+                eval_payload["eval/generated_samples"] = wandb_audios
+                
+                wandb.log(eval_payload)
+                
+            if iter_num > 0 and losses['val']['total_loss'] < best_val_loss:
+                best_val_loss = losses['val']['total_loss']
                 logger.info(f"Saving new best model to {CHECKPOINTS_DIR} (Atomic Save)")
                 
                 best_path = CHECKPOINTS_DIR / 'ckpt_best.safetensors'
@@ -357,5 +447,7 @@ def train(cfg: DictConfig):
 
 
 if __name__ == "__main__":
-    # train()
-    pass
+    # Enable PyTorch Memory Expansion to heavily mitigate fragmentation
+    if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
+        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    train()
