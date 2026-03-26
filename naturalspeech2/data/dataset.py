@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import logging
 import gc
@@ -103,9 +104,12 @@ class DatasetWrapper(Dataset):
         self.num_proc_tokenize = num_proc_tokenize
         
         self.dataset_dir = DATA_DIR / self.dataset_name
-        self.processed_dir = self.dataset_dir / "processed"
-        self.resampled_dir = self.dataset_dir / "resampled"
-        self.cache_dir = self.dataset_dir / "cache"
+        # Remove any special characters or numbers to get the base split name (e.g., "train[:50%]" -> "train")
+        clean_split = re.sub(r'[^a-zA-Z]', '', self.split)
+        
+        self.processed_dir = self.dataset_dir / clean_split / "processed"
+        self.resampled_dir = self.dataset_dir / clean_split / "resampled"
+        self.cache_dir = self.dataset_dir / clean_split / "cache"
         self.token_vocabulary_path = token_vocabulary_path
         if self.token_vocabulary_path is None:
             self.token_vocabulary_path = DATA_DIR / f"{self.dataset_name}_token_vocabulary.json"
