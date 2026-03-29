@@ -10,7 +10,8 @@ from omegaconf import DictConfig, OmegaConf
 
 from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
-from naturalspeech2.utils.utils import LossWrapper
+from naturalspeech2.model import LossWrapper
+from naturalspeech2.utils.utils import setup_file_logger
 
 logger = logging.getLogger(__name__)
 
@@ -178,12 +179,7 @@ def main(cfg: DictConfig) -> None:
         
     # Setup Orchestrator Logging to File
     log_file = Path(__file__).parent / "max_batch_sizes_output.log"
-    file_handler = logging.FileHandler(log_file, mode="w")
-    file_handler.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(message)s")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    logger.setLevel(logging.INFO)
+    setup_file_logger(logger, log_file, mode="w", format_str="%(message)s")
         
     vocab_path = cfg.dataset.token_vocabulary_path
     if vocab_path is None:

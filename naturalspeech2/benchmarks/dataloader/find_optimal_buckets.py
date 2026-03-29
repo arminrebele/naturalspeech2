@@ -5,6 +5,7 @@ import numpy as np
 import logging
 
 from naturalspeech2.data.dataset import DatasetWrapper
+from naturalspeech2.utils.utils import setup_file_logger
 
 logger = logging.getLogger(__name__)
 
@@ -69,12 +70,7 @@ def compute_optimal_buckets_dp(lengths: np.ndarray, max_buckets: int):
 def benchmark_buckets(cfg: DictConfig):
     # Set up file logging to easily save and copy the optimal buckets later
     log_file = Path(__file__).parent / "optimal_buckets_output.log"
-    file_handler = logging.FileHandler(log_file, mode="w")
-    file_handler.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(message)s")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    logger.setLevel(logging.INFO)
+    setup_file_logger(logger, log_file, mode="w", format_str="%(message)s")
 
     logger.info("Initializing Dataset Pipeline (This will prepopulate the cache for training)...")
     dataset = DatasetWrapper(

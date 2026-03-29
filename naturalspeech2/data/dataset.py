@@ -17,7 +17,7 @@ from typing import Any, Optional, Iterator
 from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer, build_token_vocabulary
 from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
-from naturalspeech2.utils.utils import create_mask_from_lengths
+from naturalspeech2.utils.utils import create_mask_from_lengths, setup_file_logger
 
 logger = logging.getLogger(__name__)
 
@@ -434,18 +434,13 @@ if __name__ == "__main__":
     logger.setLevel(logging.INFO)
     logger.propagate = False 
 
-    # Avoid adding duplicate handlers if run multiple times interactively
-    if not logger.handlers:
-        formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-        
-        fh = logging.FileHandler(log_file, mode="w")
-        fh.setFormatter(formatter)
-        logger.addHandler(fh)
-        
-        sh = logging.StreamHandler()
-        sh.setFormatter(formatter)
-        logger.addHandler(sh)
-
+    format_str = "%(asctime)s - %(levelname)s - %(message)s"
+    
+    setup_file_logger(logger, log_file, mode="w", format_str=format_str)
+    
+    sh = logging.StreamHandler()
+    sh.setFormatter(logging.Formatter(format_str))
+    logger.addHandler(sh)
 
     def test_pipeline(dataset_cfg_name: str, split_override: str = None):
         dataset_cfg = OmegaConf.load(CONFIG_DIR / "dataset" / f"{dataset_cfg_name}.yaml")

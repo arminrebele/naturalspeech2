@@ -1,6 +1,7 @@
 # @package _group_
 device: "cuda"
 init_from: "scratch"     # 'scratch' or 'resume'
+save_checkpoint: True
 eval_interval: 5000
 log_interval: 100
 eval_iters: 200

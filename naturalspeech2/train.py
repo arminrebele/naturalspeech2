@@ -16,20 +16,13 @@ from omegaconf import DictConfig, OmegaConf
 from safetensors.torch import save_model
 
 from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, DynamicBucketedBatchSampler
-from naturalspeech2.model import NaturalSpeech2Model
+from naturalspeech2.model import NaturalSpeech2Model, LossWrapper
 from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
-from naturalspeech2.utils.utils import LossWrapper
 from naturalspeech2.paths import CHECKPOINTS_DIR
+from naturalspeech2.utils.utils import setup_file_logger
 
 logger = logging.getLogger(__name__)
-
-def setup_logging(out_dir):
-    logger.setLevel(logging.INFO)
-    file_handler = logging.FileHandler(os.path.join(out_dir, "training.log"))
-    formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
 
 def get_lr(it, cfg):
     learning_rate = cfg.training.learning_rate
@@ -53,7 +46,7 @@ def get_infinite_batches(loader, device, start_epoch=0, start_batch_idx=0):
     sampler = loader.batch_sampler
     sampler.set_epoch(epoch)
     sampler.set_start_batch_idx(start_batch_idx)
-    
+
     while True:
         for batch_idx, batch in enumerate(loader, start=sampler.start_batch_idx):
             # Move immediately to device asynchronously
@@ -61,7 +54,7 @@ def get_infinite_batches(loader, device, start_epoch=0, start_batch_idx=0):
                 if isinstance(v, torch.Tensor):
                     batch[k] = v.to(device, non_blocking=True)
             yield batch, epoch, batch_idx
-            
+
         # Epoch finished
         epoch += 1
         sampler.set_epoch(epoch)
@@ -144,7 +137,7 @@ def train(cfg: DictConfig):
     
     # Create checkpoints directory and setup specific logs
     CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
-    setup_logging(CHECKPOINTS_DIR)
+    setup_file_logger(logger, CHECKPOINTS_DIR / "training.log")
     
     logger.info("Initializing DataLoaders...")
     train_loader, train_dataset = create_dataloader(cfg, cfg.dataset.train_split, cfg.dataset.token_vocabulary_path)
@@ -391,7 +384,7 @@ def train(cfg: DictConfig):
         batch, current_epoch, current_batch_idx = next(batch_generator)
         
         loss.backward()
-        
+
         if cfg.training.grad_clip != 0.0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
             
@@ -411,7 +404,7 @@ def train(cfg: DictConfig):
             
             logger.info(f"Iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms")
             
-            if iter_num > 0:
+            if iter_num > 0 and cfg.training.save_checkpoint:
                 checkpoint_data = {
                     'model': unoptimized_model.state_dict(),
                     'optimizer': optimizer.state_dict(),

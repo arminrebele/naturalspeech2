@@ -11,19 +11,15 @@ import torch._dynamo
 from naturalspeech2.benchmarks.dataloader.find_max_batch_sizes import generate_dummy_batch
 from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
-from naturalspeech2.utils.utils import LossWrapper
+from naturalspeech2.model import LossWrapper
+from naturalspeech2.utils.utils import setup_file_logger
 
 logger = logging.getLogger(__name__)
 
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def stress_test(cfg: DictConfig):
     log_file = Path(__file__).parent / "stress_test_fragmentation.log"
-    file_handler = logging.FileHandler(log_file, mode="w")
-    file_handler.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(message)s")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    logger.setLevel(logging.INFO)
+    setup_file_logger(logger, log_file, mode="w", format_str="%(message)s")
 
     device = cfg.training.device
     

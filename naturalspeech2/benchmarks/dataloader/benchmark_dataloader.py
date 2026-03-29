@@ -8,21 +8,16 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, DynamicBucketedBatchSampler
-from naturalspeech2.model import NaturalSpeech2Model
+from naturalspeech2.model import NaturalSpeech2Model, LossWrapper
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
-from naturalspeech2.utils.utils import LossWrapper
+from naturalspeech2.utils.utils import setup_file_logger
 
 logger = logging.getLogger(__name__)
 
 @hydra.main(version_base=None, config_path="../../config", config_name="config")
 def benchmark(cfg: DictConfig):
     log_file = Path(__file__).parent / "benchmark_dataloader.log"
-    file_handler = logging.FileHandler(log_file, mode="w")
-    file_handler.setLevel(logging.INFO)
-    formatter = logging.Formatter("%(message)s")
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
-    logger.setLevel(logging.INFO)
+    setup_file_logger(logger, log_file, mode="w", format_str="%(message)s")
 
     if not torch.cuda.is_available():
         raise RuntimeError("NVIDIA GPU required for benchmarking.")
