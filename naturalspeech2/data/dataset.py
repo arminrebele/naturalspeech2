@@ -9,7 +9,6 @@ import numpy as np
 import pyarrow as pa
 import torch
 from torch.utils.data import Dataset, Sampler
-import torchaudio
 from datasets import load_dataset, load_from_disk, Audio, Value, Dataset as HFDataset
 from einops import rearrange
 from typing import Any, Optional, Iterator
@@ -234,6 +233,7 @@ class DatasetWrapper(Dataset):
         return len(self.dataset)
 
     def _get_audio_on_the_fly(self, audio_dict: dict[str, Any]) -> torch.Tensor:
+        import torchaudio
         # Decode the embedded bytes on the fly
         audio, original_sr = torchaudio.load(io.BytesIO(audio_dict["bytes"]))
         if original_sr != self.sampling_rate:
@@ -242,6 +242,7 @@ class DatasetWrapper(Dataset):
         return audio[0]
 
     def _get_audio_pre_resampled(self, audio_path: str) -> torch.Tensor:
+        import torchaudio
         audio, _ = torchaudio.load(audio_path)
         return audio[0]
 
