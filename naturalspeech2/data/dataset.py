@@ -142,8 +142,10 @@ class DatasetWrapper(Dataset):
                 dataset = dataset.filter(lambda x: self.filter_substring in x, input_columns=[self.filter_column])
                 dataset.cleanup_cache_files()
 
-            dataset = dataset.rename_column(self.text_column, "text")
-            dataset = dataset.rename_column(self.audio_column, "audio")
+            if self.text_column != "text":
+                dataset = dataset.rename_column(self.text_column, "text")
+            if self.audio_column != "audio":
+                dataset = dataset.rename_column(self.audio_column, "audio")
 
             if self.resample_on_the_fly:
                 logger.info("`resample_on_the_fly` is True. Calculating resampled audio lengths without saving.")
