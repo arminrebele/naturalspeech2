@@ -2,17 +2,14 @@
 
 # NOTE: This config is specifically for the gradient_analysis run.
 # The batch sizes are intentionally set very low to leave VRAM headroom
-# for the expensive gradient analysis (retain_graph=True).
-# You may need to adjust these values for your specific hardware.
 
-sampling_rate: 24000
-num_workers: 4
 num_proc_phonemize: 12
 num_proc_tokenize: 4
-resample_on_the_fly: False
-drop_last: True
+num_workers: 4
+sampling_rate: 24000
 shuffle: True
-
+resample_on_the_fly: True
+drop_last: True
 bucket_mapping:
   - { audio_length: 32000,  phoneme_length: 100, batch_size: 4 } # ~1s
   - { audio_length: 80000,  phoneme_length: 200, batch_size: 4 } # ~3s

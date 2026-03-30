@@ -3,10 +3,13 @@ num_proc_phonemize: 24
 num_proc_tokenize: 4
 num_workers: 8
 sampling_rate: 24000
-shuffle: true
-resample_on_the_fly: false
-drop_last: true # Warning: False can cause graph recompiles for incomplete batches
+shuffle: True
+resample_on_the_fly: True
+drop_last: True             # Warning: False can cause graph recompiles for incomplete batches
 bucket_mapping:
-  - {audio_length: 120000, phoneme_length: 65, batch_size: 64}
-  - {audio_length: 240000, phoneme_length: 110, batch_size: 32}
-  - {audio_length: 360000, phoneme_length: 165, batch_size: 16}
+  - { audio_length: 32000,  phoneme_length: 100, batch_size: 32}
+  - { audio_length: 80000,  phoneme_length: 200, batch_size: 16}
+  - { audio_length: 160000, phoneme_length: 350, batch_size: 8 }
+  - { audio_length: 240000, phoneme_length: 500, batch_size: 6 }
+  - { audio_length: 384000, phoneme_length: 650, batch_size: 4 }
+  - { audio_length: 720000, phoneme_length: 900, batch_size: 2 }
