@@ -12,6 +12,7 @@ __pycache__/
 .env
 
 docker-compose.override.yml
+docker-compose.mergerfs.yml
 *.log
 outputs/
 multirun/
