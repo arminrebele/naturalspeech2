@@ -1,0 +1,4 @@
+# @package _group_
+log: False               # No WandB trace needed, we rely on the terminal printout
+project: "naturalspeech2"
+run_name: "ns2_loss_analysis"

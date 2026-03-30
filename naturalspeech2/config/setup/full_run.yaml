@@ -1,0 +1,13 @@
+# @package _group_
+device: "cuda"
+init_from: "scratch"     # 'scratch' or 'resume'
+save_checkpoint: True
+eval_interval: 5000
+log_interval: 100
+eval_iters: 200
+max_iters: 300000
+warmup_iters: 32000
+lr_decay_iters: 300000
+overfit_single_batch: False
+loss_analysis_run: False
+gradient_analysis_run: False

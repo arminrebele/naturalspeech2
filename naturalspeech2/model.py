@@ -1,3 +1,4 @@
+import math
 import torch
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
@@ -367,6 +368,7 @@ class LossWrapper(torch.nn.Module):
     def forward(self, loss_dict: dict, step: int = None):
         total_loss = 0.0
         log_dict = {}
+        weighted_tensors = {}
         
         # Update current weights only if step is explicitly passed (train loop)
         if step is not None:
@@ -381,6 +383,7 @@ class LossWrapper(torch.nn.Module):
                 
                 log_dict[key] = value.detach().item()
                 log_dict[f"{key}_weighted"] = weighted_loss.detach().item()
+                weighted_tensors[key] = weighted_loss
             else:
                 group_weight = self.current_weights[key]
                 group_loss = 0.0
@@ -392,9 +395,68 @@ class LossWrapper(torch.nn.Module):
                     
                     log_dict[sub_key] = sub_value.detach().item()
                     log_dict[f"{sub_key}_weighted"] = weighted_sub.detach().item()
+                    weighted_tensors[sub_key] = weighted_sub * group_weight
 
                 weighted_group = group_loss * group_weight
                 total_loss += weighted_group
                 log_dict[f"{key}_total_weighted"] = weighted_group.detach().item()
 
-        return total_loss, log_dict
+        return total_loss, log_dict, weighted_tensors
+
+
+class GradientAnalyzer:
+    @staticmethod
+    def analyze_gradients(model, optimizer, weighted_loss_tensors):
+        grad_norms = {}
+        grad_vectors = {}
+        
+        # 1. Isolate and capture gradients for each individual loss term
+        for name, loss_tensor in weighted_loss_tensors.items():
+            if loss_tensor.requires_grad:
+                optimizer.zero_grad(set_to_none=True)
+                loss_tensor.backward(retain_graph=True)
+                
+                norm_sq = 0.0
+                vec_dict = {}
+                for p_name, p in model.named_parameters():
+                    if p.grad is not None:
+                        # Calculate norm on GPU for maximum speed
+                        norm_sq += torch.sum(p.grad.detach() ** 2).item()
+                        # Store copy in system RAM to prevent massive VRAM accumulation
+                        vec_dict[p_name] = p.grad.detach().cpu().clone()
+                
+                grad_norms[name] = math.sqrt(norm_sq)
+                grad_vectors[name] = vec_dict
+                
+        # Clear the grads so the main backward pass can run cleanly
+        optimizer.zero_grad(set_to_none=True)
+        
+        # 2. Compute Cosine Similarities only over dynamically identified shared parameters
+        cos_sims = {}
+        names = list(grad_vectors.keys())
+        for i in range(len(names)):
+            for j in range(i + 1, len(names)):
+                name_i = names[i]
+                name_j = names[j]
+                
+                shared_params = set(grad_vectors[name_i].keys()).intersection(set(grad_vectors[name_j].keys()))
+                
+                if shared_params:
+                    dot_product = 0.0
+                    norm_i_sq = 0.0
+                    norm_j_sq = 0.0
+                    
+                    for p in shared_params:
+                        vi = grad_vectors[name_i][p]
+                        vj = grad_vectors[name_j][p]
+                        dot_product += torch.sum(vi * vj).item()
+                        norm_i_sq += torch.sum(vi ** 2).item()
+                        norm_j_sq += torch.sum(vj ** 2).item()
+                        
+                    if norm_i_sq > 0 and norm_j_sq > 0:
+                        sim = dot_product / (math.sqrt(norm_i_sq) * math.sqrt(norm_j_sq))
+                        cos_sims[f"{name_i}_vs_{name_j}"] = sim
+                    else:
+                        cos_sims[f"{name_i}_vs_{name_j}"] = 0.0
+                        
+        return grad_norms, cos_sims

@@ -16,18 +16,18 @@ from omegaconf import DictConfig, OmegaConf
 from safetensors.torch import save_model
 
 from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, DynamicBucketedBatchSampler
-from naturalspeech2.model import NaturalSpeech2Model, LossWrapper
+from naturalspeech2.model import NaturalSpeech2Model, LossWrapper, GradientAnalyzer
 from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
-from naturalspeech2.paths import CHECKPOINTS_DIR
+from naturalspeech2.paths import CHECKPOINTS_DIR, PROJECT_ROOT
 from naturalspeech2.utils.utils import setup_file_logger
 
 logger = logging.getLogger(__name__)
 
 def get_lr(it, cfg):
     learning_rate = cfg.training.learning_rate
-    warmup_iters = cfg.training.warmup_iters
-    lr_decay_iters = cfg.training.lr_decay_iters
+    warmup_iters = cfg.setup.warmup_iters
+    lr_decay_iters = cfg.setup.lr_decay_iters
     min_lr = cfg.training.min_lr
 
     if it < warmup_iters:
@@ -40,19 +40,27 @@ def get_lr(it, cfg):
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coeff * (learning_rate - min_lr)
 
-def get_infinite_batches(loader, device, start_epoch=0, start_batch_idx=0):
+def get_infinite_batches(loader, device, start_epoch=0, start_batch_idx=0, overfit_single_batch=False):
     """Continuously yields batches while tracking and setting dataloader state for instant resuming."""
     epoch = start_epoch
     sampler = loader.batch_sampler
     sampler.set_epoch(epoch)
     sampler.set_start_batch_idx(start_batch_idx)
 
+    if overfit_single_batch:
+        logger.info("OVERFIT TEST ACTIVE: Yielding the exact same batch endlessly.")
+        batch = next(iter(loader))
+        for k, v in batch.items():
+            batch[k] = v.to(device, non_blocking=True)
+        
+        while True:
+            yield batch, epoch, 0
+
     while True:
         for batch_idx, batch in enumerate(loader, start=sampler.start_batch_idx):
             # Move immediately to device asynchronously
             for k, v in batch.items():
-                if isinstance(v, torch.Tensor):
-                    batch[k] = v.to(device, non_blocking=True)
+                batch[k] = v.to(device, non_blocking=True)
             yield batch, epoch, batch_idx
 
         # Epoch finished
@@ -81,7 +89,7 @@ def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, dev
                     
             with torch.autocast(device_type=device.split(':')[0], dtype=torch.bfloat16):
                 loss_dict = model(**batch)
-                total_loss, logged_losses = loss_wrapper(loss_dict)
+                total_loss, logged_losses, _ = loss_wrapper(loss_dict)
                 
             total_loss_sum += total_loss.item()
             for key, val in logged_losses.items():
@@ -132,12 +140,25 @@ def train(cfg: DictConfig):
     if not torch.cuda.is_available():
         raise RuntimeError("This script requires an NVIDIA GPU and CUDA installed, but none were detected.")
     
-    device = cfg.training.device
+    device = cfg.setup.device
     device_type = 'cuda'
     
     # Create checkpoints directory and setup specific logs
-    CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
-    setup_file_logger(logger, CHECKPOINTS_DIR / "training.log")
+    if cfg.setup.loss_analysis_run:
+        log_dir = PROJECT_ROOT / "research"
+        log_name = "loss_analysis.log"
+    elif cfg.setup.gradient_analysis_run:
+        log_dir = PROJECT_ROOT / "research"
+        log_name = "gradient_analysis.log"
+    elif cfg.setup.overfit_single_batch:
+        log_dir = PROJECT_ROOT / "research"
+        log_name = "overfit_test.log"
+    else:
+        log_dir = CHECKPOINTS_DIR
+        log_name = "main_training.log"
+        
+    log_dir.mkdir(parents=True, exist_ok=True)
+    setup_file_logger(logger, log_dir / log_name)
     
     logger.info("Initializing DataLoaders...")
     train_loader, train_dataset = create_dataloader(cfg, cfg.dataset.train_split, cfg.dataset.token_vocabulary_path)
@@ -230,10 +251,10 @@ def train(cfg: DictConfig):
     start_batch_idx = 0
     
     # Instantiate Model
-    if cfg.training.init_from == 'scratch':
+    if cfg.setup.init_from == 'scratch':
         logger.info("Initializing a new model from scratch...")
         model = NaturalSpeech2Model(**model_args)
-    elif cfg.training.init_from == 'resume':
+    elif cfg.setup.init_from == 'resume':
         logger.info(f"Resuming training from checkpoint in {CHECKPOINTS_DIR}...")
         ckpt_path = CHECKPOINTS_DIR / 'ckpt.pt'
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
@@ -251,9 +272,19 @@ def train(cfg: DictConfig):
         start_batch_idx = checkpoint.get('batch_idx', 0) # Already points to the next batch due to pre-fetch
         
     model.to(device)
+    
+    loss_weights_dict = OmegaConf.to_container(cfg.model.loss_weights, resolve=True)
+    loss_warmup_steps_dict = OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
+
+    if cfg.setup.loss_analysis_run:
+        logger.info("LOSS ANALYSIS RUN: Forcing all dynamic loss weights to 1.0 and warmups to 0.")
+        for k in loss_weights_dict.keys():
+            loss_weights_dict[k] = 1.0
+            loss_warmup_steps_dict[k] = 0
+            
     loss_wrapper = LossWrapper(
-        loss_weights=OmegaConf.to_container(cfg.model.loss_weights, resolve=True),
-        loss_warmup_steps=OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
+        loss_weights=loss_weights_dict,
+        loss_warmup_steps=loss_warmup_steps_dict
     ).to(device)
     
     optimizer = model.configure_optimizers(
@@ -262,7 +293,7 @@ def train(cfg: DictConfig):
         (cfg.training.beta1, cfg.training.beta2)
     )
     
-    if cfg.training.init_from == 'resume':
+    if cfg.setup.init_from == 'resume':
         optimizer.load_state_dict(checkpoint['optimizer'])
         resume_wandb_id = checkpoint.get('wandb_id')
         logger.info("Resumed optimizer from checkpoint.")
@@ -285,12 +316,13 @@ def train(cfg: DictConfig):
             resume="allow" if resume_wandb_id else None
         )
 
-    batch_generator = get_infinite_batches(train_loader, device, start_epoch, start_batch_idx)
+    batch_generator = get_infinite_batches(train_loader, device, start_epoch, start_batch_idx, cfg.setup.overfit_single_batch)
     batch, current_epoch, current_batch_idx = next(batch_generator)
     
+    loss_analysis_accumulators = {}
     t0 = time.perf_counter()
     logger.info("Starting training loop...")
-    for iter_num in range(iter_num, cfg.training.max_iters):
+    for iter_num in range(iter_num, cfg.setup.max_iters):
         
         # Apply LR scheduling
         lr = get_lr(iter_num, cfg) if cfg.training.decay_lr else cfg.training.learning_rate
@@ -300,8 +332,8 @@ def train(cfg: DictConfig):
         # -----------------------------
         # Evaluation & Checkpointing
         # -----------------------------
-        if iter_num % cfg.training.eval_interval == 0:
-            losses = estimate_loss(model, train_loader, val_loader, loss_wrapper, cfg.training.eval_iters, device)
+        if iter_num % cfg.setup.eval_interval == 0 and cfg.setup.save_checkpoint:
+            losses = estimate_loss(model, train_loader, val_loader, loss_wrapper, cfg.setup.eval_iters, device)
             logger.info(f"Step {iter_num}: train loss {losses['train']['total_loss']:.4f}, val loss {losses['val']['total_loss']:.4f}")
             
             if cfg.wandb.log:
@@ -378,11 +410,15 @@ def train(cfg: DictConfig):
         # -----------------------------
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
             loss_dict = model(**batch)
-            loss, logged_losses = loss_wrapper(loss_dict, step=iter_num)
+            loss, logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num)
             
         # Asynchronous pre-fetch of the next batch while backward pass computes
         batch, current_epoch, current_batch_idx = next(batch_generator)
         
+        grad_norms, cos_sims = {}, {}
+        if cfg.setup.gradient_analysis_run and iter_num % cfg.setup.log_interval == 0:
+            grad_norms, cos_sims = GradientAnalyzer.analyze_gradients(unoptimized_model, optimizer, weighted_tensors)
+
         loss.backward()
 
         if cfg.training.grad_clip != 0.0:
@@ -398,13 +434,13 @@ def train(cfg: DictConfig):
         dt = t1 - t0
         t0 = t1
         
-        if iter_num % cfg.training.log_interval == 0:
+        if iter_num % cfg.setup.log_interval == 0:
             # CPU-GPU sync point due to .item() extraction
             lossf = loss.item()
             
             logger.info(f"Iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms")
             
-            if iter_num > 0 and cfg.training.save_checkpoint:
+            if iter_num > 0 and cfg.setup.save_checkpoint:
                 checkpoint_data = {
                     'model': unoptimized_model.state_dict(),
                     'optimizer': optimizer.state_dict(),
@@ -436,7 +472,32 @@ def train(cfg: DictConfig):
                 for k, v in logged_losses.items():
                     log_payload[f"train/losses/{k}"] = v
                     
+                # Perform expensive gradient analysis only when logging
+                if cfg.setup.gradient_analysis_run:
+                    for k, v in grad_norms.items():
+                        log_payload[f"train/grad_norms/{k}"] = v
+                    for k, v in cos_sims.items():
+                        log_payload[f"train/cos_sims/{k}"] = v
+                    
                 wandb.log(log_payload)
+                
+            # Accumulate unweighted raw losses exclusively for the analysis table
+            if cfg.setup.loss_analysis_run:
+                for k, v in logged_losses.items():
+                    if not k.endswith("_weighted"):
+                        loss_analysis_accumulators[k] = loss_analysis_accumulators.get(k, 0.0) + v
+
+    # -----------------------------
+    # Loss Analysis Summary Dump
+    # -----------------------------
+    if cfg.setup.loss_analysis_run:
+        logger.info("========== LOSS ANALYSIS SUMMARY ==========")
+        logger.info(f"Analyzed over {cfg.setup.max_iters} iterations.")
+        logger.info("Average raw unweighted loss magnitudes:")
+        for k, v in loss_analysis_accumulators.items():
+            avg = v / cfg.setup.max_iters
+            logger.info(f"  {k}: {avg:.4f}")
+        logger.info("===========================================")
 
 
 if __name__ == "__main__":
