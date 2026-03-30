@@ -42,6 +42,7 @@ def tokenize_batch(batch: dict[str, list[Any]], phoneme_tokenizer: PhonemeTokeni
     return batch
 
 def get_audio_metadata_batched(batch: dict[str, list[Any]], target_sr: int) -> dict[str, list[int]]:
+    import torchaudio
     # This function calculates the audio length as if it were resampled.
     # By using torchaudio.info, we only read the file headers, avoiding full decoding.
     lengths = []
@@ -55,6 +56,8 @@ def get_audio_metadata_batched(batch: dict[str, list[Any]], target_sr: int) -> d
 
 
 def resample_and_save_audio(sample: dict[str, Any], target_sr: int, resampled_dir: Path) -> dict[str, Any]:
+    import torchaudio
+    
     # Get the resampled audio array.
     resampled_array = sample["audio"]["array"]
     
