@@ -1,6 +1,8 @@
 services:
   ns2:
     build: .
+    # Increase shared memory size for PyTorch DataLoader workers
+    shm_size: '128g'
     volumes:
       - .:/workspace
     deploy:
@@ -8,8 +10,8 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: all
               capabilities: [gpu]
+              count: all
     # This keeps the container's bash shell alive if started in the background
     tty: true
     stdin_open: true
