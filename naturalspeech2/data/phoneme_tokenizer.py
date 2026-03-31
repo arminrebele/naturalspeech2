@@ -21,6 +21,9 @@ class PhonemeTokenizer:
         if self.token_vocabulary_path is None:
             raise ValueError("token_vocabulary_path must be provided")
 
+        with open(self.token_vocabulary_path, "r", encoding="utf-8") as f:
+            self.token_vocabulary = json.load(f)
+
         self.id_to_token = {v: k for k, v in self.token_vocabulary.items()}
 
     @property
