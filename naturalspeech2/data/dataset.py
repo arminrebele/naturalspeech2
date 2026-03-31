@@ -5,32 +5,25 @@ import logging
 import gc
 import io
 from pathlib import Path
+
 import numpy as np
 import pyarrow as pa
 import torch
+import torchaudio
 from torch.utils.data import Dataset, Sampler
 from datasets import load_dataset, load_from_disk, Audio, Value, Dataset as HFDataset
-from einops import rearrange
 from typing import Any, Optional, Iterator
 
 from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer, build_token_vocabulary
 from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
 from naturalspeech2.utils.utils import create_mask_from_lengths, setup_file_logger
+import soundfile as sf
 
 logger = logging.getLogger(__name__)
 
 # Global cache for worker processes
 _PHONEMIZER_INSTANCE = None
-
-def _get_healthy_torchaudio():
-    import sys
-    # Hugging Face's dill serialization can corrupt C-extension modules in the worker's
-    # sys.modules, leaving behind an empty husk. We force a reload if it's broken.
-    if "torchaudio" in sys.modules and not hasattr(sys.modules["torchaudio"], "info"):
-        del sys.modules["torchaudio"]
-    import torchaudio
-    return torchaudio
 
 def get_worker_phonemizer() -> PhonemizerWrapper:
     global _PHONEMIZER_INSTANCE
@@ -50,38 +43,33 @@ def tokenize_batch(batch: dict[str, list[Any]], phoneme_tokenizer: PhonemeTokeni
     return batch
 
 def get_audio_metadata_batched(batch: dict[str, list[Any]], target_sr: int) -> dict[str, list[int]]:
-    ta = _get_healthy_torchaudio()
     # This function calculates the audio length as if it were resampled.
-    # By using ta.info, we only read the file headers, avoiding full decoding.
+    # By using sf.info, we only read the file headers, avoiding full decoding.
     lengths = []
     for audio_dict in batch["audio"]:
         # audio_dict["bytes"] contains the raw embedded file bytes from the Parquet/Arrow file
-        info = ta.info(io.BytesIO(audio_dict["bytes"]))
-        resampled_length = int(info.num_frames * (target_sr / info.sample_rate))
+        info = sf.info(io.BytesIO(audio_dict["bytes"]))
+        resampled_length = int(info.frames * (target_sr / info.samplerate))
         lengths.append(resampled_length)
         
     return {"audio_length": lengths}
 
 
 def resample_and_save_audio(sample: dict[str, Any], target_sr: int, resampled_dir: Path) -> dict[str, Any]:
-    ta = _get_healthy_torchaudio()
-    
-    # Get the resampled audio array.
+    # HF already resampled this to target_sr and gave us a numpy array!
     resampled_array = sample["audio"]["array"]
     
     # Create a unique path for the new file using the dataset index
     new_filename = f"{sample['original_index']}_resampled.flac"
     new_path = resampled_dir / new_filename
 
-    # Save the resampled audio to the new path as FLAC
-    tensor = torch.from_numpy(resampled_array)
-    tensor = rearrange(tensor, "t -> 1 t")          # ta.save expects [channels, samples]
-    ta.save(new_path, tensor, target_sr)
+    # Save to disk. soundfile expects [frames, channels], which matches HF's 1D output for mono
+    sf.write(new_path, resampled_array, target_sr)
     
     # Avoid type conflicts (dict vs string) during processing.
     return {
         "audio_path": str(new_path),
-        "audio_length": tensor.shape[1]
+        "audio_length": resampled_array.shape[0]
     }
 
 class DatasetWrapper(Dataset):
@@ -242,17 +230,15 @@ class DatasetWrapper(Dataset):
         return len(self.dataset)
 
     def _get_audio_on_the_fly(self, audio_dict: dict[str, Any]) -> torch.Tensor:
-        ta = _get_healthy_torchaudio()
         # Decode the embedded bytes on the fly
-        audio, original_sr = ta.load(io.BytesIO(audio_dict["bytes"]))
+        audio, original_sr = torchaudio.load(io.BytesIO(audio_dict["bytes"]))
         if original_sr != self.sampling_rate:
             # Use torchaudio's functional resample for on-the-fly processing
-            audio = ta.functional.resample(audio, orig_freq=original_sr, new_freq=self.sampling_rate)
+            audio = torchaudio.functional.resample(audio, orig_freq=original_sr, new_freq=self.sampling_rate)
         return audio[0]
 
     def _get_audio_pre_resampled(self, audio_path: str) -> torch.Tensor:
-        ta = _get_healthy_torchaudio()
-        audio, _ = ta.load(audio_path)
+        audio, _ = torchaudio.load(audio_path)
         return audio[0]
 
     def __getitem__(self, idx: int) -> dict[str, Any]:

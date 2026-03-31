@@ -23,7 +23,8 @@ dependencies = [
     "pyarrow (>=23.0.1,<24.0.0)",
     "omegaconf (>=2.3.0,<3.0.0)",
     "dotenv (>=0.9.9,<0.10.0)",
-    "wandb (>=0.25.1,<0.26.0)"
+    "wandb (>=0.25.1,<0.26.0)",
+    "soundfile (>=0.13.1,<0.14.0)"
 ]
 
 [build-system]

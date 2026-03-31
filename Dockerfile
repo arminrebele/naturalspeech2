@@ -6,6 +6,7 @@ FROM python:3.12-bookworm
 # - ffmpeg: standard backend for torchaudio/video processing
 # - build-essential: required to build C++ extensions like pyworld
 # - fuse: required for mergerfs to run inside the container
+# - libsndfile1: required by the soundfile library
 RUN apt-get update && apt-get install -y \
     mergerfs \
     fuse \
@@ -13,6 +14,7 @@ RUN apt-get update && apt-get install -y \
     ffmpeg \
     build-essential \
     git \
+    libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 # 2. Install Poetry
