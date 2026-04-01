@@ -1,8 +1,6 @@
 services:
   ns2:
     build: .
-    # Increase shared memory size for PyTorch DataLoader workers
-    shm_size: '128g'
     volumes:
       - .:/workspace
     deploy:

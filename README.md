@@ -26,7 +26,8 @@ This project is designed to run seamlessly inside a Docker container. We provide
 
 ### 1. Build and Start the Environment
 
-Ensure you have Docker and the NVIDIA Container Toolkit installed. Since the `entrypoint.sh` defaults to dropping you into a bash shell, you can build the image and start an interactive session immediately with:
+Ensure you have Docker and the NVIDIA Container Toolkit installed. You'll also need to create a `docker-compose.override.yml` to pass machine-specific settings like your huggingface/hub cache and the shared memory size for PyTorch Dataloader workers.
+Since the `entrypoint.sh` defaults to dropping you into a bash shell, you can build the image and start an interactive session immediately with:
 
 ```bash
 docker compose run --rm --build ns2
@@ -52,7 +53,7 @@ python -m naturalspeech2.train dataset=vctk training.learning_rate=1e-4 wandb=se
 
 If your dataset spans multiple physical disks, the provided `entrypoint.sh` natively supports MergerFS to seamlessly pool them into the `/workspace/data` directory expected by the codebase.
 
-You can configure this by creating a `docker-compose.override.yml` file on your host machine to supply the `MERGERFS_DISKS` environment variable and mount the required drives:
+You can configure this by adding the following lines to your `docker-compose.override.yml` file on your host machine to supply the `MERGERFS_DISKS` environment variable and mount the required drives:
 
 ```yaml
 services:
