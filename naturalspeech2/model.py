@@ -65,7 +65,7 @@ class NaturalSpeech2Model(nn.Module):
         self.max_prompt_pct = max_prompt_pct
         self.hop_length = hop_length
 
-        self.encodec = EncodecWrapper(device)
+        self.encodec = EncodecWrapper()
 
         self.log_mel_spectrogram_generator = LogMelSpectrogramGenerator(
             sampling_rate=sampling_rate,
