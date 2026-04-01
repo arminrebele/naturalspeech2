@@ -52,16 +52,16 @@ class EncodecWrapper(nn.Module):
         audio_codes, _ = self.encode(audio) # [C=1, B, Q, F]
 
         # The quantizer's decode method expects the codebooks (quantizers) as the first dimension.
-        audio_codes = rearrange(audio_codes, '1 b q f -> q b f') # [Q, B, F]
+        audio_codes = rearrange(audio_codes, '1 b q f -> q b f').contiguous() # [Q, B, F]
 
         # De-quantize: Use codebook indices to look up the continuous latent vectors.
-        latents = self.model.quantizer.decode(audio_codes)      # [B, D=128, F]
-        latents = rearrange(latents, "b d f -> b f d")          # [B, F, D]
+        latents = self.model.quantizer.decode(audio_codes)          # [B, D=128, F]
+        latents = rearrange(latents, "b d f -> b f d").contiguous() # [B, F, D]
         return latents
 
     def decode_from_codes(self, audio_codes, audio_scales):
         return self.model.decode(audio_codes, audio_scales)
 
     def decode_from_latents(self, latents): # latents: [B, F, D]
-        latents = rearrange(latents, "b f d -> b d f")  # [B, D, F]
+        latents = rearrange(latents, "b f d -> b d f").contiguous()  # [B, D, F]
         return self.model.decoder(latents)
