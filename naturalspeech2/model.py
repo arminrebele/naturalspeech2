@@ -160,9 +160,13 @@ class NaturalSpeech2Model(nn.Module):
     ):
         device = audio_latents.device
         B, F, D = audio_latents.shape
-        
-        # hop_length in this case the downsample factor from audio samples to audio latents
-        audio_latents_lengths = (audio_lengths / hop_length).ceil().long()
+
+        # hop_length in this case the downsample factor from audio samples to audio latents.
+        # Integer ceil division: (a + b - 1) // b == ceil(a / b) for non-negative ints.
+        # Same formula as LogMelSpectrogramGenerator, so mel frames and latent frames line up.
+        audio_latents_lengths = (audio_lengths + hop_length - 1) // hop_length
+        # Safety net: never trust the formula alone — clamp against the actual tensor shape.
+        audio_latents_lengths = audio_latents_lengths.clamp(min=1, max=F)
 
         prompt_latents_list = []
         target_latents_list = []

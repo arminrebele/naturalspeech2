@@ -45,7 +45,9 @@ class LogMelSpectrogramGenerator(nn.Module):
 
         F = audio_encodings.shape[1]
 
-        frame_lengths = 1 + (audio_lengths // self.hop_length)    # [B]
+        # Integer ceil division: matches Encodec's ceil(T/hop) convention so
+        # mel frames and latent frames stay aligned through the pipeline.
+        frame_lengths = (audio_lengths + self.hop_length - 1) // self.hop_length  # [B]
         frame_lengths = frame_lengths.clamp(min=1, max=F) # number of valid frames
 
         frame_mask = create_mask_from_lengths(frame_lengths, max_len=F)  # [B, F, 1]
