@@ -45,7 +45,6 @@ def stress_test(cfg: DictConfig):
         'min_prompt_pct': cfg.model.min_prompt_pct,
         'max_prompt_pct': cfg.model.max_prompt_pct,
         'n_fft': cfg.model.mel.n_fft,
-        'hop_length': cfg.model.mel.hop_length,
         'n_mels': cfg.model.mel.n_mels,
         'f_min': cfg.model.mel.f_min,
         'f_max': cfg.model.mel.f_max,

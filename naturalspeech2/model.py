@@ -29,7 +29,6 @@ class NaturalSpeech2Model(nn.Module):
 
                  # Log Mel Spectrogram parameters
                  n_fft: int = 1024,
-                 hop_length: int = 320,
                  n_mels: int = 80,
                  f_min: float = 0.0,
                  f_max: float = None,
@@ -63,14 +62,12 @@ class NaturalSpeech2Model(nn.Module):
         super().__init__()
         self.min_prompt_pct = min_prompt_pct
         self.max_prompt_pct = max_prompt_pct
-        self.hop_length = hop_length
 
         self.encodec = EncodecWrapper()
 
         self.log_mel_spectrogram_generator = LogMelSpectrogramGenerator(
             sampling_rate=sampling_rate,
             n_fft=n_fft,
-            hop_length=hop_length,
             n_mels=n_mels,
             f_min=f_min,
             f_max=f_max,
@@ -152,21 +149,13 @@ class NaturalSpeech2Model(nn.Module):
 
     @staticmethod
     def _generate_prompts_and_targets(
-        audio_latents: torch.Tensor,     # [B, F, hidden_dim]
-        audio_lengths: torch.Tensor,     # [B]
+        audio_latents: torch.Tensor,            # [B, F, D]
+        audio_latents_lengths: torch.Tensor,    # [B]
         min_prompt_pct: float,
         max_prompt_pct: float,
-        hop_length: int
     ):
         device = audio_latents.device
-        B, F, D = audio_latents.shape
-
-        # hop_length in this case the downsample factor from audio samples to audio latents.
-        # Integer ceil division: (a + b - 1) // b == ceil(a / b) for non-negative ints.
-        # Same formula as LogMelSpectrogramGenerator, so mel frames and latent frames line up.
-        audio_latents_lengths = (audio_lengths + hop_length - 1) // hop_length
-        # Safety net: never trust the formula alone — clamp against the actual tensor shape.
-        audio_latents_lengths = audio_latents_lengths.clamp(min=1, max=F)
+        B, _, D = audio_latents.shape
 
         prompt_latents_list = []
         target_latents_list = []
@@ -265,14 +254,13 @@ class NaturalSpeech2Model(nn.Module):
         # frame_mask_expanded: [B, F, 1]
         # frame_lengths_expanded: [B]
 
-        audio_latents = self.encodec.get_latents(audio) # (B, F, D=128)
+        audio_latents, audio_latents_lengths = self.encodec.get_latents(audio, audio_lengths) # (B, F, D=128)
 
         prompt_latents, prompt_latents_mask, prompt_latents_lengths, target_latents, target_latents_mask, target_latents_lengths = self._generate_prompts_and_targets(
             audio_latents,
-            audio_lengths,
+            audio_latents_lengths,
             self.min_prompt_pct,
             self.max_prompt_pct,
-            self.hop_length
         )
         # prompt_latents: [B, F, hidden_dim]             # target_latents: [B, F, hidden_dim]
         # prompt_latents_mask: [B, F, 1]                 # target_latents_mask: [B, F, 1]

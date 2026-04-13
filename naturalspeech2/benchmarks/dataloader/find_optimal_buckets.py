@@ -6,6 +6,7 @@ import logging
 
 from naturalspeech2.data.dataset import DatasetWrapper
 from naturalspeech2.utils.utils import setup_file_logger
+from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 
 logger = logging.getLogger(__name__)
 
@@ -90,12 +91,10 @@ def benchmark_buckets(cfg: DictConfig):
     
     logger.info("Extracting audio lengths...")
     # Convert raw audio sample lengths to latent frame lengths (since the model pads based on frames)
-    hop_length = cfg.model.mel.hop_length
-    
     # Extract lengths and convert to frame counts
     raw_lengths = np.array(dataset.dataset["audio_length"])
     phoneme_lengths = np.array(dataset.dataset["phoneme_tokens_length"])
-    base_frame_lengths = np.ceil(raw_lengths / hop_length).astype(int)
+    base_frame_lengths = np.ceil(raw_lengths / ENCODER_HOP_LENGTH).astype(int)
     
     # Round up to the nearest multiple of 8 (Tensor Core optimization).
     resolution = 8
@@ -130,7 +129,7 @@ def benchmark_buckets(cfg: DictConfig):
             
             # Find the absolute maximum phoneme length among these specific sequences
             max_phonemes = int(np.max(phoneme_lengths[mask])) if np.any(mask) else 0
-            b_sample = b_frame * hop_length
+            b_sample = b_frame * ENCODER_HOP_LENGTH
             
             logger.info(f"  Bucket {i+1}: (audio_samples: {b_sample}, phoneme_tokens: {max_phonemes})")
             

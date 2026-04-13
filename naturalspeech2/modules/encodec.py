@@ -6,6 +6,8 @@ from einops import rearrange
 
 from naturalspeech2.paths import ENCODEC_24KHZ_DIR
 
+ENCODER_HOP_LENGTH = 320
+
 
 class EncodecWrapper(nn.Module):
     def __init__(self, bandwidth=24, auto_load=True):
@@ -47,8 +49,11 @@ class EncodecWrapper(nn.Module):
          # output.audio_codes => discrete codebook indices (0-1023), Shape: (Channel(Mono), Batch, Quantizer/Codebook, Frames/Time)
 
     @torch.no_grad()
-    def get_latents(self, audio):
-        # audio: [B, T]
+    def get_latents(
+        self, 
+        audio,          # [B, T]
+        audio_lengths   # [B]
+    ):
         audio_codes, _ = self.encode(audio) # [C=1, B, Q, F]
 
         # The quantizer's decode method expects the codebooks (quantizers) as the first dimension.
@@ -57,7 +62,12 @@ class EncodecWrapper(nn.Module):
         # De-quantize: Use codebook indices to look up the continuous latent vectors.
         latents = self.model.quantizer.decode(audio_codes)          # [B, D=128, F]
         latents = rearrange(latents, "b d f -> b f d").contiguous() # [B, F, D]
-        return latents
+
+        F = latents.shape[1]
+        latents_lengths = (audio_lengths + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
+        latents_lengths = latents_lengths.clamp(min=1, max=F)
+
+        return latents, latents_lengths
 
     def decode_from_codes(self, audio_codes, audio_scales):
         return self.model.decode(audio_codes, audio_scales)

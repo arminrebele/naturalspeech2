@@ -212,7 +212,6 @@ def train(cfg: DictConfig):
 
         # Log Mel Spectrogram parameters
         'n_fft': cfg.model.mel.n_fft,
-        'hop_length': cfg.model.mel.hop_length,
         'n_mels': cfg.model.mel.n_mels,
         'f_min': cfg.model.mel.f_min,
         'f_max': cfg.model.mel.f_max,

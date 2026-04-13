@@ -10,7 +10,6 @@ max_prompt_pct: 0.5        # maximum percentage of the audio used as prompt (onl
 # Log Mel Spectrogram Generator
 mel:
   n_fft: 1024
-  hop_length: 320
   n_mels: 80
   f_min: 0.0
   f_max: null
