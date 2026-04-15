@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 
-from einops import rearrange
+from einops import rearrange, repeat
 
 from naturalspeech2.modules.encodec import EncodecWrapper
 from naturalspeech2.modules.log_mel_spectrogram import LogMelSpectrogramGenerator
@@ -155,56 +155,54 @@ class NaturalSpeech2Model(nn.Module):
         max_prompt_pct: float,
     ):
         device = audio_latents.device
-        B, _, D = audio_latents.shape
+        B, F, D = audio_latents.shape
 
-        prompt_latents_list = []
-        target_latents_list = []
+        # Compute per-sample prompt length bounds
+        min_lens = (audio_latents_lengths.float() * min_prompt_pct).long().clamp(min=1)  # [B] | minimum number of frames for the speech prompt
+        max_lens = (audio_latents_lengths.float() * max_prompt_pct).long().clamp(min=1)  # [B] | maximum number of frames for the speech prompt
 
-        for i in range(B):
-            audio_latents_length = audio_latents_lengths[i].item()
-            audio_latents_without_padding = audio_latents[i, :audio_latents_length, :] # [F, D] | F = audio latents length without padding
-            
-            min_len = int(audio_latents_length * min_prompt_pct) # minimum number of frames for the speech prompt
-            max_len = int(audio_latents_length * max_prompt_pct) # maximum number of frames for the speech prompt
-            prompt_len = torch.randint(low=min_len, high=max_len + 1, size=(1,)).item() # number of frames for the speech prompt
+        # Sample prompt_lengths in [min_lens, max_lens] — one rand call covers both samples (one kernel launch)
+        rand = torch.rand(B, 2, device=device)                                                      # [B, 2]
+        range_lens = (max_lens - min_lens + 1).float()                                              # [B]
+        prompt_latents_lengths = min_lens + (rand[:, 0] * range_lens).floor().long()                # [B] | number of frames for the speech prompt
 
-            # Prompt length must fit within the audio latents: prompt_start + prompt_len <= audio_latents_length
-            # Random starting position for the prompt
-            max_start = audio_latents_length - prompt_len
-            prompt_start = torch.randint(low=0, high=max_start + 1, size=(1,)).item()
-            prompt_end = prompt_start + prompt_len
+        # Sample prompt_starts in [0, lengths - prompt_lengths]
+        max_starts = audio_latents_lengths - prompt_latents_lengths                                 # [B] | maximum starting index for the speech prompt to ensure it fits within the audio latents
+        prompt_starts = (rand[:, 1] * (max_starts + 1).float()).floor().long()                      # [B] | frame index where the prompt starts
+        prompt_ends = prompt_starts + prompt_latents_lengths                                        # [B] | frame index where the prompt ends (exclusive)
 
-            prompt = audio_latents_without_padding[prompt_start:prompt_end, :] # [F, D] | F = prompt_len
+        # Extract prompt
+        max_prompt_len = math.ceil(max_prompt_pct * F)
+        j_p = rearrange(torch.arange(max_prompt_len, device=device), 'fp -> 1 fp')                              # [1, Fp] | [0, 1, 2, ..., Fp-1] -> relative offset
+        prompt_idx = (rearrange(prompt_starts, 'b -> b 1') + j_p).clamp(max=F - 1)                              # [B, Fp] | frame indices for the prompt in the audio latents
+        prompt_latents = torch.gather(audio_latents, 1, repeat(prompt_idx, 'b fp -> b fp d', d=D))              # [B, Fp, D]
+        prompt_latents_mask = rearrange(j_p < rearrange(prompt_latents_lengths, 'b -> b 1'), 'b fp -> b fp 1')  # [B, Fp, 1]
+        prompt_latents = prompt_latents * prompt_latents_mask.to(prompt_latents.dtype)                          # mask out padding frames in the prompt latents
 
-            # target: everything before and after the prompt concatenated
-            target = torch.cat([
-                audio_latents_without_padding[:prompt_start, :], 
-                audio_latents_without_padding[prompt_end:, :]
-            ], dim=0)
+        # Extract target
+        max_target_len = F - int(math.floor(min_prompt_pct * F))
+        j_t = rearrange(torch.arange(max_target_len, device=device), 'ft -> 1 ft')                  # [1, Ft] | [0, 1, 2, ..., Ft-1] 
+        target_idx = (                                                                              # [B, Ft]
+            j_t
+            + (j_t >= rearrange(prompt_starts, 'b -> b 1')).long()
+            * rearrange(prompt_latents_lengths, 'b -> b 1')
+        ).clamp(max=F - 1)
+                                                                                   
+        target_latents = torch.gather(audio_latents, 1, repeat(target_idx, 'b ft -> b ft d', d=D))              # [B, Ft, D]
+        target_latents_lengths = audio_latents_lengths - prompt_latents_lengths                                 # [B]
+        target_latents_mask = rearrange(j_t < rearrange(target_latents_lengths, 'b -> b 1'), 'b ft -> b ft 1')  # [B, Ft, 1]
+        target_latents = target_latents * target_latents_mask.to(target_latents.dtype)
 
-            prompt_latents_list.append(prompt)
-            target_latents_list.append(target)
-
-        prompt_latents_padded = pad_sequence(prompt_latents_list, batch_first=True)  # [B, F, D]
-        target_latents_padded = pad_sequence(target_latents_list, batch_first=True)  # [B, F, D]
-
-
-        prompt_latents_lengths = torch.tensor([p.shape[0] for p in prompt_latents_list], device=device)  # [B]
-        prompt_max_len = prompt_latents_padded.shape[1]
-        prompt_latents_mask = create_mask_from_lengths(
-            prompt_latents_lengths,
-            max_len=prompt_max_len
+        return (
+            prompt_latents,          # [B, Fp, D]
+            prompt_latents_mask,     # [B, Fp, 1]
+            prompt_latents_lengths,  # [B]
+            target_latents,          # [B, Ft, D]
+            target_latents_mask,     # [B, Ft, 1]
+            target_latents_lengths,  # [B]
+            prompt_starts,           # [B]
+            prompt_ends,             # [B]
         )
-
-        target_latents_lengths = torch.tensor([t.shape[0] for t in target_latents_list], device=device)  # [B]
-        target_max_len = target_latents_padded.shape[1]
-        target_latents_mask = create_mask_from_lengths(
-            target_latents_lengths,
-            max_len=target_max_len
-        )
-
-        return (prompt_latents_padded, prompt_latents_mask, prompt_latents_lengths,
-                target_latents_padded, target_latents_mask, target_latents_lengths)
 
 
     def forward(
@@ -224,11 +222,13 @@ class NaturalSpeech2Model(nn.Module):
         F: seq_len of frames
         """
 
-        audio_encodings, frame_mask, frame_lengths = self.log_mel_spectrogram_generator(audio, audio_lengths)
-        # audio_encodings: [B, F, n_mels]
-        # frame_mask: [B, F, 1]
-        # frame_lengths: [B]
-
+        (audio_encodings,                                           # audio_encodings: [B, F, n_mels]
+         frame_mask,                                                # frame_mask: [B, F, 1]
+         frame_lengths) = self.log_mel_spectrogram_generator(       # frame_lengths: [B]
+             audio,
+             audio_lengths
+        )
+        
         phoneme_encodings = self.phoneme_encoder(           # [B, P, hidden_dim]
             phoneme_tokens,
             phoneme_tokens_mask,
@@ -246,25 +246,23 @@ class NaturalSpeech2Model(nn.Module):
             phoneme_encodings_lengths,
         )
 
-        expanded_phoneme_encodings, frame_mask_expanded, frame_lengths_expanded = self._expand_phoneme_encodings(
+        (expanded_phoneme_encodings,                                    # expanded_phoneme_encodings: [B, F, dim_hidden]
+         frame_mask_expanded,                                           # frame_mask_expanded: [B, F, 1]
+         frame_lengths_expanded) = self._expand_phoneme_encodings(      # frame_lengths_expanded: [B]
             phoneme_encodings,
             durations,
         )
-        # expanded_phoneme_encodings: [B, F, dim_hidden]
-        # frame_mask_expanded: [B, F, 1]
-        # frame_lengths_expanded: [B]
-
+        
         audio_latents, audio_latents_lengths = self.encodec.get_latents(audio, audio_lengths) # (B, F, D=128)
 
-        prompt_latents, prompt_latents_mask, prompt_latents_lengths, target_latents, target_latents_mask, target_latents_lengths = self._generate_prompts_and_targets(
+        (prompt_latents, prompt_latents_mask, prompt_latents_lengths,           # prompt_latents: [B, Fp, D]   prompt_latents_mask: [B, Fp, 1]   prompt_latents_lengths: [B]
+         target_latents, target_latents_mask, target_latents_lengths,           # target_latents: [B, Ft, D]   target_latents_mask: [B, Ft, 1]   target_latents_lengths: [B]
+         prompt_starts, prompt_ends) = self._generate_prompts_and_targets(      # prompt_starts: [B]           prompt_ends: [B]
             audio_latents,
             audio_latents_lengths,
             self.min_prompt_pct,
             self.max_prompt_pct,
         )
-        # prompt_latents: [B, F, hidden_dim]             # target_latents: [B, F, hidden_dim]
-        # prompt_latents_mask: [B, F, 1]                 # target_latents_mask: [B, F, 1]
-        # prompt_latents_lengths: [B]                    # target_latents_lengths: [B]
 
         prompt_encodings = self.speech_prompt_encoder(      # [B, F, hidden_dim]
             prompt_latents,
