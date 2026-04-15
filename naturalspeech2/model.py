@@ -1,7 +1,6 @@
 import math
 import torch
 from torch import nn
-from torch.nn.utils.rnn import pad_sequence
 
 from einops import rearrange, repeat
 
@@ -121,29 +120,25 @@ class NaturalSpeech2Model(nn.Module):
     def _expand_phoneme_encodings(
         phoneme_encodings: torch.Tensor,  # [B, P, dim_hidden]
         durations: torch.Tensor,          # [B, P]
+        max_frames: int,                  # F | target frame count aligned to the mel grid
     ):
-        B, P, H = phoneme_encodings.shape
-        device = phoneme_encodings.device
+        _, P, H = phoneme_encodings.shape
         durations = durations.to(torch.long)
-        
-        expanded_phoneme_encodings_list = []
-        frame_lengths = []
 
-        for b in range(B):
-            durations_b = durations[b]          # [P]
-            phoneme_encodings_b = phoneme_encodings[b]    # [P, hidden_dim]
+        frame_lengths = durations.sum(dim=1)  # [B]
 
-            expanded_phoneme_encodings_b = torch.repeat_interleave(phoneme_encodings_b, durations_b, dim=0)  # [P_b, hidden_dim]
+        # Cumulative ends: duration_ends[b, p] = first frame index NOT belonging to phoneme p.
+        # Non-decreasing (durations >= 0), so valid input for searchsorted.
+        duration_ends = durations.cumsum(dim=1)  # [B, P]
 
-            expanded_phoneme_encodings_list.append(expanded_phoneme_encodings_b)
-            frame_lengths.append(expanded_phoneme_encodings_b.shape[0])
+        # For each frame f, the phoneme it belongs to is the smallest p with f < duration_ends[b, p].
+        frame_positions = repeat(torch.arange(max_frames, device=durations.device), 'f -> b f', b=durations.shape[0])  # [B, F]
+        phoneme_idx = torch.searchsorted(duration_ends, frame_positions, right=True).clamp(max=P - 1)  # [B, F]
 
-        frame_lengths = torch.tensor(frame_lengths, device=device, dtype=torch.long)  # [B]
+        expanded_phoneme_encodings = torch.gather(phoneme_encodings, 1, repeat(phoneme_idx, 'b f -> b f h', h=H))  # [B, F, H]
 
-        expanded_phoneme_encodings = pad_sequence(expanded_phoneme_encodings_list, batch_first=True)  # [B, F, hidden_dim]
-        F_max = expanded_phoneme_encodings.shape[1]
-
-        frame_mask = create_mask_from_lengths(frame_lengths, max_len=F_max)  # [B, F, 1]
+        frame_mask = create_mask_from_lengths(frame_lengths, max_len=max_frames)  # [B, F, 1]
+        expanded_phoneme_encodings = expanded_phoneme_encodings * frame_mask.to(expanded_phoneme_encodings.dtype)
 
         return expanded_phoneme_encodings, frame_mask, frame_lengths
 
@@ -251,6 +246,7 @@ class NaturalSpeech2Model(nn.Module):
          frame_lengths_expanded) = self._expand_phoneme_encodings(      # frame_lengths_expanded: [B]
             phoneme_encodings,
             durations,
+            max_frames=audio_encodings.shape[1],
         )
         
         audio_latents, audio_latents_lengths = self.encodec.get_latents(audio, audio_lengths) # (B, F, D=128)
