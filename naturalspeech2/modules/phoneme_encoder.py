@@ -50,7 +50,7 @@ class PhonemeEncoder(nn.Module):
         
         phoneme_tokens_emb = self.final_norm(phoneme_tokens_emb)
 
-        phoneme_tokens_emb = phoneme_tokens_emb * phoneme_tokens_mask
+        phoneme_tokens_emb = phoneme_tokens_emb * phoneme_tokens_mask.to(phoneme_tokens_emb.dtype)
         
         return phoneme_tokens_emb # [B, P, hidden_dim]
 
