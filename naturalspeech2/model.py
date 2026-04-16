@@ -1,6 +1,7 @@
 import math
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from einops import rearrange, repeat
 
@@ -280,7 +281,7 @@ class NaturalSpeech2Model(nn.Module):
         prompt_encodings_mask = prompt_latents_mask         # [B, F, 1]
         prompt_encodings_lengths = prompt_latents_lengths   # [B]
 
-        duration_predictor_durations = self.duration_predictor(
+        predicted_log_durations = self.duration_predictor(
             phoneme_encodings,
             phoneme_encodings_mask,
             prompt_encodings,
@@ -288,7 +289,7 @@ class NaturalSpeech2Model(nn.Module):
         )
 
         #### Compute Losses ####
-        
+
         forward_sum_loss = self.forward_sum_loss(
             alignment_logits_with_prior,
             frame_lengths,
@@ -300,9 +301,23 @@ class NaturalSpeech2Model(nn.Module):
             alignment_hard
         )
 
+        # Loss is in log-space so errors are scale-symmetric: a 2x overshoot on a 2-frame
+        # consonant (perceptually catastrophic) weighs more than a 2x overshoot on a 50-frame
+        # vowel (barely audible), whereas linear-space MSE would treat them as equal and let
+        # long vowels dominate the gradient. log1p (not log) keeps log(0) → 0 for padded/1-frame
+        # phonemes. The network predicts log-duration directly; exp(y)-1 at inference gives frames.
+        gt_log_durations = torch.log1p(durations.to(predicted_log_durations.dtype))  # [B, P]
+        duration_loss_per_phoneme = F.mse_loss(
+            predicted_log_durations,
+            gt_log_durations,
+            reduction='none',
+        )  # [B, P]
+        phoneme_mask_flat = rearrange(phoneme_encodings_mask, 'b p 1 -> b p').to(predicted_log_durations.dtype)
+        duration_predictor_loss = (duration_loss_per_phoneme * phoneme_mask_flat).sum() / phoneme_mask_flat.sum()
+
         return {
             "diffusion_loss": None,                 # placeholder for future diffusion loss
-            "duration_predictor_loss": None,        # placeholder for future duration predictor loss
+            "duration_predictor_loss": duration_predictor_loss,
             "pitch_predictor_loss": None,           # placeholder for future pitch predictor loss
             "aligner_loss":{
                 "forward_sum_loss": forward_sum_loss,
