@@ -31,28 +31,22 @@ class TransformerEncoderLayer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         
     def forward(
-            self, 
+            self,
             x,    # [B, T, D]
-            mask  # [B, T, 1]
+            mask  # [B, T, 1] bool
     ):
-        mask = mask.to(x.dtype)
+        float_mask = mask.to(x.dtype)
 
-        attn_out = self.multi_head_attention(self.norm1(x), mask)  # [B, T, D]
+        attn_out = self.multi_head_attention(self.norm1(x), mask)
         x = x + self.dropout(attn_out)
-        x = x * mask # padding token vector to zero
-        
-        x_norm = self.norm2(x)
-        x_norm = rearrange(x_norm, 'b t d -> b d t')
-        mask = rearrange(mask, 'b t 1 -> b 1 t')
+        x = x * float_mask
 
-        ffn_out = self.conv1(x_norm, mask)
+        ffn_out = self.conv1(self.norm2(x), mask)
         ffn_out = F.silu(ffn_out)
         ffn_out = self.conv2(ffn_out, mask)
-        ffn_out = rearrange(ffn_out, 'b d t -> b t d')
-        mask = rearrange(mask, 'b 1 t -> b t 1')
 
         x = x + self.dropout(ffn_out)
-        x = x * mask # padding token vector to zero
+        x = x * float_mask
 
         return x
 
@@ -277,13 +271,15 @@ class Conv1D(nn.Module):
         super().__init__()
         padding = (kernel_size - 1) // 2
         self.conv1d = nn.Conv1d(hidden_dim, filter_size, kernel_size, padding=padding)
-    
+
     def forward(
             self,
-            x,    # [B, D, T]
-            mask  # [B, 1, T]
+            x,    # [B, T, D]
+            mask  # [B, T, 1] bool
     ):
-        x = x.masked_fill(~mask, 0.0)
+        x = rearrange(x, 'b t d -> b d t')
+        mask_bct = rearrange(mask.bool(), 'b t 1 -> b 1 t')
+        x = x.masked_fill(~mask_bct, 0.0)
         x = self.conv1d(x)
-        return x
+        return rearrange(x, 'b d t -> b t d')
 
