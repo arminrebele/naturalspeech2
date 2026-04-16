@@ -12,7 +12,9 @@ class TransformerEncoderLayer(nn.Module):
             attention_heads: int,
             conv1d_filter_size: int,
             conv1d_kernel_size: int,
-            dropout: float,
+            conv_dropout: float,
+            attn_weights_dropout: float,
+            attn_out_dropout: float,
             rope_base: float,
             rope_max_seq_len: int,
     ):
@@ -21,15 +23,16 @@ class TransformerEncoderLayer(nn.Module):
         self.multi_head_attention = MultiHeadSelfAttention(
             hidden_dim,
             attention_heads,
-            dropout,
+            attn_weights_dropout,
             rope_base,
             rope_max_seq_len,
         )
         self.norm2 = RMSNorm(hidden_dim)
         self.conv1 = Conv1D(hidden_dim, conv1d_filter_size, conv1d_kernel_size)
         self.conv2 = Conv1D(conv1d_filter_size, hidden_dim, 1)
-        self.dropout = nn.Dropout(dropout)
-        
+        self.attn_out_dropout = nn.Dropout(attn_out_dropout)
+        self.conv_dropout = nn.Dropout(conv_dropout)
+
     def forward(
             self,
             x,    # [B, T, D]
@@ -38,14 +41,14 @@ class TransformerEncoderLayer(nn.Module):
         float_mask = mask.to(x.dtype)
 
         attn_out = self.multi_head_attention(self.norm1(x), mask)
-        x = x + self.dropout(attn_out)
+        x = x + self.attn_out_dropout(attn_out)
         x = x * float_mask
 
         ffn_out = self.conv1(self.norm2(x), mask)
         ffn_out = F.silu(ffn_out)
         ffn_out = self.conv2(ffn_out, mask)
 
-        x = x + self.dropout(ffn_out)
+        x = x + self.conv_dropout(ffn_out)
         x = x * float_mask
 
         return x
@@ -165,14 +168,14 @@ class MultiHeadSelfAttention(nn.Module):
             self,
             hidden_dim: int,
             attention_heads: int,
-            dropout: float,
+            attn_weights_dropout: float,
             rope_base: float,
             rope_max_seq_len: int,
     ):
         super().__init__()
         self.num_heads = attention_heads
         self.head_dim = hidden_dim // attention_heads
-        self.dropout = dropout
+        self.attn_weights_dropout = attn_weights_dropout
         self.to_qkv = nn.Linear(hidden_dim, hidden_dim * 3, bias=False)
         self.to_out = nn.Linear(hidden_dim, hidden_dim, bias=False)
 
@@ -206,7 +209,7 @@ class MultiHeadSelfAttention(nn.Module):
         out = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_mask,
-            dropout_p=self.dropout if self.training else 0.0,
+            dropout_p=self.attn_weights_dropout if self.training else 0.0,
             is_causal=False,  # Encoder = bidirectional
         )
 
@@ -220,12 +223,12 @@ class MultiHeadCrossAttention(nn.Module):
             self,
             hidden_dim: int,
             attention_heads: int,
-            dropout: float
+            attn_weights_dropout: float,
     ):
         super().__init__()
         self.num_heads = attention_heads
         self.head_dim = hidden_dim // attention_heads
-        self.dropout = dropout
+        self.attn_weights_dropout = attn_weights_dropout
         self.to_q = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.to_kv = nn.Linear(hidden_dim, hidden_dim * 2, bias=False)
         self.to_out = nn.Linear(hidden_dim, hidden_dim, bias=False)
@@ -250,7 +253,7 @@ class MultiHeadCrossAttention(nn.Module):
         out = F.scaled_dot_product_attention(
             q, k, v,
             attn_mask=attn_mask,
-            dropout_p=self.dropout if self.training else 0.0,
+            dropout_p=self.attn_weights_dropout if self.training else 0.0,
             is_causal=False,
         )
 
