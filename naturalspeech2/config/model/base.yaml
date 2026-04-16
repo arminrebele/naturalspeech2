@@ -20,7 +20,9 @@ phoneme_encoder:
   attention_heads: 8
   conv1d_filter_size: 2048
   conv1d_kernel_size: 9
-  dropout: 0.2
+  conv_dropout: 0.2
+  attn_weights_dropout: 0.2
+  attn_out_dropout: 0.2
 
 # Aligner
 aligner:
@@ -34,7 +36,9 @@ speech_prompt_encoder:
   attention_heads: 8
   conv1d_filter_size: 2048
   conv1d_kernel_size: 9
-  dropout: 0.2
+  conv_dropout: 0.2
+  attn_weights_dropout: 0.2
+  attn_out_dropout: 0.2
 
 # Duration Predictor
 duration_predictor:
@@ -42,7 +46,9 @@ duration_predictor:
   conv1d_kernel_size: 3
   attention_layers: 10
   attention_heads: 8
-  dropout: 0.5
+  conv_dropout: 0.5
+  attn_weights_dropout: 0.5
+  attn_out_dropout: 0.5
 
 # Loss Balancing Weights
 loss_weights:

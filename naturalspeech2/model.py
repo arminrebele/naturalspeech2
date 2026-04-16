@@ -37,7 +37,9 @@ class NaturalSpeech2Model(nn.Module):
                  phoneme_encoder_heads: int = 8,
                  phoneme_encoder_filter_size: int = 2048,
                  phoneme_encoder_kernel_size: int = 9,
-                 phoneme_encoder_dropout: float = 0.2,
+                 phoneme_encoder_conv_dropout: float = 0.2,
+                 phoneme_encoder_attn_weights_dropout: float = 0.2,
+                 phoneme_encoder_attn_out_dropout: float = 0.2,
 
                  # Aligner parameters
                  aligner_attn_channels: int = 80,
@@ -49,14 +51,18 @@ class NaturalSpeech2Model(nn.Module):
                  speech_prompt_encoder_heads: int = 8,
                  speech_prompt_encoder_filter_size: int = 2048,
                  speech_prompt_encoder_kernel_size: int = 9,
-                 speech_prompt_encoder_dropout: float = 0.2,
+                 speech_prompt_encoder_conv_dropout: float = 0.2,
+                 speech_prompt_encoder_attn_weights_dropout: float = 0.2,
+                 speech_prompt_encoder_attn_out_dropout: float = 0.2,
 
                  # Duration Predictor parameters
                  duration_predictor_conv1d_layers: int = 30,
                  duration_predictor_conv1d_kernel_size: int = 3,
                  duration_predictor_attention_layers: int = 10,
                  duration_predictor_attention_heads: int = 8,
-                 duration_predictor_dropout: float = 0.5,
+                 duration_predictor_conv_dropout: float = 0.5,
+                 duration_predictor_attn_weights_dropout: float = 0.5,
+                 duration_predictor_attn_out_dropout: float = 0.5,
     ):
         super().__init__()
         self.min_prompt_pct = min_prompt_pct
@@ -79,7 +85,9 @@ class NaturalSpeech2Model(nn.Module):
             attention_heads=phoneme_encoder_heads,
             conv1d_filter_size=phoneme_encoder_filter_size,
             conv1d_kernel_size=phoneme_encoder_kernel_size,
-            dropout=phoneme_encoder_dropout,
+            conv_dropout=phoneme_encoder_conv_dropout,
+            attn_weights_dropout=phoneme_encoder_attn_weights_dropout,
+            attn_out_dropout=phoneme_encoder_attn_out_dropout,
             rope_base=rope_base,
             rope_max_seq_len=rope_max_seq_len,
         )
@@ -102,7 +110,9 @@ class NaturalSpeech2Model(nn.Module):
             attention_heads=speech_prompt_encoder_heads,
             conv1d_filter_size=speech_prompt_encoder_filter_size,
             conv1d_kernel_size=speech_prompt_encoder_kernel_size,
-            dropout=speech_prompt_encoder_dropout,
+            conv_dropout=speech_prompt_encoder_conv_dropout,
+            attn_weights_dropout=speech_prompt_encoder_attn_weights_dropout,
+            attn_out_dropout=speech_prompt_encoder_attn_out_dropout,
             rope_base=rope_base,
             rope_max_seq_len=rope_max_seq_len,
         )
@@ -113,7 +123,9 @@ class NaturalSpeech2Model(nn.Module):
             conv1d_kernel_size=duration_predictor_conv1d_kernel_size,
             attention_layers=duration_predictor_attention_layers,
             attention_heads=duration_predictor_attention_heads,
-            dropout=duration_predictor_dropout,
+            conv_dropout=duration_predictor_conv_dropout,
+            attn_weights_dropout=duration_predictor_attn_weights_dropout,
+            attn_out_dropout=duration_predictor_attn_out_dropout,
         )
 
     @staticmethod

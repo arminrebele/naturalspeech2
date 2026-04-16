@@ -221,7 +221,9 @@ def train(cfg: DictConfig):
         'phoneme_encoder_heads': cfg.model.phoneme_encoder.attention_heads,
         'phoneme_encoder_filter_size': cfg.model.phoneme_encoder.conv1d_filter_size,
         'phoneme_encoder_kernel_size': cfg.model.phoneme_encoder.conv1d_kernel_size,
-        'phoneme_encoder_dropout': cfg.model.phoneme_encoder.dropout,
+        'phoneme_encoder_conv_dropout': cfg.model.phoneme_encoder.conv_dropout,
+        'phoneme_encoder_attn_weights_dropout': cfg.model.phoneme_encoder.attn_weights_dropout,
+        'phoneme_encoder_attn_out_dropout': cfg.model.phoneme_encoder.attn_out_dropout,
 
         # Aligner parameters
         'aligner_attn_channels': cfg.model.aligner.attn_channels,
@@ -233,14 +235,18 @@ def train(cfg: DictConfig):
         'speech_prompt_encoder_heads': cfg.model.speech_prompt_encoder.attention_heads,
         'speech_prompt_encoder_filter_size': cfg.model.speech_prompt_encoder.conv1d_filter_size,
         'speech_prompt_encoder_kernel_size': cfg.model.speech_prompt_encoder.conv1d_kernel_size,
-        'speech_prompt_encoder_dropout': cfg.model.speech_prompt_encoder.dropout,
+        'speech_prompt_encoder_conv_dropout': cfg.model.speech_prompt_encoder.conv_dropout,
+        'speech_prompt_encoder_attn_weights_dropout': cfg.model.speech_prompt_encoder.attn_weights_dropout,
+        'speech_prompt_encoder_attn_out_dropout': cfg.model.speech_prompt_encoder.attn_out_dropout,
 
         # Duration Predictor parameters
         'duration_predictor_conv1d_layers': cfg.model.duration_predictor.conv1d_layers,
         'duration_predictor_conv1d_kernel_size': cfg.model.duration_predictor.conv1d_kernel_size,
         'duration_predictor_attention_layers': cfg.model.duration_predictor.attention_layers,
         'duration_predictor_attention_heads': cfg.model.duration_predictor.attention_heads,
-        'duration_predictor_dropout': cfg.model.duration_predictor.dropout,
+        'duration_predictor_conv_dropout': cfg.model.duration_predictor.conv_dropout,
+        'duration_predictor_attn_weights_dropout': cfg.model.duration_predictor.attn_weights_dropout,
+        'duration_predictor_attn_out_dropout': cfg.model.duration_predictor.attn_out_dropout,
     }
 
     # State initialization variables
