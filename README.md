@@ -7,7 +7,7 @@ This repository contains an unofficial PyTorch implementation of the **NaturalSp
 Below is the complete forward pass through the NaturalSpeech 2 architecture during training. 
 *(Click the image to expand and zoom in)*
 
-[![NaturalSpeech 2 Training Architecture](assets/NS2_architecture.png)](assets/NS2_architecture.png)
+[![NaturalSpeech 2 Training Architecture](docs/architecture/training-architecture.png)](docs/architecture/training-architecture.png)
 
 *Color Coding:* The sub-modules with individual loss terms are colored the same as their respective terms at the top of the picture. Additionally, all yellow sub-modules represent pre-trained models that aren't trained together with the diffusion model.
 
@@ -16,7 +16,7 @@ The original NaturalSpeech 2 [1] architecture utilized SoundStream, a proprietar
 
 At the core of the latent generation process lies the Diffusion Model, utilizing a dilated convolution and Q-K-V attention architecture:
 
-[![Diffusion Model Architecture](assets/diffusion_model.png)](assets/diffusion_model.png)
+[![Diffusion Model Architecture](docs/architecture/diffusion-model.png)](docs/architecture/diffusion-model.png)
 
 ---
 
@@ -129,7 +129,7 @@ The reference models in this repository were trained on the following system con
 
 During inference, the model takes a text transcript and a short speech prompt, predicting phoneme durations and pitch, and running the reverse diffusion process to synthesize the final audio latents.
 
-[![NaturalSpeech 2 Inference Architecture](assets/NS2_architecture_inference.png)](assets/NS2_architecture_inference.png)
+[![NaturalSpeech 2 Inference Architecture](docs/architecture/inference-architecture.png)](docs/architecture/inference-architecture.png)
 
 ---
 
@@ -141,7 +141,7 @@ During inference, the model takes a text transcript and a short speech prompt, p
 
 ## References
 
-*(For academic use, the BibTeX citations for these works can be found in [assets/references.bib](assets/references.bib))*
+*(For academic use, the BibTeX citations for these works can be found in [docs/references.bib](docs/references.bib))*
 
 [1] Shen, K., Ju, Z., Tan, X., Liu, E., Leng, Y., He, L., Qin, T., Zhao, S., & Bian, J. (2024). NaturalSpeech 2: Latent Diffusion Models are Natural and Zero-Shot Speech and Singing Synthesizers. *International Conference on Representation Learning*.  
 [2] Défossez, A., Copet, J., Synnaeve, G., & Adi, Y. (2023). High Fidelity Neural Audio Compression. *Transactions on Machine Learning Research*.  
