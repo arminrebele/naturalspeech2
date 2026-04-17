@@ -35,14 +35,17 @@ class LogMelSpectrogramGenerator(nn.Module):
             audio,         # [B, T]  | T = max audio length
             audio_lengths  # [B]
     ):
-        audio_encodings= self.log_mel_generator(audio) # [B, n_mels, F]
-        
+        audio_encodings= self.log_mel_generator(audio) # [B, n_mels, F+1]
+
+        # MelSpectrogram(center=True) emits 1 + T//hop frames; Encodec emits T//hop.
+        # Drop the trailing centered-padding frame so mel and encodec share one F grid.
+        F = audio.shape[-1] // ENCODER_HOP_LENGTH
+        audio_encodings = audio_encodings[:, :, :F]
+
         # Clamp the values to a minimum of 1e-5 to avoid -inf in log scale, if silence log(0) -> -inf
         audio_encodings = torch.clamp(audio_encodings, min=1e-5)
         audio_encodings = self.to_db(audio_encodings)  # [B, n_mels, F]
         audio_encodings = rearrange(audio_encodings, 'b d t -> b t d')  # [B, F, n_mels]
-
-        F = audio_encodings.shape[1]
 
         # Integer ceil division: matches Encodec's ceil(T/hop) convention so
         # mel frames and latent frames stay aligned through the pipeline.
