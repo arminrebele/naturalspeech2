@@ -236,6 +236,7 @@ class NaturalSpeech2Model(nn.Module):
             target_latents_lengths,  # [B]
             prompt_starts,           # [B]
             prompt_ends,             # [B]
+            target_idx,              # [B, Ft]
         )
 
     def _generate_condition(
@@ -306,7 +307,8 @@ class NaturalSpeech2Model(nn.Module):
 
         (prompt_latents, prompt_latents_mask, prompt_latents_lengths,           # prompt_latents: [B, Fp, D]   prompt_latents_mask: [B, Fp, 1]   prompt_latents_lengths: [B]
          target_latents, target_latents_mask, target_latents_lengths,           # target_latents: [B, Ft, D]   target_latents_mask: [B, Ft, 1]   target_latents_lengths: [B]
-         prompt_starts, prompt_ends) = self._generate_prompts_and_targets(      # prompt_starts: [B]           prompt_ends: [B]
+         prompt_starts, prompt_ends,                                            # prompt_starts: [B]           prompt_ends: [B]
+         target_idx) = self._generate_prompts_and_targets(                      # target_idx: [B, Ft]          frame indices of the target in the full F axis
             audio_latents,
             audio_latents_lengths,
             self.min_prompt_pct,
@@ -340,6 +342,15 @@ class NaturalSpeech2Model(nn.Module):
             pitch,
             frame_mask_expanded,
         )
+
+        # Slice condition down to the same Ft target frames the diffusion model will denoise
+        H = condition.shape[-1]
+        condition_target = torch.gather(                                      # [B, Ft, H]
+            condition,
+            1,
+            repeat(target_idx, 'b ft -> b ft h', h=H),
+        )
+        condition_target = condition_target * target_latents_mask.to(condition_target.dtype)
 
         #### Compute Losses ####
 
@@ -393,19 +404,93 @@ class NaturalSpeech2Model(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        audio: torch.Tensor,                  # [B, T]    | float
-        audio_mask: torch.Tensor,             # [B, T, 1] | True/False
-        audio_lengths: torch.Tensor,          # [B]       | int
-        phoneme_tokens: torch.Tensor,         # [B, P]    | int
-        phoneme_tokens_mask: torch.Tensor,    # [B, P, 1] | True/False
-        phoneme_tokens_lengths: torch.Tensor, # [B]       | int
-        pitch: torch.Tensor = None,           # [B, F]    | GT pitch (None at inference -> use predictor)
-        **kwargs
+        reference_audio: torch.Tensor,           # [B, T_ref]    | reference utterance for speaker/style prompt
+        reference_audio_lengths: torch.Tensor,   # [B]
+
+        phoneme_tokens: torch.Tensor,            # [B, P]        | text to synthesize, phonemized + tokenized
+        phoneme_tokens_mask: torch.Tensor,       # [B, P, 1]     | True/False
+        phoneme_tokens_lengths: torch.Tensor,    # [B]
+
+        num_diffusion_steps: int = 150,
+        cfg_scale: float = 1.0,
     ):
-        """
-        Placeholder for future generation method.
-        """
-        return torch.randn_like(audio)
+        # 1. Build speech prompt from reference audio.
+        reference_latents, reference_latents_lengths = self.encodec.get_latents(  # [B, Fp, D], [B]
+            reference_audio,
+            reference_audio_lengths,
+        )
+        prompt_latents_mask = create_mask_from_lengths(                           # [B, Fp, 1]
+            reference_latents_lengths,
+            max_len=reference_latents.shape[1],
+        )
+        prompt_encodings = self.speech_prompt_encoder(                            # [B, Fp, H]
+            reference_latents,
+            prompt_latents_mask,
+            reference_latents_lengths,
+        )
+        prompt_encodings_mask = prompt_latents_mask
+
+        # 2. Encode phonemes.
+        phoneme_encodings = self.phoneme_encoder(                                 # [B, P, H]
+            phoneme_tokens,
+            phoneme_tokens_mask,
+            phoneme_tokens_lengths,
+        )
+
+        # 3. Predict durations, expand phonemes to frames.
+        predicted_log_durations = self.duration_predictor(                        # [B, P]
+            phoneme_encodings,
+            phoneme_tokens_mask,
+            prompt_encodings,
+            prompt_encodings_mask,
+        )
+        # Inverse of training's torch.log1p: expm1 -> round -> clamp -> mask to 0 on padding.
+        phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').long()
+        predicted_durations = torch.expm1(predicted_log_durations).round().long().clamp(min=0)
+        predicted_durations = predicted_durations * phoneme_mask_flat             # [B, P]
+
+        # max_frames as Python int forces one CPU<->GPU sync — acceptable inside generate()
+        # (not inside forward()). Required because _expand_phoneme_encodings needs a
+        # Python int for torch.arange.
+        frame_lengths = predicted_durations.sum(dim=1)                            # [B]
+        max_frames = int(frame_lengths.max().item())
+
+        (expanded_phoneme_encodings,                                              # [B, F', H]
+         frame_mask,                                                              # [B, F', 1]
+         frame_lengths) = self._expand_phoneme_encodings(                         # [B]
+            phoneme_encodings,
+            predicted_durations,
+            max_frames=max_frames,
+        )
+
+        # 4. Predict pitch, build condition.
+        predicted_log_pitch = self.pitch_predictor(                               # [B, F']
+            expanded_phoneme_encodings,
+            frame_mask,
+            prompt_encodings,
+            prompt_encodings_mask,
+        )
+        # Inverse of training's torch.log(pitch.clamp(min=1e-5)). Unvoiced frames
+        # produce very low predicted log-pitch, so exp(.) recovers ~0 Hz naturally.
+        predicted_pitch = torch.exp(predicted_log_pitch)                          # [B, F']
+
+        condition = self._generate_condition(                                     # [B, F', H]
+            expanded_phoneme_encodings,
+            predicted_pitch,
+            frame_mask,
+        )
+
+        # 5. Diffusion sampling — pending diffusion model implementation.
+        # Planned call signature:
+        #   generated_latents = self.diffusion_model.sample(
+        #       condition=condition,                    # [B, F', H]
+        #       condition_mask=frame_mask,              # [B, F', 1]
+        #       prompt=prompt_encodings,                # [B, Fp, H]
+        #       prompt_mask=prompt_encodings_mask,      # [B, Fp, 1]
+        #       num_steps=num_diffusion_steps,
+        #       cfg_scale=cfg_scale,
+        #   )  # [B, F', D]
+        # 6. Decode via self.encodec.decode_from_latents(generated_latents).
 
     def configure_optimizers(self, weight_decay, learning_rate, betas):
         # Start with all candidate parameters
