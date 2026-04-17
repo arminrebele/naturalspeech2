@@ -11,6 +11,7 @@ from omegaconf import DictConfig, OmegaConf
 from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.model import LossWrapper
+from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 from naturalspeech2.utils.utils import setup_file_logger
 
 logger = logging.getLogger(__name__)
@@ -48,14 +49,19 @@ def generate_dummy_batch(
     phoneme_tokens = phoneme_tokens.masked_fill(~phoneme_tokens_mask_2d, 0)
     
     phoneme_tokens_mask = rearrange(phoneme_tokens_mask_2d, 'b t -> b t 1')
-    
+
+    # Dummy pitch in Hz, frame-aligned to the mel/encodec grid
+    frame_count = (audio_samples + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
+    pitch = torch.rand(batch_size, frame_count, device=device) * 300.0 + 80.0  # ~80..380 Hz
+
     return {
-        "audio": audio, 
-        "audio_mask": audio_mask, 
+        "audio": audio,
+        "audio_mask": audio_mask,
         "audio_lengths": audio_lengths,
-        "phoneme_tokens": phoneme_tokens, 
-        "phoneme_tokens_mask": phoneme_tokens_mask, 
+        "phoneme_tokens": phoneme_tokens,
+        "phoneme_tokens_mask": phoneme_tokens_mask,
         "phoneme_tokens_lengths": phoneme_tokens_lengths,
+        "pitch": pitch,
     }
 
 def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, batch_size: int, vocab_size: int) -> None:
@@ -104,6 +110,14 @@ def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, ba
         'duration_predictor_conv_dropout': cfg.model.duration_predictor.conv_dropout,
         'duration_predictor_attn_weights_dropout': cfg.model.duration_predictor.attn_weights_dropout,
         'duration_predictor_attn_out_dropout': cfg.model.duration_predictor.attn_out_dropout,
+
+        'pitch_predictor_conv1d_layers': cfg.model.pitch_predictor.conv1d_layers,
+        'pitch_predictor_conv1d_kernel_size': cfg.model.pitch_predictor.conv1d_kernel_size,
+        'pitch_predictor_attention_layers': cfg.model.pitch_predictor.attention_layers,
+        'pitch_predictor_attention_heads': cfg.model.pitch_predictor.attention_heads,
+        'pitch_predictor_conv_dropout': cfg.model.pitch_predictor.conv_dropout,
+        'pitch_predictor_attn_weights_dropout': cfg.model.pitch_predictor.attn_weights_dropout,
+        'pitch_predictor_attn_out_dropout': cfg.model.pitch_predictor.attn_out_dropout,
     }
     
     try:

@@ -247,6 +247,14 @@ def train(cfg: DictConfig):
         'duration_predictor_conv_dropout': cfg.model.duration_predictor.conv_dropout,
         'duration_predictor_attn_weights_dropout': cfg.model.duration_predictor.attn_weights_dropout,
         'duration_predictor_attn_out_dropout': cfg.model.duration_predictor.attn_out_dropout,
+
+        'pitch_predictor_conv1d_layers': cfg.model.pitch_predictor.conv1d_layers,
+        'pitch_predictor_conv1d_kernel_size': cfg.model.pitch_predictor.conv1d_kernel_size,
+        'pitch_predictor_attention_layers': cfg.model.pitch_predictor.attention_layers,
+        'pitch_predictor_attention_heads': cfg.model.pitch_predictor.attention_heads,
+        'pitch_predictor_conv_dropout': cfg.model.pitch_predictor.conv_dropout,
+        'pitch_predictor_attn_weights_dropout': cfg.model.pitch_predictor.attn_weights_dropout,
+        'pitch_predictor_attn_out_dropout': cfg.model.pitch_predictor.attn_out_dropout,
     }
 
     # State initialization variables

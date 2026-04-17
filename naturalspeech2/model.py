@@ -11,6 +11,8 @@ from naturalspeech2.modules.phoneme_encoder import PhonemeEncoder
 from naturalspeech2.modules.aligner import Aligner, ForwardSumLoss, BinLoss
 from naturalspeech2.modules.speech_prompt_encoder import SpeechPromptEncoder
 from naturalspeech2.modules.duration_predictor import DurationPredictor
+from naturalspeech2.modules.pitch_predictor import PitchPredictor
+from naturalspeech2.modules.layers import Conv1D
 from naturalspeech2.utils.utils import create_mask_from_lengths
 
 
@@ -64,6 +66,15 @@ class NaturalSpeech2Model(nn.Module):
                  duration_predictor_conv_dropout: float = 0.5,
                  duration_predictor_attn_weights_dropout: float = 0.5,
                  duration_predictor_attn_out_dropout: float = 0.5,
+
+                 # Pitch Predictor parameters
+                 pitch_predictor_conv1d_layers: int = 30,
+                 pitch_predictor_conv1d_kernel_size: int = 5,
+                 pitch_predictor_attention_layers: int = 10,
+                 pitch_predictor_attention_heads: int = 8,
+                 pitch_predictor_conv_dropout: float = 0.5,
+                 pitch_predictor_attn_weights_dropout: float = 0.5,
+                 pitch_predictor_attn_out_dropout: float = 0.5,
     ):
         super().__init__()
         self.min_prompt_pct = min_prompt_pct
@@ -128,6 +139,21 @@ class NaturalSpeech2Model(nn.Module):
             attn_weights_dropout=duration_predictor_attn_weights_dropout,
             attn_out_dropout=duration_predictor_attn_out_dropout,
         )
+
+        self.pitch_predictor = PitchPredictor(
+            hidden_dim=hidden_dim,
+            conv1d_layers=pitch_predictor_conv1d_layers,
+            conv1d_kernel_size=pitch_predictor_conv1d_kernel_size,
+            attention_layers=pitch_predictor_attention_layers,
+            attention_heads=pitch_predictor_attention_heads,
+            conv_dropout=pitch_predictor_conv_dropout,
+            attn_weights_dropout=pitch_predictor_attn_weights_dropout,
+            attn_out_dropout=pitch_predictor_attn_out_dropout,
+        )
+
+        # Projects per-frame pitch (1 channel) up to hidden_dim so it can be
+        # added to expanded_phoneme_encodings to form the diffusion condition c.
+        self.pitch_projection = Conv1D(1, hidden_dim, 1)
 
     @staticmethod
     def _expand_phoneme_encodings(
@@ -212,6 +238,18 @@ class NaturalSpeech2Model(nn.Module):
             prompt_ends,             # [B]
         )
 
+    def _generate_condition(
+        self,
+        expanded_phoneme_encodings,  # [B, F, hidden_dim]
+        pitch,                       # [B, F]          | GT F0 in Hz during training
+        frame_mask,                  # [B, F, 1]       | bool
+    ):
+        pitch = rearrange(pitch, 'b f -> b f 1')
+        pitch_projection = self.pitch_projection(pitch, frame_mask)  # [B, F, hidden_dim]
+        condition = expanded_phoneme_encodings + pitch_projection
+        condition = condition * frame_mask.to(condition.dtype)
+        return condition
+
 
     def forward(
         self,
@@ -222,6 +260,8 @@ class NaturalSpeech2Model(nn.Module):
         phoneme_tokens: torch.Tensor,         # [B, P]    | int
         phoneme_tokens_mask: torch.Tensor,    # [B, P, 1] | True/False
         phoneme_tokens_lengths: torch.Tensor, # [B]       | int
+
+        pitch: torch.Tensor,                  # [B, F]    | float | GT F0 in Hz (0.0 = unvoiced / padding)
     ):
         """
         B: batch size
@@ -288,6 +328,19 @@ class NaturalSpeech2Model(nn.Module):
             prompt_encodings_mask
         )
 
+        predicted_log_pitch = self.pitch_predictor(
+            expanded_phoneme_encodings,
+            frame_mask_expanded,
+            prompt_encodings,
+            prompt_encodings_mask,
+        )
+
+        condition = self._generate_condition(
+            expanded_phoneme_encodings,
+            pitch,
+            frame_mask_expanded,
+        )
+
         #### Compute Losses ####
 
         forward_sum_loss = self.forward_sum_loss(
@@ -315,10 +368,22 @@ class NaturalSpeech2Model(nn.Module):
         phoneme_mask_flat = rearrange(phoneme_encodings_mask, 'b p 1 -> b p').to(predicted_log_durations.dtype)
         duration_predictor_loss = (duration_loss_per_phoneme * phoneme_mask_flat).sum() / phoneme_mask_flat.sum()
 
+        # Pitch loss
+        voiced_mask = (pitch > 0).to(predicted_log_pitch.dtype)                                # [B, F]
+        frame_mask_flat = rearrange(frame_mask_expanded, 'b f 1 -> b f').to(predicted_log_pitch.dtype)
+        pitch_loss_mask = voiced_mask * frame_mask_flat                                        # [B, F]
+        gt_log_pitch = torch.log(pitch.clamp(min=1e-5)).to(predicted_log_pitch.dtype)          # [B, F]
+        pitch_loss_per_frame = F.mse_loss(
+            predicted_log_pitch,
+            gt_log_pitch,
+            reduction='none',
+        )  # [B, F]
+        pitch_predictor_loss = (pitch_loss_per_frame * pitch_loss_mask).sum() / pitch_loss_mask.sum().clamp(min=1.0)
+
         return {
             "diffusion_loss": None,                 # placeholder for future diffusion loss
             "duration_predictor_loss": duration_predictor_loss,
-            "pitch_predictor_loss": None,           # placeholder for future pitch predictor loss
+            "pitch_predictor_loss": pitch_predictor_loss,
             "aligner_loss":{
                 "forward_sum_loss": forward_sum_loss,
                 "bin_loss": bin_loss,
@@ -334,6 +399,7 @@ class NaturalSpeech2Model(nn.Module):
         phoneme_tokens: torch.Tensor,         # [B, P]    | int
         phoneme_tokens_mask: torch.Tensor,    # [B, P, 1] | True/False
         phoneme_tokens_lengths: torch.Tensor, # [B]       | int
+        pitch: torch.Tensor = None,           # [B, F]    | GT pitch (None at inference -> use predictor)
         **kwargs
     ):
         """

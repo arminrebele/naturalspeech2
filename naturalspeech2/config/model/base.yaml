@@ -50,6 +50,16 @@ duration_predictor:
   attn_weights_dropout: 0.5
   attn_out_dropout: 0.5
 
+# Pitch Predictor
+pitch_predictor:
+  conv1d_layers: 30
+  conv1d_kernel_size: 5
+  attention_layers: 10
+  attention_heads: 8
+  conv_dropout: 0.5
+  attn_weights_dropout: 0.5
+  attn_out_dropout: 0.5
+
 # Loss Balancing Weights
 loss_weights:
   diffusion_loss: 1.0
