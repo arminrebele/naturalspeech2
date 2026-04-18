@@ -157,11 +157,11 @@ class NaturalSpeech2Model(nn.Module):
 
     @staticmethod
     def _expand_phoneme_encodings(
-        phoneme_encodings: torch.Tensor,  # [B, P, dim_hidden]
+        phoneme_encodings: torch.Tensor,  # [B, P, D]
         durations: torch.Tensor,          # [B, P]
         max_frames: int,                  # F | target frame count aligned to the mel grid
     ):
-        _, P, H = phoneme_encodings.shape
+        _, P, D = phoneme_encodings.shape
         durations = durations.to(torch.long)
 
         frame_lengths = durations.sum(dim=1)  # [B]
@@ -174,7 +174,7 @@ class NaturalSpeech2Model(nn.Module):
         frame_positions = repeat(torch.arange(max_frames, device=durations.device), 'f -> b f', b=durations.shape[0])  # [B, F]
         phoneme_idx = torch.searchsorted(duration_ends, frame_positions, right=True).clamp(max=P - 1)  # [B, F]
 
-        expanded_phoneme_encodings = torch.gather(phoneme_encodings, 1, repeat(phoneme_idx, 'b f -> b f h', h=H))  # [B, F, H]
+        expanded_phoneme_encodings = torch.gather(phoneme_encodings, 1, repeat(phoneme_idx, 'b f -> b f d', d=D))  # [B, F, D]
 
         frame_mask = create_mask_from_lengths(frame_lengths, max_len=max_frames)  # [B, F, 1]
         expanded_phoneme_encodings = expanded_phoneme_encodings * frame_mask.to(expanded_phoneme_encodings.dtype)
@@ -241,12 +241,12 @@ class NaturalSpeech2Model(nn.Module):
 
     def _generate_condition(
         self,
-        expanded_phoneme_encodings,  # [B, F, hidden_dim]
+        expanded_phoneme_encodings,  # [B, F, D]
         pitch,                       # [B, F]          | GT F0 in Hz during training
         frame_mask,                  # [B, F, 1]       | bool
     ):
         pitch = rearrange(pitch, 'b f -> b f 1')
-        pitch_projection = self.pitch_projection(pitch, frame_mask)  # [B, F, hidden_dim]
+        pitch_projection = self.pitch_projection(pitch, frame_mask)  # [B, F, D]
         condition = expanded_phoneme_encodings + pitch_projection
         condition = condition * frame_mask.to(condition.dtype)
         return condition
@@ -269,6 +269,7 @@ class NaturalSpeech2Model(nn.Module):
         T: number of audio samples
         P: seq_len of phonemes
         F: seq_len of frames
+        D: hidden_dim
         """
 
         (audio_encodings,                                           # audio_encodings: [B, F, n_mels]
@@ -278,7 +279,7 @@ class NaturalSpeech2Model(nn.Module):
              audio_lengths
         )
         
-        phoneme_encodings = self.phoneme_encoder(           # [B, P, hidden_dim]
+        phoneme_encodings = self.phoneme_encoder(           # [B, P, D]
             phoneme_tokens,
             phoneme_tokens_mask,
             phoneme_tokens_lengths
@@ -295,7 +296,7 @@ class NaturalSpeech2Model(nn.Module):
             phoneme_encodings_lengths,
         )
 
-        (expanded_phoneme_encodings,                                    # expanded_phoneme_encodings: [B, F, dim_hidden]
+        (expanded_phoneme_encodings,                                    # expanded_phoneme_encodings: [B, F, D]
          frame_mask_expanded,                                           # frame_mask_expanded: [B, F, 1]
          frame_lengths_expanded) = self._expand_phoneme_encodings(      # frame_lengths_expanded: [B]
             phoneme_encodings,
@@ -315,40 +316,40 @@ class NaturalSpeech2Model(nn.Module):
             self.max_prompt_pct,
         )
 
-        prompt_encodings = self.speech_prompt_encoder(      # [B, F, hidden_dim]
+        prompt_encodings = self.speech_prompt_encoder(      # [B, Fp, D]
             prompt_latents,
             prompt_latents_mask,
             prompt_latents_lengths
         )
-        prompt_encodings_mask = prompt_latents_mask         # [B, F, 1]
+        prompt_encodings_mask = prompt_latents_mask         # [B, Fp, 1]
         prompt_encodings_lengths = prompt_latents_lengths   # [B]
 
-        predicted_log_durations = self.duration_predictor(
+        predicted_log_durations = self.duration_predictor(  # [B, P]
             phoneme_encodings,
             phoneme_encodings_mask,
             prompt_encodings,
             prompt_encodings_mask
         )
 
-        predicted_log_pitch = self.pitch_predictor(
+        predicted_log_pitch = self.pitch_predictor(         # [B, F]
             expanded_phoneme_encodings,
             frame_mask_expanded,
             prompt_encodings,
             prompt_encodings_mask,
         )
 
-        condition = self._generate_condition(
+        condition = self._generate_condition(       # [B, F, D]
             expanded_phoneme_encodings,
             pitch,
             frame_mask_expanded,
         )
 
         # Slice condition down to the same Ft target frames the diffusion model will denoise
-        H = condition.shape[-1]
-        condition_target = torch.gather(                                      # [B, Ft, H]
+        D = condition.shape[-1]
+        condition_target = torch.gather(                                      # [B, Ft, D]
             condition,
             1,
-            repeat(target_idx, 'b ft -> b ft h', h=H),
+            repeat(target_idx, 'b ft -> b ft d', d=D),
         )
         condition_target = condition_target * target_latents_mask.to(condition_target.dtype)
 
@@ -423,7 +424,7 @@ class NaturalSpeech2Model(nn.Module):
             reference_latents_lengths,
             max_len=reference_latents.shape[1],
         )
-        prompt_encodings = self.speech_prompt_encoder(                            # [B, Fp, H]
+        prompt_encodings = self.speech_prompt_encoder(                            # [B, Fp, D]
             reference_latents,
             prompt_latents_mask,
             reference_latents_lengths,
@@ -431,7 +432,7 @@ class NaturalSpeech2Model(nn.Module):
         prompt_encodings_mask = prompt_latents_mask
 
         # 2. Encode phonemes.
-        phoneme_encodings = self.phoneme_encoder(                                 # [B, P, H]
+        phoneme_encodings = self.phoneme_encoder(                                 # [B, P, D]
             phoneme_tokens,
             phoneme_tokens_mask,
             phoneme_tokens_lengths,
@@ -455,7 +456,7 @@ class NaturalSpeech2Model(nn.Module):
         frame_lengths = predicted_durations.sum(dim=1)                            # [B]
         max_frames = int(frame_lengths.max().item())
 
-        (expanded_phoneme_encodings,                                              # [B, F', H]
+        (expanded_phoneme_encodings,                                              # [B, F', D]
          frame_mask,                                                              # [B, F', 1]
          frame_lengths) = self._expand_phoneme_encodings(                         # [B]
             phoneme_encodings,
@@ -474,7 +475,7 @@ class NaturalSpeech2Model(nn.Module):
         # produce very low predicted log-pitch, so exp(.) recovers ~0 Hz naturally.
         predicted_pitch = torch.exp(predicted_log_pitch)                          # [B, F']
 
-        condition = self._generate_condition(                                     # [B, F', H]
+        condition = self._generate_condition(                                     # [B, F', D]
             expanded_phoneme_encodings,
             predicted_pitch,
             frame_mask,
@@ -483,9 +484,9 @@ class NaturalSpeech2Model(nn.Module):
         # 5. Diffusion sampling — pending diffusion model implementation.
         # Planned call signature:
         #   generated_latents = self.diffusion_model.sample(
-        #       condition=condition,                    # [B, F', H]
+        #       condition=condition,                    # [B, F', D]
         #       condition_mask=frame_mask,              # [B, F', 1]
-        #       prompt=prompt_encodings,                # [B, Fp, H]
+        #       prompt=prompt_encodings,                # [B, Fp, D]
         #       prompt_mask=prompt_encodings_mask,      # [B, Fp, 1]
         #       num_steps=num_diffusion_steps,
         #       cfg_scale=cfg_scale,
