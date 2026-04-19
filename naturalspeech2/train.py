@@ -255,6 +255,22 @@ def train(cfg: DictConfig):
         'pitch_predictor_conv_dropout': cfg.model.pitch_predictor.conv_dropout,
         'pitch_predictor_attn_weights_dropout': cfg.model.pitch_predictor.attn_weights_dropout,
         'pitch_predictor_attn_out_dropout': cfg.model.pitch_predictor.attn_out_dropout,
+
+        'diffusion_model_wavenet_layers': cfg.model.diffusion_model.wavenet_layers,
+        'diffusion_model_wavenet_kernel_size': cfg.model.diffusion_model.wavenet_kernel_size,
+        'diffusion_model_wavenet_dilation': cfg.model.diffusion_model.wavenet_dilation,
+        'diffusion_model_wavenet_filter_size': cfg.model.diffusion_model.wavenet_filter_size,
+        'diffusion_model_attention_heads': cfg.model.diffusion_model.attention_heads,
+        'diffusion_model_query_tokens': cfg.model.diffusion_model.query_tokens,
+        'diffusion_model_attn_weights_dropout': cfg.model.diffusion_model.attn_weights_dropout,
+        'diffusion_model_attn_out_dropout': cfg.model.diffusion_model.attn_out_dropout,
+        'diffusion_model_wavenet_attn_weights_dropout': cfg.model.diffusion_model.wavenet_attn_weights_dropout,
+        'diffusion_model_wavenet_attn_out_dropout': cfg.model.diffusion_model.wavenet_attn_out_dropout,
+        'diffusion_model_wavenet_gate_dropout': cfg.model.diffusion_model.wavenet_gate_dropout,
+        'diffusion_model_beta_min': cfg.model.diffusion_model.beta_min,
+        'diffusion_model_beta_max': cfg.model.diffusion_model.beta_max,
+        'diffusion_model_sampling_steps': cfg.model.diffusion_model.sampling_steps,
+        'diffusion_model_sampling_temperature': cfg.model.diffusion_model.sampling_temperature,
     }
 
     # State initialization variables

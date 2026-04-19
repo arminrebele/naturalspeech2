@@ -12,6 +12,7 @@ from naturalspeech2.modules.aligner import Aligner, ForwardSumLoss, BinLoss
 from naturalspeech2.modules.speech_prompt_encoder import SpeechPromptEncoder
 from naturalspeech2.modules.duration_predictor import DurationPredictor
 from naturalspeech2.modules.pitch_predictor import PitchPredictor
+from naturalspeech2.modules.diffusion_model import DiffusionModel
 from naturalspeech2.modules.layers import Conv1D
 from naturalspeech2.utils.utils import create_mask_from_lengths
 
@@ -75,6 +76,23 @@ class NaturalSpeech2Model(nn.Module):
                  pitch_predictor_conv_dropout: float = 0.5,
                  pitch_predictor_attn_weights_dropout: float = 0.5,
                  pitch_predictor_attn_out_dropout: float = 0.5,
+
+                 # Diffusion Model parameters
+                 diffusion_model_wavenet_layers: int = 40,
+                 diffusion_model_wavenet_kernel_size: int = 3,
+                 diffusion_model_wavenet_dilation: int = 2,
+                 diffusion_model_wavenet_filter_size: int = 1024,
+                 diffusion_model_attention_heads: int = 8,
+                 diffusion_model_query_tokens: int = 32,
+                 diffusion_model_attn_weights_dropout: float = 0.2,
+                 diffusion_model_attn_out_dropout: float = 0.2,
+                 diffusion_model_wavenet_attn_weights_dropout: float = 0.2,
+                 diffusion_model_wavenet_attn_out_dropout: float = 0.2,
+                 diffusion_model_wavenet_gate_dropout: float = 0.2,
+                 diffusion_model_beta_min: float = 0.05,
+                 diffusion_model_beta_max: float = 20.0,
+                 diffusion_model_sampling_steps: int = 150,
+                 diffusion_model_sampling_temperature: float = 1.44,
     ):
         super().__init__()
         self.min_prompt_pct = min_prompt_pct
@@ -154,6 +172,26 @@ class NaturalSpeech2Model(nn.Module):
         # Projects per-frame pitch (1 channel) up to hidden_dim so it can be
         # added to expanded_phoneme_encodings to form the diffusion condition c.
         self.pitch_projection = Conv1D(1, hidden_dim, 1)
+
+        self.diffusion_model = DiffusionModel(
+            latent_dim=latent_dim,
+            hidden_dim=hidden_dim,
+            wavenet_layers=diffusion_model_wavenet_layers,
+            wavenet_kernel_size=diffusion_model_wavenet_kernel_size,
+            wavenet_dilation=diffusion_model_wavenet_dilation,
+            wavenet_filter_size=diffusion_model_wavenet_filter_size,
+            attention_heads=diffusion_model_attention_heads,
+            query_tokens=diffusion_model_query_tokens,
+            attn_weights_dropout=diffusion_model_attn_weights_dropout,
+            attn_out_dropout=diffusion_model_attn_out_dropout,
+            wavenet_attn_weights_dropout=diffusion_model_wavenet_attn_weights_dropout,
+            wavenet_attn_out_dropout=diffusion_model_wavenet_attn_out_dropout,
+            wavenet_gate_dropout=diffusion_model_wavenet_gate_dropout,
+            beta_min=diffusion_model_beta_min,
+            beta_max=diffusion_model_beta_max,
+            sampling_steps=diffusion_model_sampling_steps,
+            sampling_temperature=diffusion_model_sampling_temperature,
+        )
 
     @staticmethod
     def _expand_phoneme_encodings(
@@ -392,8 +430,16 @@ class NaturalSpeech2Model(nn.Module):
         )  # [B, F]
         pitch_predictor_loss = (pitch_loss_per_frame * pitch_loss_mask).sum() / pitch_loss_mask.sum().clamp(min=1.0)
 
+        diffusion_loss = self.diffusion_model(
+            target_latents,           # [B, Ft, latent_dim]
+            condition_target,         # [B, Ft, D]
+            prompt_encodings,         # [B, Fp, D]
+            target_latents_mask,      # [B, Ft, 1]
+            prompt_encodings_mask,    # [B, Fp, 1]
+        )
+
         return {
-            "diffusion_loss": None,                 # placeholder for future diffusion loss
+            "diffusion_loss": diffusion_loss,
             "duration_predictor_loss": duration_predictor_loss,
             "pitch_predictor_loss": pitch_predictor_loss,
             "aligner_loss":{
