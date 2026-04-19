@@ -237,7 +237,7 @@ class MultiHeadCrossAttention(nn.Module):
             self,
             x_q,        # [B, T, D]
             x_kv,       # [B, T, D]
-            kv_mask,    # [B, T, 1]
+            kv_mask,    # [B, T, 1] or None
     ):
         q = self.to_q(x_q)
         kv = self.to_kv(x_kv)
@@ -247,8 +247,11 @@ class MultiHeadCrossAttention(nn.Module):
         k = rearrange(k, 'b t (h d) -> b h t d', h=self.num_heads)
         v = rearrange(v, 'b t (h d) -> b h t d', h=self.num_heads)
 
-        attn_mask = rearrange(kv_mask, 'b t 1 -> b 1 1 t')
-        attn_mask = torch.where(attn_mask, 0.0, float('-inf'))
+        if kv_mask is None:
+            attn_mask = None
+        else:
+            attn_mask = rearrange(kv_mask, 'b t 1 -> b 1 1 t')
+            attn_mask = torch.where(attn_mask, 0.0, float('-inf'))
         
         out = F.scaled_dot_product_attention(
             q, k, v,
@@ -270,10 +273,17 @@ class Conv1D(nn.Module):
             hidden_dim: int,
             filter_size: int,
             kernel_size: int,
+            dilation: int = 1,
     ):
         super().__init__()
-        padding = (kernel_size - 1) // 2
-        self.conv1d = nn.Conv1d(hidden_dim, filter_size, kernel_size, padding=padding)
+        padding = ((kernel_size - 1) * dilation) // 2
+        self.conv1d = nn.Conv1d(
+            hidden_dim,
+            filter_size,
+            kernel_size,
+            padding=padding,
+            dilation=dilation,
+        )
 
     def forward(
             self,
@@ -285,4 +295,3 @@ class Conv1D(nn.Module):
         x = x.masked_fill(~mask_bct, 0.0)
         x = self.conv1d(x)
         return rearrange(x, 'b d t -> b t d')
-
