@@ -12,11 +12,24 @@ Below is the complete forward pass through the NaturalSpeech 2 architecture duri
 *Color Coding:* The sub-modules with individual loss terms are colored the same as their respective terms at the top of the picture. Additionally, all yellow sub-modules represent pre-trained models that aren't trained together with the diffusion model.
 
 **Modifications from the original paper:**
-The original NaturalSpeech 2 [1] architecture utilized SoundStream, a proprietary phonemizer, and a proprietary aligner. To make this implementation fully open-source, we swapped SoundStream with Encodec [2], replaced the proprietary phonemizer with Espeak-ng, and used the TTS-Aligner [3] for the alignment mechanism.
 
-At the core of the latent generation process lies the Diffusion Model, utilizing a dilated convolution and Q-K-V attention architecture:
+*Open-source substitutions* — the paper relies on proprietary components that we replaced with public equivalents:
+- **Audio codec:** Encodec [2] (`facebook/encodec_24khz`, frozen) in place of SoundStream.
+- **Phonemizer:** espeak-ng (via the `phonemizer` library) in place of the proprietary Microsoft phonemizer.
+- **Aligner:** beta-binomial prior + CTC forward-sum with Viterbi decoding ("One TTS Alignment to Rule Them All" [3]) in place of the external MFA forced aligner — fully end-to-end.
+- **Sample rate:** 24 kHz (hop 320, 75 Hz frame rate) instead of 16 kHz, forced by the Encodec choice.
 
-[![Diffusion Model Architecture](docs/architecture/diffusion-model.png)](docs/architecture/diffusion-model.png)
+*Modernised Transformer building blocks* — the paper inherits FastSpeech-era conventions; we use current standards:
+- **RoPE** rotary positional embeddings instead of sinusoidal absolute embeddings — better length generalisation, no learned parameters.
+- **RMSNorm** in place of LayerNorm, applied **pre-norm** (`norm → op → residual add`) instead of post-norm — materially more stable at the depth of the 30-layer predictor stacks.
+- **SiLU** activations in FFNs instead of ReLU.
+
+*Training-stability tweaks:*
+- **MSE on log-durations / log-f0** for the duration and pitch predictors, instead of L1 — numerically stabler and standard in follow-up TTS work.
+
+The core latent denoiser is a 40-block WaveNet-style stack that interleaves dilated convolutions with Q-K-V cross-attention and FiLM conditioning:
+
+[![Diffusion Model Architecture (Training)](docs/architecture/diffusion-model-training.png)](docs/architecture/diffusion-model-training.png)
 
 ---
 
