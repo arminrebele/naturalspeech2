@@ -3,13 +3,12 @@ import re
 import shutil
 import logging
 import gc
-import io
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
-import torch
 import torchaudio
+import torch
 from torch.utils.data import Dataset, Sampler
 from datasets import load_dataset, load_from_disk, Audio, Value, Dataset as HFDataset
 from typing import Any, Optional, Iterator
@@ -17,19 +16,28 @@ from typing import Any, Optional, Iterator
 from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer, build_token_vocabulary
 from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
+from naturalspeech2.data.pitch_extractor import PitchExtractor
 from naturalspeech2.utils.utils import create_mask_from_lengths, setup_file_logger
+from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 import soundfile as sf
 
 logger = logging.getLogger(__name__)
 
 # Global cache for worker processes
 _PHONEMIZER_INSTANCE = None
+_PITCH_EXTRACTOR_INSTANCE = None
 
 def get_worker_phonemizer() -> PhonemizerWrapper:
     global _PHONEMIZER_INSTANCE
     if _PHONEMIZER_INSTANCE is None:
         _PHONEMIZER_INSTANCE = PhonemizerWrapper()
     return _PHONEMIZER_INSTANCE
+
+def get_worker_pitch_extractor(sampling_rate: int) -> PitchExtractor:
+    global _PITCH_EXTRACTOR_INSTANCE
+    if _PITCH_EXTRACTOR_INSTANCE is None:
+        _PITCH_EXTRACTOR_INSTANCE = PitchExtractor(sampling_rate=sampling_rate)
+    return _PITCH_EXTRACTOR_INSTANCE
 
 
 def phonemize_batch(batch: dict[str, list[Any]]) -> dict[str, list[Any]]:
@@ -42,20 +50,22 @@ def tokenize_batch(batch: dict[str, list[Any]], phoneme_tokenizer: PhonemeTokeni
     batch["phoneme_tokens_length"] = [len(p) for p in batch["phoneme_tokens"]]
     return batch
 
-def get_audio_metadata_batched(batch: dict[str, list[Any]], target_sr: int) -> dict[str, list[int]]:
-    # This function calculates the audio length as if it were resampled.
-    # By using sf.info, we only read the file headers, avoiding full decoding.
+def extract_f0_and_metadata_batched(batch: dict[str, list[Any]], target_sr: int) -> dict[str, list[Any]]:
     lengths = []
+    f0s = []
+    pitch_extractor = get_worker_pitch_extractor(target_sr)
+    
     for audio_dict in batch["audio"]:
-        # audio_dict["bytes"] contains the raw embedded file bytes from the Parquet/Arrow file
-        info = sf.info(io.BytesIO(audio_dict["bytes"]))
-        resampled_length = int(info.frames * (target_sr / info.samplerate))
-        lengths.append(resampled_length)
+        # HF has automatically decoded and resampled this to target_sr
+        audio_array = audio_dict["array"]
+        lengths.append(audio_array.shape[0])
+        f0s.append(pitch_extractor(audio_array))
         
-    return {"audio_length": lengths}
+    return {"audio_length": lengths, "f0": f0s}
 
 
 def resample_and_save_audio(sample: dict[str, Any], target_sr: int, resampled_dir: Path) -> dict[str, Any]:
+    pitch_extractor = get_worker_pitch_extractor(target_sr)
     # HF already resampled this to target_sr and gave us a numpy array!
     resampled_array = sample["audio"]["array"]
     
@@ -66,10 +76,13 @@ def resample_and_save_audio(sample: dict[str, Any], target_sr: int, resampled_di
     # Save to disk. soundfile expects [frames, channels], which matches HF's 1D output for mono
     sf.write(new_path, resampled_array, target_sr)
     
+    f0 = pitch_extractor(resampled_array)
+    
     # Avoid type conflicts (dict vs string) during processing.
     return {
         "audio_path": str(new_path),
-        "audio_length": resampled_array.shape[0]
+        "audio_length": resampled_array.shape[0],
+        "f0": f0
     }
 
 class DatasetWrapper(Dataset):
@@ -146,22 +159,22 @@ class DatasetWrapper(Dataset):
             if self.audio_column != "audio":
                 dataset = dataset.rename_column(self.audio_column, "audio")
 
+            # Globally cast the audio column. This commands HF to decode/resample automatically
+            # whenever the column is accessed (in map or dataloader), using safe backends.
+            dataset = dataset.cast_column("audio", Audio(sampling_rate=self.sampling_rate))
+
             if self.resample_on_the_fly:
-                logger.info("`resample_on_the_fly` is True. Calculating resampled audio lengths without saving.")
-                # Tell HF not to decode the array, but keep the raw bytes available
-                dataset = dataset.cast_column("audio", Audio(decode=False))
+                logger.info("`resample_on_the_fly` is True. Extracting F0 and lengths, leaving original bytes intact.")
                 dataset = dataset.map(
-                    get_audio_metadata_batched,
+                    extract_f0_and_metadata_batched,
                     batched=True,
                     fn_kwargs={"target_sr": self.sampling_rate},
-                    num_proc=self.num_proc_tokenize,
-                    desc="Calculating audio lengths",
+                    num_proc=self.num_proc_phonemize,
+                    desc="Extracting F0 and audio lengths",
                 )
                 dataset.cleanup_cache_files()
             else:
                 logger.info("`resample_on_the_fly` is False. Pre-resampling and saving audio files.")
-                # 1. Cast to Audio to leverage HF's on-the-fly resampling during the map operation.
-                dataset = dataset.cast_column("audio", Audio(sampling_rate=self.sampling_rate))
                 
                 # Create the directory for resampled audio
                 self.resampled_dir.mkdir(parents=True, exist_ok=True)
@@ -209,7 +222,7 @@ class DatasetWrapper(Dataset):
             dataset.cleanup_cache_files()
 
             # Keep only the columns needed for training to save space
-            dataset = dataset.select_columns(["audio", "audio_length", "phoneme_tokens", "phoneme_tokens_length", "original_index"])
+            dataset = dataset.select_columns(["audio", "audio_length", "f0", "phoneme_tokens", "phoneme_tokens_length", "original_index"])
             dataset.cleanup_cache_files()
 
             self.processed_dir.mkdir(parents=True, exist_ok=True)
@@ -230,12 +243,9 @@ class DatasetWrapper(Dataset):
         return len(self.dataset)
 
     def _get_audio_on_the_fly(self, audio_dict: dict[str, Any]) -> torch.Tensor:
-        # Decode the embedded bytes on the fly
-        audio, original_sr = torchaudio.load(io.BytesIO(audio_dict["bytes"]))
-        if original_sr != self.sampling_rate:
-            # Use torchaudio's functional resample for on-the-fly processing
-            audio = torchaudio.functional.resample(audio, orig_freq=original_sr, new_freq=self.sampling_rate)
-        return audio[0]
+        # Because we globally cast the column, HF provides the decoded/resampled array seamlessly
+        audio_array = audio_dict["array"]
+        return torch.tensor(audio_array, dtype=torch.float32)
 
     def _get_audio_pre_resampled(self, audio_path: str) -> torch.Tensor:
         audio, _ = torchaudio.load(audio_path)
@@ -248,6 +258,7 @@ class DatasetWrapper(Dataset):
 
         return {
             "audio": audio, # [T] 
+            "pitch": torch.tensor(item["f0"], dtype=torch.float32), # [F]
             "phoneme_tokens": item["phoneme_tokens"],
             "phoneme_tokens_length": item["phoneme_tokens_length"],
             "original_index": item["original_index"],
@@ -369,6 +380,8 @@ class BucketedCollateFn:
         audio_tensors = [item["audio"] for item in batch]
         audio_lengths = torch.tensor([item["audio_length"] for item in batch])
         
+        pitch_tensors = [item["pitch"] for item in batch]
+        
         phoneme_tokens_tensors = [torch.tensor(item["phoneme_tokens"]) for item in batch]
         phoneme_tokens_lengths = torch.tensor([item["phoneme_tokens_length"] for item in batch])
 
@@ -397,12 +410,17 @@ class BucketedCollateFn:
             )
 
         B = len(batch)
+        target_pitch_len = (target_audio_len + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
 
         audio_padded = torch.zeros((B, target_audio_len), dtype=audio_tensors[0].dtype)
         for i, t in enumerate(audio_tensors):
             audio_padded[i, :t.shape[0]] = t
 
         audio_mask = create_mask_from_lengths(audio_lengths, target_audio_len) # [B, T, 1]
+        
+        pitch_padded = torch.zeros((B, target_pitch_len), dtype=pitch_tensors[0].dtype)
+        for i, t in enumerate(pitch_tensors):
+            pitch_padded[i, :t.shape[0]] = t
 
         phoneme_padded = torch.full((B, target_phoneme_len), self.pad_token_id, dtype=phoneme_tokens_tensors[0].dtype)
         for i, t in enumerate(phoneme_tokens_tensors):
@@ -414,6 +432,8 @@ class BucketedCollateFn:
             "audio": audio_padded,                      # [B, static_T]
             "audio_mask": audio_mask,                   # [B, static_T, 1]  
             "audio_lengths": audio_lengths,             # [B]  
+            
+            "pitch": pitch_padded,                      # [B, static_F]
             
             "phoneme_tokens": phoneme_padded,           # [B, static_P]
             "phoneme_tokens_mask": phoneme_tokens_mask, # [B, static_P, 1]
@@ -495,6 +515,7 @@ if __name__ == "__main__":
             logger.info(f"Batch keys: {list(batch.keys())}")
             logger.info(f"Batched audio shape: {batch['audio'].shape}")
             logger.info(f"Batched audio_mask shape: {batch['audio_mask'].shape}")
+            logger.info(f"Batched pitch shape: {batch['pitch'].shape}")
             logger.info(f"Batched phoneme_tokens shape: {batch['phoneme_tokens'].shape}")
             logger.info(f"Batched phoneme_tokens_mask shape: {batch['phoneme_tokens_mask'].shape}")
             break

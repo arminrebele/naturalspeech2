@@ -14,6 +14,7 @@ import wandb
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from safetensors.torch import save_model
+from einops import rearrange
 
 from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, DynamicBucketedBatchSampler
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper, GradientAnalyzer
@@ -186,17 +187,12 @@ def train(cfg: DictConfig):
          "voices are becoming indistinguishable. This marks a paradigm shift "
          "in how we interact with technology on a daily basis.") # Very long (~30s)
     ]
-    max_bucket_phonemes = cfg.dataloader.bucket_mapping[-1].phoneme_length
+    
     custom_prompt_tokens = []
     for prompt in custom_prompts:
         phonemes = phonemizer(prompt)
         tokens = tokenizer(phonemes)
-        if len(tokens) > max_bucket_phonemes:
-            logger.warning(f"Truncating generation prompt from {len(tokens)} to max bucket length {max_bucket_phonemes}")
-            tokens = tokens[:max_bucket_phonemes]
         custom_prompt_tokens.append(tokens)
-        
-    test_collate_fn = BucketedCollateFn(bucket_mapping=OmegaConf.to_container(cfg.dataloader.bucket_mapping, resolve=True))
 
     # Build Model Args Dict
     model_args = {
@@ -379,41 +375,40 @@ def train(cfg: DictConfig):
                     eval_payload[f"eval/val/losses/{k}"] = v
 
                 # --- Generation Testing ---
-                # Dynamically construct test batch from random validation samples
-                target_bucket = cfg.dataloader.bucket_mapping[-1]
-                target_bs = target_bucket.batch_size
-                max_bucket_audio = target_bucket.audio_length
-                
-                test_indices = random.sample(range(len(val_dataset)), target_bs)
-                test_samples = [val_dataset[i] for i in test_indices]
-                
-                for i in range(len(test_samples)):
-                    # Truncate audio if it exceeds max bucket to avoid collate_fn crash
-                    if test_samples[i]["audio_length"] > max_bucket_audio:
-                        test_samples[i]["audio"] = test_samples[i]["audio"][:max_bucket_audio]
-                        test_samples[i]["audio_length"] = max_bucket_audio
-                        
-                    test_samples[i]["phoneme_tokens"] = custom_prompt_tokens[i % len(custom_prompt_tokens)]
-                    test_samples[i]["phoneme_tokens_length"] = len(test_samples[i]["phoneme_tokens"])
-                
-                # Force the collate_fn to pad everything to the exact largest bucket dimensions
-                test_samples[0]["audio_length"] = max_bucket_audio
-                test_samples[0]["phoneme_tokens_length"] = max_bucket_phonemes
-                
-                test_batch = test_collate_fn(test_samples)
-                test_batch = {k_b: v.to(device) for k_b, v in test_batch.items()}
-
                 logger.info("Generating audio samples for evaluation...")
-                generated_audios = unoptimized_model.generate(**test_batch)
                 
                 wandb_audios = []
-                # Log up to 4 generation examples to prevent excessive network payload
-                for i in range(min(4, generated_audios.shape[0])):
-                    # Move to CPU, cast to float32 (required for torchaudio/wandb), and numpy
-                    audio_np = generated_audios[i].cpu().to(torch.float32).numpy()
+                num_gen_samples = min(4, len(val_dataset))
+                test_indices = random.sample(range(len(val_dataset)), num_gen_samples)
+                
+                for i, idx in enumerate(test_indices):
+                    sample = val_dataset[idx]
+                    tokens = custom_prompt_tokens[i % len(custom_prompt_tokens)]
+                    
+                    # Add batch dimension
+                    ref_audio = rearrange(sample["audio"], 't -> 1 t').to(device)
+                    ref_audio_len = torch.tensor([sample["audio_length"]]).to(device)
+                    
+                    ph_tokens = rearrange(torch.tensor(tokens), 'p -> 1 p').to(device)
+                    ph_tokens_len = torch.tensor([len(tokens)]).to(device)
+                    ph_tokens_mask = torch.ones((1, len(tokens), 1), dtype=torch.bool, device=device)
+                    
+                    gen_kwargs = {
+                        "reference_audio": ref_audio,
+                        "reference_audio_lengths": ref_audio_len,
+                        "phoneme_tokens": ph_tokens,
+                        "phoneme_tokens_mask": ph_tokens_mask,
+                        "phoneme_tokens_lengths": ph_tokens_len
+                    }
+                    
+                    # Unbatched generation (Batch size 1)
+                    generated_audio = unoptimized_model.generate(**gen_kwargs)
+                    
+                    audio_np = generated_audio[0].cpu().to(torch.float32).numpy()
                     wandb_audios.append(
                         wandb.Audio(audio_np, sample_rate=cfg.dataloader.sampling_rate, caption=f"Gen Sample {i}")
                     )
+                    
                 eval_payload["eval/generated_samples"] = wandb_audios
                 
                 wandb.log(eval_payload)
