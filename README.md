@@ -16,7 +16,7 @@ Below is the complete forward pass through the NaturalSpeech 2 architecture duri
 *Open-source substitutions* — the paper relies on proprietary components that we replaced with public equivalents:
 - **Audio codec:** Encodec [2] (`facebook/encodec_24khz`, frozen) in place of SoundStream.
 - **Phonemizer:** espeak-ng (via the `phonemizer` library) in place of the proprietary Microsoft phonemizer.
-- **Aligner:** beta-binomial prior + CTC forward-sum with Viterbi decoding ("One TTS Alignment to Rule Them All" [3]) in place of the external MFA forced aligner — fully end-to-end.
+- **Aligner:** beta-binomial prior + CTC forward-sum with Viterbi decoding ("One TTS Alignment to Rule Them All" [3]) in place of the proprietary internal Microsoft alignment tool — fully end-to-end.
 - **Sample rate:** 24 kHz (hop 320, 75 Hz frame rate) instead of 16 kHz, forced by the Encodec choice.
 
 *Modernised Transformer building blocks* — the paper inherits FastSpeech-era conventions; we use current standards:
