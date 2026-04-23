@@ -59,19 +59,21 @@ class RMSNorm(nn.Module):
     """
     def __init__(
             self,
-            hidden_dim: int, 
+            hidden_dim: int,
             eps: float = 1e-8
     ):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(hidden_dim)) # gamma
-    
+
     def forward(
-            self, 
+            self,
             x       # [B, T, D]
     ):
-        rms = torch.sqrt(torch.mean(x ** 2, dim=-1, keepdim=True) + self.eps)
-        return (x / rms) * self.weight
+        dtype = x.dtype
+        x_f = x.float() # upcast to float32 for stable mean(x^2) calculation
+        rms_recip = torch.rsqrt(x_f.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+        return (x_f * rms_recip).to(dtype) * self.weight
 
 
 """
@@ -290,8 +292,7 @@ class Conv1D(nn.Module):
             x,    # [B, T, D]
             mask  # [B, T, 1] bool
     ):
+        x = x * mask.to(x.dtype)
         x = rearrange(x, 'b t d -> b d t')
-        mask_bct = rearrange(mask.bool(), 'b t 1 -> b 1 t')
-        x = x.masked_fill(~mask_bct, 0.0)
         x = self.conv1d(x)
         return rearrange(x, 'b d t -> b t d')
