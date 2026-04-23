@@ -16,3 +16,6 @@ docker-compose.mergerfs.yml
 *.log
 outputs/
 multirun/
+
+docs/notes/
+docs/paper/OneTTSAlignmentToRuleThemAll/
