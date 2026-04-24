@@ -12,7 +12,7 @@ ENCODER_HOP_LENGTH = 320
 class EncodecWrapper(nn.Module):
     def __init__(self, bandwidth=24, auto_load=True):
         super().__init__()
-        self.bandwidth = bandwidth
+        self.bandwidth = bandwidth          # 24.0 kbps -> 32 codebooks
         self.sampling_rate = 24000
         self.model_dir = ENCODEC_24KHZ_DIR
         self.model = None
@@ -27,17 +27,15 @@ class EncodecWrapper(nn.Module):
             "facebook/encodec_24khz",
             cache_dir=cache_dir
         )
-        
-        # Freeze the pre-trained model parameters
+
         self.model.eval()
-        for param in self.model.parameters():
-            param.requires_grad = False
 
     @torch.no_grad()
-    def encode(self, audio):
-        # audio is perfectly padded [B, T] from dataloader buckets.
-        # Encodec expects [Batch, Channels, Time] -> add the Mono channel.
-        input_values = rearrange(audio, 'b t -> b 1 t')
+    def encode(
+        self,
+        audio   # [B, T]
+    ):
+        input_values = rearrange(audio, 'b t -> b 1 t')     # [B, C=1, T]   C=1 for mono audio
 
         output = self.model.encode(
             input_values,
@@ -45,8 +43,10 @@ class EncodecWrapper(nn.Module):
             bandwidth=self.bandwidth,
         )
 
-        return output.audio_codes, output.audio_scales     # output.audio_codes: (C=1, B, Q, F)
-         # output.audio_codes => discrete codebook indices (0-1023), Shape: (Channel(Mono), Batch, Quantizer/Codebook, Frames/Time)
+        # output.audio_codes: [C=1, B, Q=32, F]      e.g. 1 second => F=75 frames
+        # Q = Quantizer/Codebook
+        # each codebook [codebook_index=0-1023, latent_dim=128]
+        return output.audio_codes, output.audio_scales
 
     @torch.no_grad()
     def get_latents(
@@ -54,20 +54,17 @@ class EncodecWrapper(nn.Module):
         audio,          # [B, T]
         audio_lengths   # [B]
     ):
-        audio_codes, _ = self.encode(audio) # [C=1, B, Q, F]
-
-        # The quantizer's decode method expects the codebooks (quantizers) as the first dimension.
+        audio_codes, _ = self.encode(audio) # [C=1, B, Q=32, F]
         audio_codes = rearrange(audio_codes, '1 b q f -> q b f').contiguous() # [Q, B, F]
 
-        # De-quantize: Use codebook indices to look up the continuous latent vectors.
-        latents = self.model.quantizer.decode(audio_codes)          # [B, D=128, F]
-        latents = rearrange(latents, "b d f -> b f d").contiguous() # [B, F, D]
+        audio_latents = self.model.quantizer.decode(audio_codes)          # [B, D=128, F] | sum of the 32 codebook vectors per frame
+        audio_latents = rearrange(audio_latents, "b d f -> b f d").contiguous() # [B, F, D]
 
-        F = latents.shape[1]
-        latents_lengths = (audio_lengths + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
-        latents_lengths = latents_lengths.clamp(min=1, max=F)
+        F = audio_latents.shape[1]
+        audio_latents_lengths = (audio_lengths + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
+        audio_latents_lengths = audio_latents_lengths.clamp(min=1, max=F)
 
-        return latents, latents_lengths
+        return audio_latents, audio_latents_lengths
 
     def decode_from_codes(self, audio_codes, audio_scales):
         return self.model.decode(audio_codes, audio_scales)
