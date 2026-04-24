@@ -30,6 +30,12 @@ class EncodecWrapper(nn.Module):
 
         self.model.eval()
 
+        codebook_embeddings = torch.stack(
+            [layer.codebook.embed for layer in self.model.quantizer.layers],
+            dim=0,
+        )  # [Q, K=1024, D=128] float32
+        self.register_buffer('codebook_embeddings', codebook_embeddings, persistent=False)
+
     @torch.no_grad()
     def encode(
         self,
@@ -64,7 +70,9 @@ class EncodecWrapper(nn.Module):
         audio_latents_lengths = (audio_lengths + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
         audio_latents_lengths = audio_latents_lengths.clamp(min=1, max=F)
 
-        return audio_latents, audio_latents_lengths
+        codes = rearrange(audio_codes, 'q b f -> b q f').contiguous()  # [B, Q, F] long
+
+        return audio_latents, audio_latents_lengths, codes
 
     def decode_from_codes(self, audio_codes, audio_scales):
         return self.model.decode(audio_codes, audio_scales)
