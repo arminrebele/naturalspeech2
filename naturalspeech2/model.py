@@ -89,10 +89,13 @@ class NaturalSpeech2Model(nn.Module):
                  diffusion_model_wavenet_attn_weights_dropout: float = 0.2,
                  diffusion_model_wavenet_attn_out_dropout: float = 0.2,
                  diffusion_model_wavenet_gate_dropout: float = 0.2,
+                 diffusion_model_time_dim: int = 128,
                  diffusion_model_beta_min: float = 0.05,
                  diffusion_model_beta_max: float = 20.0,
                  diffusion_model_sampling_steps: int = 150,
                  diffusion_model_sampling_temperature: float = 1.44,
+                 diffusion_model_score_eps: float = 0.05,
+                 diffusion_model_timestep_eps: float = 1e-3,
     ):
         super().__init__()
         self.min_prompt_pct = min_prompt_pct
@@ -176,6 +179,7 @@ class NaturalSpeech2Model(nn.Module):
         self.diffusion_model = DiffusionModel(
             latent_dim=latent_dim,
             hidden_dim=hidden_dim,
+            time_dim=diffusion_model_time_dim,
             wavenet_layers=diffusion_model_wavenet_layers,
             wavenet_kernel_size=diffusion_model_wavenet_kernel_size,
             wavenet_dilation=diffusion_model_wavenet_dilation,
@@ -191,6 +195,8 @@ class NaturalSpeech2Model(nn.Module):
             beta_max=diffusion_model_beta_max,
             sampling_steps=diffusion_model_sampling_steps,
             sampling_temperature=diffusion_model_sampling_temperature,
+            score_eps=diffusion_model_score_eps,
+            timestep_eps=diffusion_model_timestep_eps,
         )
 
     @staticmethod

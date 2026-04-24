@@ -73,10 +73,14 @@ diffusion_model:
   wavenet_attn_weights_dropout: 0.2
   wavenet_attn_out_dropout: 0.2
   wavenet_gate_dropout: 0.2
+  time_dim: 128
   beta_min: 0.05
   beta_max: 20.0
   sampling_steps: 150
   sampling_temperature: 1.44     # τ = 1.2² — initial noise ~ N(0, τ⁻¹·I)
+  score_loss_weight: 0.1
+  score_eps: 0.05
+  timestep_eps: 0.001
 
 # Loss Balancing Weights
 loss_weights:
@@ -92,3 +96,5 @@ loss_warmup_steps:
   duration_predictor_loss: 1000
   pitch_predictor_loss: 1000
   aligner_loss: 0
+  forward_sum_loss: 0
+  bin_loss: 0

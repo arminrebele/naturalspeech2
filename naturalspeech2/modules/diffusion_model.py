@@ -119,6 +119,7 @@ class DiffusionModel(nn.Module):
             self,
             latent_dim: int = 128,
             hidden_dim: int = 512,
+            time_dim: int = 128,
             wavenet_layers: int = 40,
             wavenet_kernel_size: int = 3,
             wavenet_dilation: int = 2,
@@ -134,6 +135,9 @@ class DiffusionModel(nn.Module):
             beta_max: float = 20.0,
             sampling_steps: int = 150,
             sampling_temperature: float = 1.44,
+            score_loss_weight: float = 0.1,
+            score_eps: float = 0.05,            # per-sample timestep gate -> any sample with t < score_eps is excluded from the score loss to prevent instability from large reweighting factors at low t
+            timestep_eps: float = 1e-3,
     ):
         super().__init__()
         self.latent_dim = latent_dim
@@ -142,14 +146,16 @@ class DiffusionModel(nn.Module):
         self.beta_max = beta_max
         self.sampling_steps = sampling_steps
         self.sampling_temperature = sampling_temperature
-        self.timestep_eps = 1e-3
+        self.timestep_eps = timestep_eps
+        self.score_loss_weight = score_loss_weight
+        self.score_eps = score_eps
 
         self.input_projection = nn.Linear(latent_dim, hidden_dim)
-        self.timestep_embedding = TimestepEmbedding(hidden_dim=hidden_dim)
+        self.timestep_embedding = TimestepEmbedding(hidden_dim=hidden_dim, time_dim=time_dim)
 
         self.query_tokens = nn.Parameter(torch.randn(1, query_tokens, hidden_dim) * 0.02)
         self.prompt_encodings_norm = RMSNorm(hidden_dim)
-        self.attn = MultiHeadCrossAttention(
+        self.cross_attention = MultiHeadCrossAttention(
             hidden_dim,
             attention_heads,
             attn_weights_dropout=attn_weights_dropout,
@@ -176,10 +182,10 @@ class DiffusionModel(nn.Module):
     def forward(
             self,
             target_latents,                 # [B, Ft, latent_dim]
-            c,                              # [B, Ft, D]
-            prompt_encodings,               # [B, Fp, D]
             target_latents_mask,            # [B, Ft, 1] bool
+            prompt_encodings,               # [B, Fp, D]
             prompt_encodings_mask,          # [B, Fp, 1] bool
+            c,                              # [B, Ft, D]
     ):
         batch_size = target_latents.shape[0]
         t = (         #  t ∈ [ε, 1−ε], time_step_eps = 0.01 prevents exact 0 or 1 which can cause issues in the noise schedule math
@@ -188,35 +194,63 @@ class DiffusionModel(nn.Module):
             + self.timestep_eps
         )
 
-        z_t, _ = self._forward_diffusion(target_latents, t)
+        z_t, epsilon = self._forward_diffusion(target_latents, t)       # [B, Ft, latent_dim]       noisy latents
         prompt_summary_tokens = self._compute_prompt_summary_tokens(
             prompt_encodings,
             prompt_encodings_mask,
         )
         z0_hat = self._predict_z0(
             z_t,
+            target_latents_mask,
             t,
             c,
             prompt_summary_tokens,
-            target_latents_mask,
         )
 
+        # Data loss:     L_data = ‖ẑ₀ − z₀‖²,    masked mean over valid scalars.
         diff_sq = (z0_hat.float() - target_latents.float()) ** 2
         loss_mask = target_latents_mask.to(diff_sq.dtype)
         valid_scalars = loss_mask.sum().clamp(min=1.0) * self.latent_dim
-        return (diff_sq * loss_mask).sum() / valid_scalars
+        data_loss = (diff_sq * loss_mask).sum() / valid_scalars
+
+        # Score loss:
+        #   ŝ(z_t, t)          = (√α̅(t) · ẑ₀ − z_t) / (1 − α̅(t))        (predicted score, derived from ẑ₀)
+        #   ∇ log p_t(z_t|z₀)  = −ε / √(1 − α̅(t))                        (true conditional score)
+        #   L_score            = ‖ŝ − ∇ log p_t‖²
+        #
+        # Stabilization:
+        #   - Per-item gate t ≥ score_eps (=0.05); below that the reweighting factor
+        #     α̅ / (1−α̅)² blows up (~1.3k at t=0.05, ~2.8e8 at t=1e-3).
+        #   - Clamp (1 − α̅) at 1e-5 as NaN-guard; should never trigger given the gate.
+        alpha_bar = rearrange(self._alpha_bar(t), 'b -> b 1 1')
+        sigma = (1.0 - alpha_bar).clamp(min=1e-5)
+        score_hat = (alpha_bar.sqrt() * z0_hat.float() - z_t) / sigma
+        score_target = -epsilon / sigma.sqrt()
+
+        score_diff_sq = (score_hat - score_target) ** 2
+        score_gate = rearrange((t >= self.score_eps).to(diff_sq.dtype), 'b -> b 1 1')
+        score_mask = loss_mask * score_gate
+        score_valid_scalars = score_mask.sum().clamp(min=1.0) * self.latent_dim
+        score_loss = (score_diff_sq * score_mask).sum() / score_valid_scalars
+
+        loss = data_loss + self.score_loss_weight * score_loss
+        metrics = {
+            "data_loss": data_loss.detach(),
+            "score_loss": score_loss.detach(),
+        }
+        return loss, metrics
 
     def _compute_prompt_summary_tokens(
             self,
-            prompt_encodings,  # [B, Fp, hidden_dim]
-            prompt_encodings_mask,       # [B, Fp, 1] bool
+            prompt_encodings,           # [B, Fp, D]
+            prompt_encodings_mask,      # [B, Fp, 1] bool
     ):
         query_tokens = repeat(
             self.query_tokens,
             '1 m d -> b m d',
             b=prompt_encodings.shape[0],
         )
-        prompt_summary_tokens = self.attn(
+        prompt_summary_tokens = self.cross_attention(
             query_tokens,
             self.prompt_encodings_norm(prompt_encodings),
             prompt_encodings_mask,
@@ -226,10 +260,10 @@ class DiffusionModel(nn.Module):
     def _predict_z0(
             self,
             z_t,                    # [B, Ft, latent_dim]
+            target_latents_mask,    # [B, Ft, 1] bool
             t,                      # [B]
             c,                      # [B, Ft, D]
-            prompt_summary_tokens,  # [B, query_tokens, hidden_dim]
-            target_latents_mask,            # [B, Ft, 1] bool
+            prompt_summary_tokens,  # [B, query_tokens, D]
     ):
         h = self.input_projection(z_t)
         h = h * target_latents_mask.to(h.dtype)
@@ -255,7 +289,7 @@ class DiffusionModel(nn.Module):
 
     def _forward_diffusion(
             self,
-            z_0,  # [B, Ft, latent_dim]
+            z_0,  # [B, Ft, latent_dim]     target latents
             t,    # [B]
     ):
         # z_t = √α̅(t) · z_0 + √(1 − α̅(t)) · ε,    ε ~ N(0, I)
