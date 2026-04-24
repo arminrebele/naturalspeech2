@@ -348,7 +348,7 @@ class NaturalSpeech2Model(nn.Module):
             max_frames=audio_encodings.shape[1],
         )
         
-        audio_latents, audio_latents_lengths = self.encodec.get_latents(audio, audio_lengths) # (B, F, D=128)
+        audio_latents, audio_latents_lengths, _audio_codes = self.encodec.get_latents(audio, audio_lengths) # (B, F, D=128)
 
         (prompt_latents, prompt_latents_mask, prompt_latents_lengths,           # prompt_latents: [B, Fp, D]   prompt_latents_mask: [B, Fp, 1]   prompt_latents_lengths: [B]
          target_latents, target_latents_mask, target_latents_lengths,           # target_latents: [B, Ft, D]   target_latents_mask: [B, Ft, 1]   target_latents_lengths: [B]
@@ -436,12 +436,12 @@ class NaturalSpeech2Model(nn.Module):
         )  # [B, F]
         pitch_predictor_loss = (pitch_loss_per_frame * pitch_loss_mask).sum() / pitch_loss_mask.sum().clamp(min=1.0)
 
-        diffusion_loss = self.diffusion_model(
+        diffusion_loss, _diffusion_metrics = self.diffusion_model(
             target_latents,           # [B, Ft, latent_dim]
-            condition_target,         # [B, Ft, D]
-            prompt_encodings,         # [B, Fp, D]
             target_latents_mask,      # [B, Ft, 1]
+            prompt_encodings,         # [B, Fp, D]
             prompt_encodings_mask,    # [B, Fp, 1]
+            condition_target,         # [B, Ft, D]
         )
 
         return {
@@ -468,7 +468,7 @@ class NaturalSpeech2Model(nn.Module):
         cfg_scale: float = 1.0,
     ):
         # 1. Build speech prompt from reference audio.
-        reference_latents, reference_latents_lengths = self.encodec.get_latents(  # [B, Fp, D], [B]
+        reference_latents, reference_latents_lengths, _ = self.encodec.get_latents(  # [B, Fp, D], [B]
             reference_audio,
             reference_audio_lengths,
         )
