@@ -359,10 +359,10 @@ class DiffusionModel(nn.Module):
             t,  # [] or [B]
     ):
         # ∫₀ᵗ β(s) ds = t · β_min + ½ t² (β_max − β_min)
-        # α̅(t)       = exp(−∫₀ᵗ β(s) ds)
+        # α̅(t)       = exp(−½ ∫₀ᵗ β(s) ds)   — paper Eq. (3)
         t = t.float()
         integral_beta = t * self.beta_min + 0.5 * t.square() * (self.beta_max - self.beta_min)
-        return torch.exp(-integral_beta)
+        return torch.exp(-0.5 * integral_beta)
 
     def _beta(
             self,
