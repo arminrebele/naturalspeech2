@@ -70,7 +70,7 @@ class EncodecWrapper(nn.Module):
         audio_latents_lengths = (audio_lengths + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
         audio_latents_lengths = audio_latents_lengths.clamp(min=1, max=F)
 
-        codebook_indices = rearrange(codebook_indices, 'q b f -> b q f').contiguous()      # [B, Q, F] long
+        codebook_indices = rearrange(codebook_indices, 'q b f -> b f q').contiguous()      # [B, F, Q] long
 
         return audio_latents, audio_latents_lengths, codebook_indices
 

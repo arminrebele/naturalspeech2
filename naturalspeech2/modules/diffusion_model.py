@@ -188,8 +188,8 @@ class DiffusionModel(nn.Module):
             prompt_encodings,               # [B, Fp, D]
             prompt_encodings_mask,          # [B, Fp, 1] bool
             c,                              # [B, Ft, D]
-            target_codebook_indices,                   # [B, Q, Ft] long                       | GT codebook indices per quantizer
-            codebook_embeddings,            # [Q, K=1024, latent_dim] float32   | frozen Encodec codebook vectors
+            target_codebook_indices,        # [B, Ft, Q] | GT codebook indices per quantizer
+            codebook_embeddings,            # [Q, K=1024, latent_dim=128]   | frozen Encodec codebook vectors
     ):
         batch_size = target_latents.shape[0]
         t = (         #  t ∈ [ε, 1−ε], time_step_eps = 0.01 prevents exact 0 or 1 which can cause issues in the noise schedule math
@@ -307,7 +307,7 @@ class DiffusionModel(nn.Module):
     def _ce_rvq_loss(
             self,
             z0_hat,                   # [B, Ft, latent_dim]
-            target_codebook_indices,  # [B, Q, Ft]           | GT codebook indices per quantizer
+            target_codebook_indices,  # [B, Ft, Q]           | GT codebook indices per quantizer
             codebook_embeddings,      # [Q, K, latent_dim]
             target_latents_mask,      # [B, Ft, 1] bool
     ):
@@ -318,7 +318,7 @@ class DiffusionModel(nn.Module):
         # Single Python loop over Q=32 (static), vectorized over (B, Ft, K) per step.
         # Running cumsum avoids materializing a full [Q, B, Ft, latent_dim] residual tensor.
         z0_hat = z0_hat.float()
-        Q = target_codebook_indices.shape[1]
+        Q = target_codebook_indices.shape[2]
         codebooks = codebook_embeddings[:Q].float()                         # [Q, K, latent_dim]
         codebook_sq_norms = codebooks.pow(2).sum(dim=-1)                    # [Q, K]
 
@@ -329,7 +329,7 @@ class DiffusionModel(nn.Module):
         total_ce = z0_hat.new_zeros(())
 
         for j in range(Q):
-            gt_embed_j = codebooks[j][target_codebook_indices[:, j, :]]     # [B, Ft, latent_dim]
+            gt_embed_j = codebooks[j][target_codebook_indices[:, :, j]]     # [B, Ft, latent_dim]
             residual_j = z0_hat - running_cum                               # [B, Ft, latent_dim]
             running_cum = running_cum + gt_embed_j
 
@@ -337,7 +337,7 @@ class DiffusionModel(nn.Module):
             logits = logits - codebook_sq_norms[j]
 
             logits_flat = rearrange(logits, 'b ft k -> (b ft) k')
-            targets_flat = rearrange(target_codebook_indices[:, j, :], 'b ft -> (b ft)')
+            targets_flat = rearrange(target_codebook_indices[:, :, j], 'b ft -> (b ft)')
             ce_per_scalar = F.cross_entropy(logits_flat, targets_flat, reduction='none')
             total_ce = total_ce + (ce_per_scalar * flat_mask).sum()
 
