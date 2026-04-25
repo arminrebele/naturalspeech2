@@ -94,7 +94,9 @@ class NaturalSpeech2Model(nn.Module):
                  diffusion_model_beta_max: float = 20.0,
                  diffusion_model_sampling_steps: int = 150,
                  diffusion_model_sampling_temperature: float = 1.44,
+                 diffusion_model_score_loss_weight: float = 0.1,
                  diffusion_model_score_eps: float = 0.05,
+                 diffusion_model_ce_rvq_loss_weight: float = 0.1,
                  diffusion_model_timestep_eps: float = 1e-3,
     ):
         super().__init__()
@@ -195,7 +197,9 @@ class NaturalSpeech2Model(nn.Module):
             beta_max=diffusion_model_beta_max,
             sampling_steps=diffusion_model_sampling_steps,
             sampling_temperature=diffusion_model_sampling_temperature,
+            score_loss_weight=diffusion_model_score_loss_weight,
             score_eps=diffusion_model_score_eps,
+            ce_rvq_loss_weight=diffusion_model_ce_rvq_loss_weight,
             timestep_eps=diffusion_model_timestep_eps,
         )
 
@@ -228,6 +232,7 @@ class NaturalSpeech2Model(nn.Module):
     @staticmethod
     def _generate_prompts_and_targets(
         audio_latents: torch.Tensor,            # [B, F, D]
+        codebook_indices: torch.Tensor,         # [B, Q, F]  | long codebook indices per quantizer
         audio_latents_lengths: torch.Tensor,    # [B]
         min_prompt_pct: float,
         max_prompt_pct: float,
@@ -271,16 +276,27 @@ class NaturalSpeech2Model(nn.Module):
         target_latents_mask = rearrange(j_t < rearrange(target_latents_lengths, 'b -> b 1'), 'b ft -> b ft 1')  # [B, Ft, 1]
         target_latents = target_latents * target_latents_mask.to(target_latents.dtype)
 
+        # Gather per-quantizer GT codes at the same target frames.
+        # target_idx was clamped on padded slots -> zero those with the mask; index 0 is valid but CE skips them.
+        Q = codebook_indices.shape[1]
+        target_codebook_indices = torch.gather(      # [B, Q, Ft]
+            codebook_indices,
+            2,
+            repeat(target_idx, 'b ft -> b q ft', q=Q),
+        )
+        target_codebook_indices = target_codebook_indices * rearrange(target_latents_mask, 'b ft 1 -> b 1 ft').long()
+
         return (
-            prompt_latents,          # [B, Fp, D]
-            prompt_latents_mask,     # [B, Fp, 1]
-            prompt_latents_lengths,  # [B]
-            target_latents,          # [B, Ft, D]
-            target_latents_mask,     # [B, Ft, 1]
-            target_latents_lengths,  # [B]
-            prompt_starts,           # [B]
-            prompt_ends,             # [B]
-            target_idx,              # [B, Ft]
+            prompt_latents,               # [B, Fp, D]
+            prompt_latents_mask,          # [B, Fp, 1]
+            prompt_latents_lengths,       # [B]
+            target_latents,               # [B, Ft, D]
+            target_latents_mask,          # [B, Ft, 1]
+            target_latents_lengths,       # [B]
+            prompt_starts,                # [B]
+            prompt_ends,                  # [B]
+            target_idx,                   # [B, Ft]
+            target_codebook_indices,      # [B, Q, Ft]
         )
 
     def _generate_condition(
@@ -348,13 +364,15 @@ class NaturalSpeech2Model(nn.Module):
             max_frames=audio_encodings.shape[1],
         )
         
-        audio_latents, audio_latents_lengths, _audio_codes = self.encodec.get_latents(audio, audio_lengths) # (B, F, D=128)
+        audio_latents, audio_latents_lengths, codebook_indices = self.encodec.get_latents(audio, audio_lengths) # [B, F, latent_dim], [B], [B, Q, F]
 
-        (prompt_latents, prompt_latents_mask, prompt_latents_lengths,           # prompt_latents: [B, Fp, D]   prompt_latents_mask: [B, Fp, 1]   prompt_latents_lengths: [B]
-         target_latents, target_latents_mask, target_latents_lengths,           # target_latents: [B, Ft, D]   target_latents_mask: [B, Ft, 1]   target_latents_lengths: [B]
-         prompt_starts, prompt_ends,                                            # prompt_starts: [B]           prompt_ends: [B]
-         target_idx) = self._generate_prompts_and_targets(                      # target_idx: [B, Ft]          frame indices of the target in the full F axis
+        (prompt_latents, prompt_latents_mask, prompt_latents_lengths,                   # prompt_latents: [B, Fp, latent_dim]   prompt_latents_mask: [B, Fp, 1]   prompt_latents_lengths: [B]
+         target_latents, target_latents_mask, target_latents_lengths,                   # target_latents: [B, Ft, latent_dim]   target_latents_mask: [B, Ft, 1]   target_latents_lengths: [B]
+         prompt_starts, prompt_ends,                                                    # prompt_starts: [B]                    prompt_ends: [B]
+         target_idx,                                                                    # target_idx: [B, Ft]                   frame indices of the target in the full F axis
+         target_codebook_indices) = self._generate_prompts_and_targets(                 # target_codebook_indices: [B, Q, Ft]   per-quantizer GT codebook indices at target frames
             audio_latents,
+            codebook_indices,
             audio_latents_lengths,
             self.min_prompt_pct,
             self.max_prompt_pct,
@@ -442,6 +460,8 @@ class NaturalSpeech2Model(nn.Module):
             prompt_encodings,         # [B, Fp, D]
             prompt_encodings_mask,    # [B, Fp, 1]
             condition_target,         # [B, Ft, D]
+            target_codebook_indices=target_codebook_indices,           # [B, Q, Ft]    | GT codebook indices per quantizer
+            codebook_embeddings=self.encodec.codebook_embeddings,       # [Q, K, latent_dim]
         )
 
         return {

@@ -33,7 +33,7 @@ class EncodecWrapper(nn.Module):
         codebook_embeddings = torch.stack(
             [layer.codebook.embed for layer in self.model.quantizer.layers],
             dim=0,
-        )  # [Q, K=1024, D=128] float32
+        )  # [Q, K=1024, latent_dim=128] float32
         self.register_buffer('codebook_embeddings', codebook_embeddings, persistent=False)
 
     @torch.no_grad()
@@ -60,22 +60,22 @@ class EncodecWrapper(nn.Module):
         audio,          # [B, T]
         audio_lengths   # [B]
     ):
-        audio_codes, _ = self.encode(audio) # [C=1, B, Q=32, F]
-        audio_codes = rearrange(audio_codes, '1 b q f -> q b f').contiguous() # [Q, B, F]
+        codebook_indices, _ = self.encode(audio)                                           # [C=1, B, Q=32, F]
+        codebook_indices = rearrange(codebook_indices, '1 b q f -> q b f').contiguous()    # [Q, B, F]
 
-        audio_latents = self.model.quantizer.decode(audio_codes)          # [B, D=128, F] | sum of the 32 codebook vectors per frame
+        audio_latents = self.model.quantizer.decode(codebook_indices)      # [B, D=128, F] | sum of the 32 codebook vectors per frame
         audio_latents = rearrange(audio_latents, "b d f -> b f d").contiguous() # [B, F, D]
 
         F = audio_latents.shape[1]
         audio_latents_lengths = (audio_lengths + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
         audio_latents_lengths = audio_latents_lengths.clamp(min=1, max=F)
 
-        codes = rearrange(audio_codes, 'q b f -> b q f').contiguous()  # [B, Q, F] long
+        codebook_indices = rearrange(codebook_indices, 'q b f -> b q f').contiguous()      # [B, Q, F] long
 
-        return audio_latents, audio_latents_lengths, codes
+        return audio_latents, audio_latents_lengths, codebook_indices
 
-    def decode_from_codes(self, audio_codes, audio_scales):
-        return self.model.decode(audio_codes, audio_scales)
+    def decode_from_codes(self, codebook_indices, audio_scales):
+        return self.model.decode(codebook_indices, audio_scales)
 
     def decode_from_latents(self, latents): # latents: [B, F, D]
         latents = rearrange(latents, "b f d -> b d f").contiguous()  # [B, D, F]

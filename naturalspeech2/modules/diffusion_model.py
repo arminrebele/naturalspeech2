@@ -137,6 +137,7 @@ class DiffusionModel(nn.Module):
             sampling_temperature: float = 1.44,
             score_loss_weight: float = 0.1,
             score_eps: float = 0.05,            # per-sample timestep gate -> any sample with t < score_eps is excluded from the score loss to prevent instability from large reweighting factors at low t
+            ce_rvq_loss_weight: float = 0.1,    # λ_ce-rvq
             timestep_eps: float = 1e-3,
     ):
         super().__init__()
@@ -149,6 +150,7 @@ class DiffusionModel(nn.Module):
         self.timestep_eps = timestep_eps
         self.score_loss_weight = score_loss_weight
         self.score_eps = score_eps
+        self.ce_rvq_loss_weight = ce_rvq_loss_weight
 
         self.input_projection = nn.Linear(latent_dim, hidden_dim)
         self.timestep_embedding = TimestepEmbedding(hidden_dim=hidden_dim, time_dim=time_dim)
@@ -186,6 +188,8 @@ class DiffusionModel(nn.Module):
             prompt_encodings,               # [B, Fp, D]
             prompt_encodings_mask,          # [B, Fp, 1] bool
             c,                              # [B, Ft, D]
+            target_codebook_indices,                   # [B, Q, Ft] long                       | GT codebook indices per quantizer
+            codebook_embeddings,            # [Q, K=1024, latent_dim] float32   | frozen Encodec codebook vectors
     ):
         batch_size = target_latents.shape[0]
         t = (         #  t ∈ [ε, 1−ε], time_step_eps = 0.01 prevents exact 0 or 1 which can cause issues in the noise schedule math
@@ -233,11 +237,24 @@ class DiffusionModel(nn.Module):
         score_valid_scalars = score_mask.sum().clamp(min=1.0) * self.latent_dim
         score_loss = (score_diff_sq * score_mask).sum() / score_valid_scalars
 
-        loss = data_loss + self.score_loss_weight * score_loss
+        # CE-RVQ loss:
+        #   Per quantizer j, score the partial residual ẑ₀ − Σᵢ<ⱼ eᵢ against every
+        #   codebook entry via −L2 + softmax, and cross-entropy against the GT code
+        #   index. Supervises the discrete decoding path that plain MSE misses.
+        ce_rvq_loss = self._ce_rvq_loss(
+            z0_hat,
+            target_codebook_indices,
+            codebook_embeddings,
+            target_latents_mask,
+        )
+
+        loss = data_loss + self.score_loss_weight * score_loss + self.ce_rvq_loss_weight * ce_rvq_loss
         metrics = {
             "data_loss": data_loss.detach(),
             "score_loss": score_loss.detach(),
+            "ce_rvq_loss": ce_rvq_loss.detach(),
         }
+
         return loss, metrics
 
     def _compute_prompt_summary_tokens(
@@ -286,6 +303,45 @@ class DiffusionModel(nn.Module):
         out = F.silu(out)
         out = self.output_projection_2(out)
         return out * target_latents_mask.to(out.dtype)
+
+    def _ce_rvq_loss(
+            self,
+            z0_hat,                   # [B, Ft, latent_dim]
+            target_codebook_indices,  # [B, Q, Ft]           | GT codebook indices per quantizer
+            codebook_embeddings,      # [Q, K, latent_dim]
+            target_latents_mask,      # [B, Ft, 1] bool
+    ):
+        # For each quantizer j:
+        #   r_j      = ẑ₀ − Σᵢ<ⱼ eᵢ                 (partial residual, GT earlier codes — no error cascade)
+        #   logit_k  = 2·r_j·Cⱼ[k] − ‖Cⱼ[k]‖²       (= −‖r−C[k]‖² + const; const drops under softmax)
+        #   loss_j   = CE(softmax_k(logit), codes_j)
+        # Single Python loop over Q=32 (static), vectorized over (B, Ft, K) per step.
+        # Running cumsum avoids materializing a full [Q, B, Ft, latent_dim] residual tensor.
+        z0_hat = z0_hat.float()
+        Q = target_codebook_indices.shape[1]
+        codebooks = codebook_embeddings[:Q].float()                         # [Q, K, latent_dim]
+        codebook_sq_norms = codebooks.pow(2).sum(dim=-1)                    # [Q, K]
+
+        flat_mask = rearrange(target_latents_mask, 'b ft 1 -> (b ft)').float()
+        num_valid = target_latents_mask.sum().float().clamp(min=1.0)
+
+        running_cum = torch.zeros_like(z0_hat)                              # [B, Ft, latent_dim]   Σᵢ<ⱼ eᵢ
+        total_ce = z0_hat.new_zeros(())
+
+        for j in range(Q):
+            gt_embed_j = codebooks[j][target_codebook_indices[:, j, :]]     # [B, Ft, latent_dim]
+            residual_j = z0_hat - running_cum                               # [B, Ft, latent_dim]
+            running_cum = running_cum + gt_embed_j
+
+            logits = 2.0 * torch.einsum('btd,kd->btk', residual_j, codebooks[j])  # [B, Ft, K]
+            logits = logits - codebook_sq_norms[j]
+
+            logits_flat = rearrange(logits, 'b ft k -> (b ft) k')
+            targets_flat = rearrange(target_codebook_indices[:, j, :], 'b ft -> (b ft)')
+            ce_per_scalar = F.cross_entropy(logits_flat, targets_flat, reduction='none')
+            total_ce = total_ce + (ce_per_scalar * flat_mask).sum()
+
+        return total_ce / (Q * num_valid)
 
     def _forward_diffusion(
             self,
