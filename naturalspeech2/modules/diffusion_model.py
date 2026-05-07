@@ -62,6 +62,7 @@ class _WaveNetBlock(nn.Module):
             filter_size,
             kernel_size,
             dilation=dilation,
+            bias=True,
         )
         self.cross_attention = MultiHeadCrossAttention(
             hidden_dim,
@@ -152,7 +153,7 @@ class DiffusionModel(nn.Module):
         self.score_eps = score_eps
         self.ce_rvq_loss_weight = ce_rvq_loss_weight
 
-        self.input_projection = nn.Linear(latent_dim, hidden_dim)
+        self.input_projection = nn.Linear(latent_dim, hidden_dim, bias=False)
         self.timestep_embedding = TimestepEmbedding(hidden_dim=hidden_dim, time_dim=time_dim)
 
         self.query_tokens = nn.Parameter(torch.randn(1, query_tokens, hidden_dim) * 0.02)
@@ -178,8 +179,8 @@ class DiffusionModel(nn.Module):
             for _ in range(wavenet_layers)
         ])
 
-        self.output_projection_1 = nn.Linear(hidden_dim, hidden_dim)
-        self.output_projection_2 = nn.Linear(hidden_dim, latent_dim)
+        self.output_projection_1 = nn.Linear(hidden_dim, hidden_dim, bias=False)
+        self.output_projection_2 = nn.Linear(hidden_dim, latent_dim, bias=False)
 
     def forward(
             self,

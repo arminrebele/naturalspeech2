@@ -276,6 +276,7 @@ class Conv1D(nn.Module):
             filter_size: int,
             kernel_size: int,
             dilation: int = 1,
+            bias: bool = False,
     ):
         super().__init__()
         padding = ((kernel_size - 1) * dilation) // 2
@@ -285,6 +286,7 @@ class Conv1D(nn.Module):
             kernel_size,
             padding=padding,
             dilation=dilation,
+            bias=bias,
         )
 
     def forward(
