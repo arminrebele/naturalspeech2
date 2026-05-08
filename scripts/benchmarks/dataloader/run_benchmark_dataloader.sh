@@ -5,7 +5,7 @@ LOG_FILE="scripts/benchmarks/dataloader_benchmark.log"
 echo "Starting Full I/O and GPU Pipeline Benchmark..." > $LOG_FILE
 
 # We will test combinations of these workers
-WORKER_COUNTS=(8 16 24)
+WORKER_COUNTS=(8 16 24 30)
 
 for workers in "${WORKER_COUNTS[@]}"; do
   for resample_flag in "false" "true"; do

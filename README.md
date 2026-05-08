@@ -35,12 +35,13 @@ The core latent denoiser is a 40-block WaveNet-style stack that interleaves dila
 
 ## Getting Started
 
-This project is designed to run seamlessly inside a Docker container. We provide a `Dockerfile` and `docker-compose.yml` to handle all system dependencies, C++ extensions, and Python packages via Poetry.
+This project is designed to run seamlessly inside a Docker container. We provide a [`Dockerfile`](Dockerfile) and [`docker-compose.yml`](docker-compose.yml) to handle all system dependencies, C++ extensions, and Python packages via Poetry.
 
 ### 1. Build and Start the Environment
 
 Ensure you have Docker and the NVIDIA Container Toolkit installed. You'll also need to create a `docker-compose.override.yml` to pass machine-specific settings like your huggingface/hub cache and the shared memory size for PyTorch Dataloader workers.
-Since the `entrypoint.sh` defaults to dropping you into a bash shell, you can build the image and start an interactive session immediately with:
+
+Since [`entrypoint.sh`](entrypoint.sh) defaults to dropping you into a bash shell, you can build the image and start an interactive session immediately with:
 
 ```bash
 docker compose run --rm --build ns2
@@ -50,9 +51,9 @@ docker compose run --rm --build ns2
 
 ### 2. Running the Training
 
-We use Hydra for hierarchical configuration management. Configurations are defined in the `config/` directory, where `config/config.yaml` is the default configuration.
+We use Hydra for hierarchical configuration management. Configurations are defined in the [`config/`](naturalspeech2/config/) directory, where [`config/config.yaml`](naturalspeech2/config/config.yaml) is the default configuration.
 
-You can start the training process and dynamically override config values directly from the terminal. This includes individual values like the Learning Rate, but also full sets of configurations like setting up a specific dataset. 
+You can start the training process and dynamically override config values directly from the terminal. This includes individual values like the Learning Rate, but also full sets of configurations like setting up a specific dataset.
 
 For example:
 
@@ -60,11 +61,18 @@ For example:
 python scripts/train.py dataset=vctk training.learning_rate=1e-4 wandb=serious_run
 ```
 
+Running the [training script](naturalspeech2/train.py) will automatically initiate our [Preprocessing-Pipeline](naturalspeech2/data/dataset.py) and prepare the dataset, before the Train-Loop starts. 
 ---
 
-### 3. Custom Mounts and Large Datasets (MergerFS)
+### 3. Dataset and Custom Mounts
 
-If your dataset spans multiple physical disks, the provided `entrypoint.sh` natively supports MergerFS to seamlessly pool them into the `/workspace/data` directory expected by the codebase.
+Following the paper [1], we use the english subset of [**Multilingual LibriSpeech (MLS)**](https://huggingface.co/datasets/parler-tts/mls_eng) as our training dataset, which the [Preprocessing-Pipeline](naturalspeech2/data/dataset.py) will load per default. 
+
+> **Note:** This will download **705 GB** of Parquet files, which will translate to an additional **~800 GB** worth of Arrow files after deserializing. During preprocessing, the peak disk usage is **~2x** the dataset in arrow format. Additionally, if you choose to use `resample_on_the_fly=False` (e.g. if your CPU-node can't handle resampling during dataloading fast enough), the pre-resampled FLAC files will require an additional **~3.8 TB** of disk space.
+
+We also provide the option to instead use the significantly smaller [**VCTK**](https://huggingface.co/datasets/sanchit-gandhi/vctk) dataset, in case you just want to play around with the codebase.
+
+If your dataset spans multiple physical disks, the provided [`entrypoint.sh`](entrypoint.sh) natively supports MergerFS to seamlessly pool them into the `/workspace/data` directory expected by the codebase.
 
 You can configure this by adding the following lines to your `docker-compose.override.yml` file on your host machine to supply the `MERGERFS_DISKS` environment variable and mount the required drives:
 
@@ -92,35 +100,37 @@ To maximize GPU VRAM utilization, enable efficient `torch.compile` graph caching
 
 We highly recommend running these steps before starting a full training run on a new dataset or hardware configuration.
 
-**1. Dataloader Optimization**  
-Determine the most efficient data loading strategy (resampling during pre-processing vs. on-the-fly) and test worker configurations.
 
-```bash
-scripts/benchmarks/dataloader/run_benchmark_dataloader.sh
-```
-
-**2. Finding Optimal Buckets**
-Dynamic batch bucketing relies on grouping sequences by length. Fixed buckets are crucial for maximizing VRAM utilization, utilizing `torch.compile`, and reducing memory fragmentation. This script determines the optimal buckets for dynamic batch bucketing of a specific dataset.
+**1. Finding Optimal Buckets**
+Dynamic batch bucketing relies on grouping sequences by length. Fixed buckets are crucial for maximizing VRAM utilization, utilizing `torch.compile`, and reducing memory fragmentation. This [script](naturalspeech2/benchmarks/dataloader/find_optimal_buckets.py) determines the optimal buckets for dynamic batch bucketing of a specific dataset.
 
 ```bash
 python scripts/benchmarks/dataloader/find_optimal_buckets.py
 ```
 
-**3. Finding Maximum Batch Sizes**
-Once your bucket boundaries are defined, you need to assign the respective buckets their optimal batch size, as the buckets only contain the optimal sequence length up until that point.
+**2. Finding Maximum Batch Sizes**
+Once your bucket boundaries are defined, you need to assign the respective buckets their [optimal batch size](naturalspeech2/benchmarks/dataloader/find_max_batch_sizes.py), as the buckets only contain the optimal sequence length up until that point.
 
 ```bash
 python scripts/benchmarks/dataloader/find_max_batch_sizes.py
 ```
 
-**4. Stress Testing Memory Fragmentation**
-Even though batch sizes might be stable individually, dynamically jumping between different shapes during training could trigger memory fragmentation. This stress test makes sure the batch sizes don't lead to an OOM deep into training when specific shapes/buckets follow each other.
+**3. Stress Testing Memory Fragmentation**
+Even though batch sizes might be stable individually, dynamically jumping between different shapes during training could trigger memory fragmentation. This [stress test](naturalspeech2/benchmarks/dataloader/stress_test_fragmentation.py) makes sure the batch sizes don't lead to an OOM deep into training when specific shapes/buckets follow each other.
 
 ```bash
 python scripts/benchmarks/dataloader/stress_test_fragmentation.py
 ```
 
 *If it passes, the output will yield a safe bucket mapping configuration that you can paste directly into your Hydra `config` setup.*
+
+**4. Dataloader Optimization**  
+Determine the most efficient data loading strategy (resampling during pre-processing vs. on-the-fly) and test worker configurations. 
+> **Note:** Technically, resampling always happens during pre-processing, since this is necessary to determine the pitch, but the option to resample on-the-fly discards the resampled audio and therefore saves disk space.
+
+```bash
+naturalspeech2/benchmarks/dataloader/run_benchmark_dataloader.sh
+```
 
 ---
 

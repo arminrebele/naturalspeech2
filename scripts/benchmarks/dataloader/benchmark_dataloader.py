@@ -1,7 +1,6 @@
 import time
 import logging
 import torch
-from pathlib import Path
 import numpy as np
 from torch.utils.data import DataLoader
 import hydra
@@ -12,13 +11,18 @@ from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, Dynam
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.utils.utils import setup_file_logger
+from naturalspeech2.paths import PROJECT_ROOT
 
 logger = logging.getLogger(__name__)
 
+NUM_BENCHMARK_STEPS = 150
+WARMUP_STEPS = 20
+
 @hydra.main(version_base=None, config_path="../../../config", config_name="config")
+
 def benchmark(cfg: DictConfig):
-    log_file = Path(__file__).parent / "benchmark_dataloader.log"
-    setup_file_logger(logger, log_file, mode="w", format_str="%(message)s")
+    log_file = PROJECT_ROOT / "naturalspeech2" / "benchmarks" / "dataloader_benchmark.log"
+    setup_file_logger(logger, log_file, mode="a", format_str="%(message)s")
 
     if not torch.cuda.is_available():
         raise RuntimeError("NVIDIA GPU required for benchmarking.")
@@ -78,39 +82,49 @@ def benchmark(cfg: DictConfig):
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=True)
 
-    num_benchmark_steps = 150
-    warmup_steps = 20
     data_times = []
     gpu_times = []
     starved_steps = 0
 
-    logger.info(f"\nStarting benchmark: {num_benchmark_steps} steps ({warmup_steps} warmup)")
-    logger.info(f"Workers: {cfg.dataloader.num_workers} | Resample On-The-Fly: {cfg.dataloader.resample_on_the_fly}")
+    logger.info(f"\nStarting benchmark: {NUM_BENCHMARK_STEPS} steps ({WARMUP_STEPS} warmup)")
     
     loader_iter = iter(loader)
+    batch = next(loader_iter)
+    batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
 
-    for i in range(num_benchmark_steps + warmup_steps):
-        # 1. Time DataLoader
+    for i in range(NUM_BENCHMARK_STEPS + WARMUP_STEPS):
+
+        # Time Overlapped Iteration
+        start_iter = time.perf_counter()
+        
+        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+            outputs = model(**batch)
+            loss, _, _ = loss_wrapper(outputs, step=i)
+            
+        # Time DataLoader Pre-fetch
         start_data = time.perf_counter()
-        batch = next(loader_iter)
-        end_data = time.perf_counter()
 
-        # 2. Move to GPU
+        try:
+            batch = next(loader_iter)
+        except StopIteration:
+            loader_iter = iter(loader)
+            batch = next(loader_iter)
         batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
 
-        # 3. Time GPU Processing
-        start_gpu = time.perf_counter()
-        optimizer.zero_grad(set_to_none=True)
-        outputs = model(**batch)
-        loss, _ = loss_wrapper(outputs)
+        end_data = time.perf_counter()
+        
         loss.backward()
         optimizer.step()
-        torch.cuda.synchronize() # Crucial for accurate GPU timing
-        end_gpu = time.perf_counter()
+        optimizer.zero_grad(set_to_none=True)
 
-        if i >= warmup_steps:
+        torch.cuda.synchronize() # Crucial for accurate GPU timing
+        end_iter = time.perf_counter()
+
+        if i >= WARMUP_STEPS:
             dt = end_data - start_data
-            gt = end_gpu - start_gpu
+            it = end_iter - start_iter
+            # GPU compute time is effectively the total iteration minus CPU stall time
+            gt = it - dt 
             data_times.append(dt)
             gpu_times.append(gt)
             
@@ -120,7 +134,7 @@ def benchmark(cfg: DictConfig):
     logger.info("\n--- Benchmark Results ---")
     logger.info(f"Data Loading Time : {np.mean(data_times):.4f}s avg | P95: {np.percentile(data_times, 95):.4f}s")
     logger.info(f"GPU Process Time  : {np.mean(gpu_times):.4f}s avg | P95: {np.percentile(gpu_times, 95):.4f}s")
-    logger.info(f"Starvation Rate   : {(starved_steps / num_benchmark_steps) * 100:.1f}% ({starved_steps}/{num_benchmark_steps} steps)")
+    logger.info(f"Starvation Rate   : {(starved_steps / NUM_BENCHMARK_STEPS) * 100:.1f}% ({starved_steps}/{NUM_BENCHMARK_STEPS} steps)")
     logger.info(f"Overall Status    : {'STARVED ❌' if np.mean(data_times) > np.mean(gpu_times) else 'HEALTHY ✅'}")
 
 if __name__ == "__main__":
