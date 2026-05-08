@@ -1,4 +1,0 @@
-# @package _group_
-log: True                # We heavily rely on WandB charts to see the dynamics of gradients
-project: "naturalspeech2"
-run_name: "ns2_gradient_analysis"

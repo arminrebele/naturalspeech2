@@ -1,0 +1,9 @@
+name: "VCTK"
+source: "sanchit-gandhi/vctk"
+train_split: "train"
+val_split: "train" # VCTK doesn't have a predefined validation split
+text_column: "text"
+audio_column: "audio"
+filter_column: "file"
+filter_substring: "_mic2"
+token_vocabulary_path: null

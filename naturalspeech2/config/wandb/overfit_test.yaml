@@ -1,4 +1,0 @@
-# @package _group_
-log: True
-project: "naturalspeech2"
-run_name: "ns2_overfit_test"

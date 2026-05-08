@@ -1,10 +1,13 @@
 import math
+from dataclasses import asdict
+
 import torch
 from torch import nn
 import torch.nn.functional as F
 
 from einops import rearrange, repeat
 
+from naturalspeech2.config.schema import ModelConfig
 from naturalspeech2.modules.encodec import EncodecWrapper
 from naturalspeech2.modules.log_mel_spectrogram import LogMelSpectrogramGenerator
 from naturalspeech2.modules.phoneme_encoder import PhonemeEncoder
@@ -18,189 +21,67 @@ from naturalspeech2.utils.utils import create_mask_from_lengths
 
 
 class NaturalSpeech2Model(nn.Module):
-    def __init__(self,
-                 # global parameters
-                 device: str = "cpu",
-                 token_vocabulary_size: int = None,
-                 hidden_dim: int = 512,
-                 latent_dim: int = 128,
-                 sampling_rate: int = 24000,
-                 rope_base: float = 10000.0,
-                 rope_max_seq_len: int = 3000,
-                 min_prompt_pct: float = 0.2,
-                 max_prompt_pct: float = 0.5,
-
-                 # Log Mel Spectrogram parameters
-                 n_fft: int = 1024,
-                 n_mels: int = 80,
-                 f_min: float = 0.0,
-                 f_max: float = None,
-
-                 # Phoneme Encoder parameters
-                 phoneme_encoder_layers: int = 6,
-                 phoneme_encoder_heads: int = 8,
-                 phoneme_encoder_filter_size: int = 2048,
-                 phoneme_encoder_kernel_size: int = 9,
-                 phoneme_encoder_conv_dropout: float = 0.2,
-                 phoneme_encoder_attn_weights_dropout: float = 0.2,
-                 phoneme_encoder_attn_out_dropout: float = 0.2,
-
-                 # Aligner parameters
-                 aligner_attn_channels: int = 80,
-                 aligner_temperature: float = 0.0005,
-                 prior_w: float = 1.0,
-
-                 # Speech Prompt Encoder parameters
-                 speech_prompt_encoder_layers: int = 6,
-                 speech_prompt_encoder_heads: int = 8,
-                 speech_prompt_encoder_filter_size: int = 2048,
-                 speech_prompt_encoder_kernel_size: int = 9,
-                 speech_prompt_encoder_conv_dropout: float = 0.2,
-                 speech_prompt_encoder_attn_weights_dropout: float = 0.2,
-                 speech_prompt_encoder_attn_out_dropout: float = 0.2,
-
-                 # Duration Predictor parameters
-                 duration_predictor_conv1d_layers: int = 30,
-                 duration_predictor_conv1d_kernel_size: int = 3,
-                 duration_predictor_attention_layers: int = 10,
-                 duration_predictor_attention_heads: int = 8,
-                 duration_predictor_conv_dropout: float = 0.5,
-                 duration_predictor_attn_weights_dropout: float = 0.5,
-                 duration_predictor_attn_out_dropout: float = 0.5,
-
-                 # Pitch Predictor parameters
-                 pitch_predictor_conv1d_layers: int = 30,
-                 pitch_predictor_conv1d_kernel_size: int = 5,
-                 pitch_predictor_attention_layers: int = 10,
-                 pitch_predictor_attention_heads: int = 8,
-                 pitch_predictor_conv_dropout: float = 0.5,
-                 pitch_predictor_attn_weights_dropout: float = 0.5,
-                 pitch_predictor_attn_out_dropout: float = 0.5,
-
-                 # Diffusion Model parameters
-                 diffusion_model_wavenet_layers: int = 40,
-                 diffusion_model_wavenet_kernel_size: int = 3,
-                 diffusion_model_wavenet_dilation: int = 2,
-                 diffusion_model_wavenet_filter_size: int = 1024,
-                 diffusion_model_attention_heads: int = 8,
-                 diffusion_model_query_tokens: int = 32,
-                 diffusion_model_attn_weights_dropout: float = 0.2,
-                 diffusion_model_attn_out_dropout: float = 0.2,
-                 diffusion_model_wavenet_attn_weights_dropout: float = 0.2,
-                 diffusion_model_wavenet_attn_out_dropout: float = 0.2,
-                 diffusion_model_wavenet_gate_dropout: float = 0.2,
-                 diffusion_model_time_dim: int = 128,
-                 diffusion_model_beta_min: float = 0.05,
-                 diffusion_model_beta_max: float = 20.0,
-                 diffusion_model_sampling_steps: int = 150,
-                 diffusion_model_sampling_temperature: float = 1.44,
-                 diffusion_model_score_loss_weight: float = 0.1,
-                 diffusion_model_score_eps: float = 0.05,
-                 diffusion_model_ce_rvq_loss_weight: float = 0.1,
-                 diffusion_model_timestep_eps: float = 1e-3,
+    def __init__(
+        self,
+        cfg: ModelConfig,
+        *,
+        token_vocabulary_size: int,
+        sampling_rate: int,
     ):
         super().__init__()
-        self.min_prompt_pct = min_prompt_pct
-        self.max_prompt_pct = max_prompt_pct
+        self.min_prompt_pct = cfg.min_prompt_pct
+        self.max_prompt_pct = cfg.max_prompt_pct
 
         self.encodec = EncodecWrapper()
 
         self.log_mel_spectrogram_generator = LogMelSpectrogramGenerator(
             sampling_rate=sampling_rate,
-            n_fft=n_fft,
-            n_mels=n_mels,
-            f_min=f_min,
-            f_max=f_max,
+            **asdict(cfg.mel),
         )
 
         self.phoneme_encoder = PhonemeEncoder(
             token_vocabulary_size=token_vocabulary_size,
-            hidden_dim=hidden_dim,
-            transformer_layers=phoneme_encoder_layers,
-            attention_heads=phoneme_encoder_heads,
-            conv1d_filter_size=phoneme_encoder_filter_size,
-            conv1d_kernel_size=phoneme_encoder_kernel_size,
-            conv_dropout=phoneme_encoder_conv_dropout,
-            attn_weights_dropout=phoneme_encoder_attn_weights_dropout,
-            attn_out_dropout=phoneme_encoder_attn_out_dropout,
-            rope_base=rope_base,
-            rope_max_seq_len=rope_max_seq_len,
+            hidden_dim=cfg.hidden_dim,
+            rope_base=cfg.rope_base,
+            rope_max_seq_len=cfg.rope_max_seq_len,
+            **asdict(cfg.phoneme_encoder),
         )
 
         self.aligner = Aligner(
-            dim_audio=n_mels,
-            hidden_dim=hidden_dim,
-            attn_channels=aligner_attn_channels,
-            temperature=aligner_temperature,
-            prior_w=prior_w,
+            audio_dim=cfg.mel.n_mels,
+            hidden_dim=cfg.hidden_dim,
+            **asdict(cfg.aligner),
         )
 
         self.forward_sum_loss = ForwardSumLoss()
         self.bin_loss = BinLoss()
 
         self.speech_prompt_encoder = SpeechPromptEncoder(
-            hidden_dim=hidden_dim,
-            latent_dim=latent_dim,
-            transformer_layers=speech_prompt_encoder_layers,
-            attention_heads=speech_prompt_encoder_heads,
-            conv1d_filter_size=speech_prompt_encoder_filter_size,
-            conv1d_kernel_size=speech_prompt_encoder_kernel_size,
-            conv_dropout=speech_prompt_encoder_conv_dropout,
-            attn_weights_dropout=speech_prompt_encoder_attn_weights_dropout,
-            attn_out_dropout=speech_prompt_encoder_attn_out_dropout,
-            rope_base=rope_base,
-            rope_max_seq_len=rope_max_seq_len,
+            hidden_dim=cfg.hidden_dim,
+            latent_dim=cfg.latent_dim,
+            rope_base=cfg.rope_base,
+            rope_max_seq_len=cfg.rope_max_seq_len,
+            **asdict(cfg.speech_prompt_encoder),
         )
 
         self.duration_predictor = DurationPredictor(
-            hidden_dim=hidden_dim,
-            conv1d_layers=duration_predictor_conv1d_layers,
-            conv1d_kernel_size=duration_predictor_conv1d_kernel_size,
-            attention_layers=duration_predictor_attention_layers,
-            attention_heads=duration_predictor_attention_heads,
-            conv_dropout=duration_predictor_conv_dropout,
-            attn_weights_dropout=duration_predictor_attn_weights_dropout,
-            attn_out_dropout=duration_predictor_attn_out_dropout,
+            hidden_dim=cfg.hidden_dim,
+            **asdict(cfg.duration_predictor),
         )
 
         self.pitch_predictor = PitchPredictor(
-            hidden_dim=hidden_dim,
-            conv1d_layers=pitch_predictor_conv1d_layers,
-            conv1d_kernel_size=pitch_predictor_conv1d_kernel_size,
-            attention_layers=pitch_predictor_attention_layers,
-            attention_heads=pitch_predictor_attention_heads,
-            conv_dropout=pitch_predictor_conv_dropout,
-            attn_weights_dropout=pitch_predictor_attn_weights_dropout,
-            attn_out_dropout=pitch_predictor_attn_out_dropout,
+            hidden_dim=cfg.hidden_dim,
+            **asdict(cfg.pitch_predictor),
         )
 
         # Projects per-frame pitch (1 channel) up to hidden_dim so it can be
         # added to expanded_phoneme_encodings to form the diffusion condition c.
-        self.pitch_projection = Conv1D(1, hidden_dim, 1)
+        self.pitch_projection = Conv1D(1, cfg.hidden_dim, 1)
 
         self.diffusion_model = DiffusionModel(
-            latent_dim=latent_dim,
-            hidden_dim=hidden_dim,
-            time_dim=diffusion_model_time_dim,
-            wavenet_layers=diffusion_model_wavenet_layers,
-            wavenet_kernel_size=diffusion_model_wavenet_kernel_size,
-            wavenet_dilation=diffusion_model_wavenet_dilation,
-            wavenet_filter_size=diffusion_model_wavenet_filter_size,
-            attention_heads=diffusion_model_attention_heads,
-            query_tokens=diffusion_model_query_tokens,
-            attn_weights_dropout=diffusion_model_attn_weights_dropout,
-            attn_out_dropout=diffusion_model_attn_out_dropout,
-            wavenet_attn_weights_dropout=diffusion_model_wavenet_attn_weights_dropout,
-            wavenet_attn_out_dropout=diffusion_model_wavenet_attn_out_dropout,
-            wavenet_gate_dropout=diffusion_model_wavenet_gate_dropout,
-            beta_min=diffusion_model_beta_min,
-            beta_max=diffusion_model_beta_max,
-            sampling_steps=diffusion_model_sampling_steps,
-            sampling_temperature=diffusion_model_sampling_temperature,
-            score_loss_weight=diffusion_model_score_loss_weight,
-            score_eps=diffusion_model_score_eps,
-            ce_rvq_loss_weight=diffusion_model_ce_rvq_loss_weight,
-            timestep_eps=diffusion_model_timestep_eps,
+            latent_dim=cfg.latent_dim,
+            hidden_dim=cfg.hidden_dim,
+            **asdict(cfg.diffusion_model),
         )
 
     @staticmethod

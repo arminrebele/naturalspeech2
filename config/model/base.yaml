@@ -1,0 +1,100 @@
+# global model parameters
+hidden_dim: 512
+latent_dim: 128
+rope_base: 10000.0
+rope_max_seq_len: 3000
+min_prompt_pct: 0.2        # minimum percentage of the audio used as prompt (only training)
+max_prompt_pct: 0.5        # maximum percentage of the audio used as prompt (only training)
+
+# Log Mel Spectrogram Generator
+mel:
+  n_fft: 1024
+  n_mels: 80
+  f_min: 0.0
+  f_max: null
+
+# Phoneme Encoder
+phoneme_encoder:
+  transformer_layers: 6
+  attention_heads: 8
+  conv1d_filter_size: 2048
+  conv1d_kernel_size: 9
+  conv_dropout: 0.2
+  attn_weights_dropout: 0.2
+  attn_out_dropout: 0.2
+
+# Aligner
+aligner:
+  attn_channels: 80
+  temperature: 0.0005
+  prior_w: 1.0
+
+# Speech Prompt Encoder
+speech_prompt_encoder:
+  transformer_layers: 6
+  attention_heads: 8
+  conv1d_filter_size: 2048
+  conv1d_kernel_size: 9
+  conv_dropout: 0.2
+  attn_weights_dropout: 0.2
+  attn_out_dropout: 0.2
+
+# Duration Predictor
+duration_predictor:
+  conv1d_layers: 30
+  conv1d_kernel_size: 3
+  attention_layers: 10
+  attention_heads: 8
+  conv_dropout: 0.5
+  attn_weights_dropout: 0.5
+  attn_out_dropout: 0.5
+
+# Pitch Predictor
+pitch_predictor:
+  conv1d_layers: 30
+  conv1d_kernel_size: 5
+  attention_layers: 10
+  attention_heads: 8
+  conv_dropout: 0.5
+  attn_weights_dropout: 0.5
+  attn_out_dropout: 0.5
+
+# Diffusion Model
+diffusion_model:
+  wavenet_layers: 40
+  wavenet_kernel_size: 3
+  wavenet_dilation: 2
+  wavenet_filter_size: 1024
+  attention_heads: 8
+  query_tokens: 32
+  attn_weights_dropout: 0.2
+  attn_out_dropout: 0.2
+  wavenet_attn_weights_dropout: 0.2
+  wavenet_attn_out_dropout: 0.2
+  wavenet_gate_dropout: 0.2
+  time_dim: 128
+  beta_min: 0.1
+  beta_max: 20.0
+  sampling_steps: 150
+  sampling_temperature: 1.44     # τ = 1.2² — initial noise ~ N(0, τ⁻¹·I)
+  score_loss_weight: 0.1
+  score_eps: 0.05
+  ce_rvq_loss_weight: 0.1
+  timestep_eps: 0.001
+
+# Loss Balancing Weights
+loss_weights:
+  diffusion_loss: 1.0
+  duration_predictor_loss: 1.0
+  pitch_predictor_loss: 1.0
+  aligner_loss: 1.0
+  forward_sum_loss: 1.0
+  bin_loss: 1.0
+
+loss_warmup_steps:
+  diffusion_loss: 1000
+  duration_predictor_loss: 1000
+  pitch_predictor_loss: 1000
+  aligner_loss: 0
+  forward_sum_loss: 0
+  bin_loss: 0

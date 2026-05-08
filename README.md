@@ -57,7 +57,7 @@ You can start the training process and dynamically override config values direct
 For example:
 
 ```bash
-python -m naturalspeech2.train dataset=vctk training.learning_rate=1e-4 wandb=serious_run
+python scripts/train.py dataset=vctk training.learning_rate=1e-4 wandb=serious_run
 ```
 
 ---
@@ -96,28 +96,28 @@ We highly recommend running these steps before starting a full training run on a
 Determine the most efficient data loading strategy (resampling during pre-processing vs. on-the-fly) and test worker configurations.
 
 ```bash
-naturalspeech2/benchmarks/dataloader/run_benchmark_dataloader.sh
+scripts/benchmarks/dataloader/run_benchmark_dataloader.sh
 ```
 
 **2. Finding Optimal Buckets**
 Dynamic batch bucketing relies on grouping sequences by length. Fixed buckets are crucial for maximizing VRAM utilization, utilizing `torch.compile`, and reducing memory fragmentation. This script determines the optimal buckets for dynamic batch bucketing of a specific dataset.
 
 ```bash
-python -m naturalspeech2.benchmarks.dataloader.find_optimal_buckets 
+python scripts/benchmarks/dataloader/find_optimal_buckets.py
 ```
 
 **3. Finding Maximum Batch Sizes**
 Once your bucket boundaries are defined, you need to assign the respective buckets their optimal batch size, as the buckets only contain the optimal sequence length up until that point.
 
 ```bash
-python -m naturalspeech2.benchmarks.dataloader.find_max_batch_sizes
+python scripts/benchmarks/dataloader/find_max_batch_sizes.py
 ```
 
 **4. Stress Testing Memory Fragmentation**
 Even though batch sizes might be stable individually, dynamically jumping between different shapes during training could trigger memory fragmentation. This stress test makes sure the batch sizes don't lead to an OOM deep into training when specific shapes/buckets follow each other.
 
 ```bash
-python -m naturalspeech2.benchmarks.dataloader.stress_test_fragmentation
+python scripts/benchmarks/dataloader/stress_test_fragmentation.py
 ```
 
 *If it passes, the output will yield a safe bucket mapping configuration that you can paste directly into your Hydra `config` setup.*
