@@ -5,3 +5,4 @@ defaults:
   - model: base
   - setup: full_run
   - training: full_run
+  - wandb: serious_run
