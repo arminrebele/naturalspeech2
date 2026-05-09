@@ -16,6 +16,7 @@ docker-compose.mergerfs.yml
 *.log
 outputs/
 multirun/
+scratch/
 
 docs/notes/
 docs/paper/
