@@ -3,6 +3,7 @@ import re
 import shutil
 import logging
 import gc
+import io
 from pathlib import Path
 
 import numpy as np
@@ -20,12 +21,32 @@ from naturalspeech2.data.pitch_extractor import PitchExtractor
 from naturalspeech2.utils.utils import create_mask_from_lengths, setup_file_logger
 from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 import soundfile as sf
+import torchaudio.functional as taF
 
 logger = logging.getLogger(__name__)
 
 # Global cache for worker processes
 _PHONEMIZER_INSTANCE = None
 _PITCH_EXTRACTOR_INSTANCE = None
+
+
+def _decode_audio_to_target_sr(audio_dict: dict, target_sr: int) -> np.ndarray:
+    """Decode an HF Audio cell ({bytes, path}) → mono float32 array at target_sr.
+
+    Bypasses datasets 4.x's torchcodec auto-decoder, which leaks ffmpeg
+    streams across many decode calls inside fork-based map workers
+    (EAGAIN after ~20k calls in a 24-proc map). soundfile + torchaudio
+    resample is fork-safe and ~4 ms/clip.
+    """
+    if audio_dict.get("bytes") is not None:
+        data, sr = sf.read(io.BytesIO(audio_dict["bytes"]), dtype="float32")
+    else:
+        data, sr = sf.read(audio_dict["path"], dtype="float32")
+    if data.ndim > 1:
+        data = data.mean(axis=1)
+    if sr != target_sr:
+        data = taF.resample(torch.from_numpy(data), sr, target_sr).numpy()
+    return data
 
 def get_worker_phonemizer() -> PhonemizerWrapper:
     global _PHONEMIZER_INSTANCE
@@ -56,33 +77,31 @@ def extract_f0_and_metadata_batched(batch: dict[str, list[Any]], target_sr: int)
     pitch_extractor = get_worker_pitch_extractor(target_sr)
     
     for audio_dict in batch["audio"]:
-        # HF has automatically decoded and resampled this to target_sr
-        audio_array = audio_dict["array"]
+        audio_array = _decode_audio_to_target_sr(audio_dict, target_sr)
         lengths.append(audio_array.shape[0])
         f0s.append(pitch_extractor(audio_array))
-        
+
     return {"audio_length": lengths, "f0": f0s}
 
 
 def resample_and_save_audio(sample: dict[str, Any], target_sr: int, resampled_dir: Path) -> dict[str, Any]:
     pitch_extractor = get_worker_pitch_extractor(target_sr)
-    # HF already resampled this to target_sr and gave us a numpy array!
-    resampled_array = sample["audio"]["array"]
-    
+    resampled_array = _decode_audio_to_target_sr(sample["audio"], target_sr)
+
     # Create a unique path for the new file using the dataset index
     new_filename = f"{sample['original_index']}_resampled.flac"
     new_path = resampled_dir / new_filename
 
-    # Save to disk. soundfile expects [frames, channels], which matches HF's 1D output for mono
+    # Save to disk. soundfile expects [frames, channels], which matches our 1D mono output
     sf.write(new_path, resampled_array, target_sr)
-    
+
     f0 = pitch_extractor(resampled_array)
-    
+
     # Avoid type conflicts (dict vs string) during processing.
     return {
         "audio_path": str(new_path),
         "audio_length": resampled_array.shape[0],
-        "f0": f0
+        "f0": f0,
     }
 
 class DatasetWrapper(Dataset):
@@ -159,9 +178,11 @@ class DatasetWrapper(Dataset):
             if self.audio_column != "audio":
                 dataset = dataset.rename_column(self.audio_column, "audio")
 
-            # Globally cast the audio column. This commands HF to decode/resample automatically
-            # whenever the column is accessed (in map or dataloader), using safe backends.
-            dataset = dataset.cast_column("audio", Audio(sampling_rate=self.sampling_rate))
+            # Keep the audio column as raw bytes (decode=False). datasets 4.x's
+            # torchcodec auto-decoder leaks ffmpeg streams under fork-based
+            # multiprocessing; we decode manually via _decode_audio_to_target_sr
+            # in worker functions and at runtime.
+            dataset = dataset.cast_column("audio", Audio(decode=False))
 
             if self.resample_on_the_fly:
                 logger.info("`resample_on_the_fly` is True. Extracting F0 and lengths, leaving original bytes intact.")
@@ -243,8 +264,9 @@ class DatasetWrapper(Dataset):
         return len(self.dataset)
 
     def _get_audio_on_the_fly(self, audio_dict: dict[str, Any]) -> torch.Tensor:
-        # Because we globally cast the column, HF provides the decoded/resampled array seamlessly
-        audio_array = audio_dict["array"]
+        # The column is stored decode=False (raw {bytes, path}). Decode + resample
+        # manually here for the same reason as the worker functions above.
+        audio_array = _decode_audio_to_target_sr(audio_dict, self.sampling_rate)
         return torch.tensor(audio_array, dtype=torch.float32)
 
     def _get_audio_pre_resampled(self, audio_path: str) -> torch.Tensor:
