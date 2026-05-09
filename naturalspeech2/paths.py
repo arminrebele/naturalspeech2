@@ -9,4 +9,4 @@ MODELS_DIR = PROJECT_ROOT / "models"
 ENCODEC_24KHZ_DIR = MODELS_DIR / "encodec_24khz"
 CHECKPOINTS_DIR = MODELS_DIR / "checkpoints"
 
-CONFIG_DIR = PACKAGE_ROOT / "config"
+CONFIG_DIR = PROJECT_ROOT / "config"
