@@ -29,6 +29,7 @@ class EncodecWrapper(nn.Module):
         )
 
         self.model.eval()
+        self.model.requires_grad_(False)
 
         codebook_embeddings = torch.stack(
             [layer.codebook.embed for layer in self.model.quantizer.layers],
@@ -74,9 +75,11 @@ class EncodecWrapper(nn.Module):
 
         return audio_latents, audio_latents_lengths, codebook_indices
 
+    @torch.no_grad()
     def decode_from_codes(self, codebook_indices, audio_scales):
         return self.model.decode(codebook_indices, audio_scales)
 
+    @torch.no_grad()
     def decode_from_latents(self, latents): # latents: [B, F, D]
         latents = rearrange(latents, "b f d -> b d f").contiguous()  # [B, D, F]
         return self.model.decoder(latents)
