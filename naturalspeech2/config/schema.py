@@ -30,6 +30,7 @@ class AlignerConfig:
     attn_channels: int = 80
     temperature: float = 0.0005
     prior_w: float = 1.0
+    dropout: float = 0.1
 
 
 @dataclass

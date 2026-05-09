@@ -223,18 +223,16 @@ class NaturalSpeech2Model(nn.Module):
         phoneme_encodings = self.phoneme_encoder(           # [B, P, D]
             phoneme_tokens,
             phoneme_tokens_mask,
-            phoneme_tokens_lengths
+            phoneme_tokens_lengths,
         )
-        phoneme_encodings_mask = phoneme_tokens_mask        # [B, P, 1]
-        phoneme_encodings_lengths = phoneme_tokens_lengths  # [B]
 
-        durations, alignment_hard, alignment_soft, alignment_logprobs, attn_mask, alignment_logits_with_prior = self.aligner(
+        durations, path_indices, posterior_label_logprobs, posterior_label_logits = self.aligner(
             audio_encodings,
             frame_mask,
             frame_lengths,
             phoneme_encodings,
-            phoneme_encodings_mask,
-            phoneme_encodings_lengths,
+            phoneme_tokens_mask,
+            phoneme_tokens_lengths,
         )
 
         (expanded_phoneme_encodings,                                    # expanded_phoneme_encodings: [B, F, D]
@@ -269,9 +267,9 @@ class NaturalSpeech2Model(nn.Module):
 
         predicted_log_durations = self.duration_predictor(  # [B, P]
             phoneme_encodings,
-            phoneme_encodings_mask,
+            phoneme_tokens_mask,
             prompt_encodings,
-            prompt_encodings_mask
+            prompt_encodings_mask,
         )
 
         predicted_log_pitch = self.pitch_predictor(         # [B, F]
@@ -299,14 +297,15 @@ class NaturalSpeech2Model(nn.Module):
         #### Compute Losses ####
 
         forward_sum_loss = self.forward_sum_loss(
-            alignment_logits_with_prior,
+            posterior_label_logits,
             frame_lengths,
-            phoneme_tokens_lengths
+            phoneme_tokens_lengths,
         )
 
         bin_loss = self.bin_loss(
-            alignment_logprobs,
-            alignment_hard
+            posterior_label_logprobs,
+            path_indices,
+            frame_mask,
         )
 
         # Loss is in log-space so errors are scale-symmetric: a 2x overshoot on a 2-frame
@@ -320,8 +319,11 @@ class NaturalSpeech2Model(nn.Module):
             gt_log_durations,
             reduction='none',
         )  # [B, P]
-        phoneme_mask_flat = rearrange(phoneme_encodings_mask, 'b p 1 -> b p').to(predicted_log_durations.dtype)
-        duration_predictor_loss = (duration_loss_per_phoneme * phoneme_mask_flat).sum() / phoneme_mask_flat.sum()
+        phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').to(predicted_log_durations.dtype)
+        duration_predictor_loss = (
+            (duration_loss_per_phoneme * phoneme_mask_flat).sum()
+            / phoneme_mask_flat.sum().clamp_min(1.0)
+        )
 
         # Pitch loss
         voiced_mask = (pitch > 0).to(predicted_log_pitch.dtype)                                # [B, F]

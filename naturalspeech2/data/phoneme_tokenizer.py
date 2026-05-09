@@ -35,8 +35,7 @@ class PhonemeTokenizer:
             phonemes = self.phonemizer(input_data)
         elif isinstance(input_data, list):
             phonemes = input_data
-        tokens =  ["<bos>"] + phonemes + ["<eos>"]
-        return [self.token_vocabulary.get(token, self.unk_id) for token in tokens]
+        return [self.token_vocabulary.get(token, self.unk_id) for token in phonemes]
 
     def decode_tokens(self, token_ids: list[int]) -> list[str]:
         """Converts token-IDs back into strings (phonemes or special characters)."""
@@ -46,7 +45,7 @@ class PhonemeTokenizer:
 
 def build_token_vocabulary(
         dataset: Iterable[dict],
-        special_tokens: list[str] = ["<pad>", "<unk>", "<bos>", "<eos>"], 
+        special_tokens: list[str] = ["<pad>", "<unk>"],
         save_path: str = None) -> dict[str, int]:
     
     tokens_from_text = set()

@@ -28,6 +28,7 @@ aligner:
   attn_channels: 80
   temperature: 0.0005
   prior_w: 1.0
+  dropout: 0.1
 
 # Speech Prompt Encoder
 speech_prompt_encoder:
