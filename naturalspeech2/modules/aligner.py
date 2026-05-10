@@ -3,6 +3,7 @@ from torch import nn
 from einops import rearrange, repeat
 
 from naturalspeech2.modules.layers import Conv1D, RMSNorm
+from naturalspeech2.ops.monotonic_align import maximum_path
 
 
 
@@ -40,7 +41,7 @@ class Aligner(nn.Module):
         P = phoneme_encodings.shape[1]
         device = audio_encodings.device
 
-        learned_scores = self.aligner_net(  # FP32 [B, F, P]
+        learned_scores = self.aligner_net(  # [B, F, P]
             audio_encodings,
             frame_mask,
             phoneme_encodings,
@@ -69,12 +70,9 @@ class Aligner(nn.Module):
         posterior_label_logits = learned_scores + prior_logprobs  # [B, F, P] FP32
         posterior_label_logprobs = posterior_label_logits.log_softmax(dim=-1)  # [B, F, P] FP32
 
-        attn_mask = frame_mask & phoneme_col_mask  # [B, F, P]
-
         with torch.no_grad():
             path_indices = maximum_path_indices(  # [B, F] long, padded frames clamped to 0
                 posterior_label_logits,
-                attn_mask,
                 frame_lengths,
                 phoneme_encodings_lengths,
             )
@@ -160,9 +158,9 @@ class AlignerNet(nn.Module):
     def forward(
         self,
         audio_encodings,         # [B, F, audio_dim]
-        frame_mask,              # [B, F, 1] bool
+        frame_mask,              # [B, F, 1]
         phoneme_encodings,       # [B, P, hidden_dim]
-        phoneme_encodings_mask,  # [B, P, 1] bool
+        phoneme_encodings_mask,  # [B, P, 1]
     ):
         audio_features = self._encode(
             audio_encodings, frame_mask,
@@ -177,14 +175,17 @@ class AlignerNet(nn.Module):
         # Decision 2 / Decision 6: squared-L2 via GEMM in FP32 even under BF16 autocast.
         # `temperature * dist_sq` lands learned scores in roughly [-1, 0] for moderately
         # separated features — small enough that BF16 quantization noise (~0.01) is too
-        # coarse for the downstream log_softmax + log_prior arithmetic.
-        a = audio_features.float()
-        p = phoneme_features.float()
-        a_sq = a.square().sum(dim=-1, keepdim=True)                      # [B, F, 1]
-        p_sq = rearrange(p.square().sum(dim=-1), 'b p -> b 1 p')         # [B, 1, P]
-        cross = torch.bmm(a, rearrange(p, 'b p c -> b c p'))             # [B, F, P]
-        dist_sq = (a_sq + p_sq - 2.0 * cross).clamp_min(0.0)
-        learned_scores = -self.temperature * dist_sq                     # [B, F, P] FP32
+        # coarse for the downstream log_softmax + log_prior arithmetic. The .float()
+        # casts alone are not enough: torch.bmm is an autocast op and would still run
+        # in BF16 inside the training autocast region, so we explicitly disable autocast.
+        with torch.autocast(device_type=audio_features.device.type, enabled=False):
+            a = audio_features.float()
+            p = phoneme_features.float()
+            a_sq = a.square().sum(dim=-1, keepdim=True)                      # [B, F, 1]
+            p_sq = rearrange(p.square().sum(dim=-1), 'b p -> b 1 p')         # [B, 1, P]
+            cross = torch.bmm(a, rearrange(p, 'b p c -> b c p'))             # [B, F, P]
+            dist_sq = (a_sq + p_sq - 2.0 * cross).clamp_min(0.0)
+            learned_scores = -self.temperature * dist_sq                     # [B, F, P] FP32
         return learned_scores
 
 
@@ -258,77 +259,44 @@ def compute_beta_binomial_prior(
 
 
 
+@torch.compiler.disable
 def maximum_path_indices(
     scores: torch.Tensor,                       # [B, F, P] FP32
-    attn_mask: torch.Tensor,                    # [B, F, P] bool
-    frame_lengths: torch.Tensor,                # [B] long
-    phoneme_encodings_lengths: torch.Tensor,    # [B] long
+    frame_lengths: torch.Tensor,                # [B] long — valid frames per item
+    phoneme_encodings_lengths: torch.Tensor,    # [B] long — valid phonemes (acoustic axis)
 ) -> torch.Tensor:
     """
     Monotonic Viterbi (stay or move-by-1). Returns compact path indices [B, F] long.
-    Padded frame indices are clamped to 0 so downstream gather/scatter cannot fault.
+    Padded frame indices are 0 (the kernel only writes 1s in the valid F-range, so
+    `argmax` over an all-zero padded row returns index 0).
+
+    Backed by the Glow-TTS `monotonic_align` Cython kernel (Kim et al., NeurIPS 2020;
+    full citation chain in CLAUDE.md "Aligner Viterbi"). The Python `for f` loop this
+    replaces was hostile to `torch.compile` — Inductor would either compile-time-blow-up
+    unrolling the 2249-iter FX graph or recompile per bucket length, which is the
+    actual load-bearing motivation. Secondary effect: per-batch CUDA launch overhead
+    drops from a per-frame storm (~18k tiny launches, analytically ~145 ms at
+    F≈2250) to a single CPU op plus one `.cpu()` move; exact wall-clock improvement
+    to be measured on first GPU run.
+
+    `@torch.compiler.disable` because the kernel runs CPU-side after a `.cpu()` move;
+    Dynamo treats this as a graph break and compiles around it.
 
     Note: the DP is invariant to a per-frame additive constant (V8 / R8), so feeding
     `learned_scores + prior_logprobs` produces the same hard path as feeding the
     log-softmax-normalized form. Do not "normalize" the DP scores in a future refactor.
+
+    Lengths are passed explicitly (rather than recovered from the mask) so the kernel
+    contract doesn't silently assume an outer-product attention mask — see review
+    in `.codex/plans/aligner_followups.md` Phase 6 post-review fixes.
     """
-    device = scores.device
-    dtype = scores.dtype
-    B, F, P = scores.shape
-    NEG_INF = float('-inf')
-
-    dp = torch.full((B, F, P), NEG_INF, device=device, dtype=dtype)
-    # Bool path tensor: True = move-by-1, False = stay (8x smaller than int64).
-    path = torch.zeros((B, F, P), dtype=torch.bool, device=device)
-
-    dp[:, 0, 0] = torch.where(
-        attn_mask[:, 0, 0],
-        scores[:, 0, 0],
-        scores.new_full((), NEG_INF),
+    # Kernel convention is [B, P, F]; ours is [B, F, P]. Transpose to match.
+    value = rearrange(scores, 'b f p -> b p f').contiguous()
+    return maximum_path(  # [B, F] long — argmax done CPU-side inside maximum_path
+        value,
+        phoneme_encodings_lengths.to(torch.int32),
+        frame_lengths.to(torch.int32),
     )
-
-    # Reused shifted buffer — avoids re-allocating [B, P] every frame.
-    dp_move = torch.empty((B, P), device=device, dtype=dtype)
-
-    for f in range(1, F):
-        prev = dp[:, f - 1, :]                  # [B, P]
-
-        # Shifted predecessor (+1 in phoneme direction). First column is -inf
-        # because there is no phoneme to "move from" at p = 0.
-        dp_move[:, 0] = NEG_INF
-        dp_move[:, 1:] = prev[:, :-1]
-        dp_stay = prev
-
-        move_better = dp_move > dp_stay         # [B, P] bool
-        path[:, f, :] = move_better
-        dp_max = torch.where(move_better, dp_move, dp_stay)
-
-        dp[:, f, :] = torch.where(
-            attn_mask[:, f, :],
-            scores[:, f, :] + dp_max,
-            scores.new_full((), NEG_INF),
-        )
-
-    # --- Backtrack into compact [B, F] path indices ---
-    # path[:, 0, :] is intentionally never written; at f=0 the optimal path is
-    # always at p=0 and decision=False (we never move out of -inf at the boundary),
-    # so backtrack has no decrement to apply at f=0.
-    frame_lengths_idx = frame_lengths.long() - 1
-    p_cur = phoneme_encodings_lengths.long() - 1   # [B], always >= 0
-    batch_indices = torch.arange(B, device=device)
-
-    path_indices = torch.zeros((B, F), dtype=torch.long, device=device)
-
-    for f in reversed(range(F)):
-        active = (f <= frame_lengths_idx)                  # [B] bool — within valid frame range
-        # Padded frames: record 0; their duration contribution is zero because frame_valid masks them.
-        idx_f = torch.where(active, p_cur, torch.zeros_like(p_cur))
-        path_indices[:, f] = idx_f
-
-        decision = path[batch_indices, f, p_cur]                    # [B] bool
-        p_cur = p_cur - (decision & active).long()
-
-    return path_indices
 
 
 
