@@ -18,7 +18,7 @@ from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer, build_token_vocabulary
 from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
 from naturalspeech2.data.pitch_extractor import PitchExtractor
-from naturalspeech2.utils.utils import create_mask_from_lengths, setup_file_logger
+from naturalspeech2.utils.utils import create_mask_from_lengths
 from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 import soundfile as sf
 import torchaudio.functional as taF
@@ -462,93 +462,3 @@ class BucketedCollateFn:
             "phoneme_tokens_lengths": phoneme_tokens_lengths, # [B]
         }
 
-
-if __name__ == "__main__":
-    from torch.utils.data import DataLoader
-    from omegaconf import OmegaConf
-    from naturalspeech2.paths import CONFIG_DIR, PACKAGE_ROOT
-
-    # Set up logging to both terminal and file
-    log_dir = PACKAGE_ROOT / "benchmarks"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "dataset_test.log"
-
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
-    logger.propagate = False 
-
-    format_str = "%(asctime)s - %(levelname)s - %(message)s"
-    
-    setup_file_logger(logger, log_file, mode="w", format_str=format_str)
-    
-    sh = logging.StreamHandler()
-    sh.setFormatter(logging.Formatter(format_str))
-    logger.addHandler(sh)
-
-    def test_pipeline(dataset_cfg_name: str, split_override: str = None):
-        dataset_cfg = OmegaConf.load(CONFIG_DIR / "dataset" / f"{dataset_cfg_name}.yaml")
-        dataloader_cfg = OmegaConf.load(CONFIG_DIR / "dataloader" / "default.yaml")
-
-        # Standardized schema across all configs
-        split = split_override if split_override else dataset_cfg.train_split
-        is_train_split = (split == dataset_cfg.train_split)
-
-        logger.info(f"--- Testing Pipeline with Dataset: {dataset_cfg.name} (Split: {split}) ---")
-
-        dataset = DatasetWrapper(
-            dataset_source=dataset_cfg.source,
-            dataset_name=dataset_cfg.name,
-            split=split,
-            text_column=dataset_cfg.text_column,
-            audio_column=dataset_cfg.audio_column,
-            filter_column=dataset_cfg.filter_column,
-            filter_substring=dataset_cfg.filter_substring,
-            token_vocabulary_path=dataset_cfg.token_vocabulary_path,
-            sampling_rate=dataloader_cfg.sampling_rate,
-            resample_on_the_fly=dataloader_cfg.resample_on_the_fly,
-            num_proc_phonemize=dataloader_cfg.num_proc_phonemize,
-            num_proc_tokenize=dataloader_cfg.num_proc_tokenize,
-        )
-        logger.info(f"Dataset initialized successfully with length: {len(dataset)}")
-
-        sample = dataset[0]
-        logger.info(f"Sample 0 Audio shape: {sample['audio'].shape}")
-        logger.info(f"Sample 0 Phoneme tokens length: {len(sample['phoneme_tokens'])}")
-
-        logger.info("Testing DynamicBucketedBatchSampler and DataLoader...")
-        bucket_mapping = OmegaConf.to_container(dataloader_cfg.bucket_mapping, resolve=True)
-
-        sampler = DynamicBucketedBatchSampler(
-            dataset, 
-            bucket_mapping=bucket_mapping, 
-            drop_last=dataloader_cfg.drop_last,
-            shuffle=dataloader_cfg.shuffle if is_train_split else False
-        )
-        collate_fn = BucketedCollateFn(bucket_mapping=bucket_mapping)
-        loader = DataLoader(
-            dataset, 
-            batch_sampler=sampler, 
-            collate_fn=collate_fn,
-            num_workers=dataloader_cfg.num_workers,
-            pin_memory=True
-        )
-        
-        for batch in loader:
-            logger.info(f"Batch keys: {list(batch.keys())}")
-            logger.info(f"Batched audio shape: {batch['audio'].shape}")
-            logger.info(f"Batched audio_mask shape: {batch['audio_mask'].shape}")
-            logger.info(f"Batched pitch shape: {batch['pitch'].shape}")
-            logger.info(f"Batched phoneme_tokens shape: {batch['phoneme_tokens'].shape}")
-            logger.info(f"Batched phoneme_tokens_mask shape: {batch['phoneme_tokens_mask'].shape}")
-            break
-            
-        logger.info(f"{dataset_cfg.name} pipeline test completed successfully! ✅\n")
-
-    # 1. Test VCTK dataset
-    test_pipeline("vctk")
-
-    # 2. Test LibriSpeech dataset (validation/dev split)
-    librispeech_cfg = OmegaConf.load(CONFIG_DIR / "dataset" / "librispeech.yaml")
-    test_pipeline("librispeech", split_override=librispeech_cfg.val_split)
-
-    logger.info("All dataset and dataloader tests completed successfully! 🎉")
