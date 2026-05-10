@@ -31,11 +31,11 @@ class Aligner(nn.Module):
     def forward(
         self,
         audio_encodings,            # [B, F, audio_dim]
-        frame_mask,                 # [B, F, 1] bool
-        frame_lengths,              # [B] long
+        frame_mask,                 # [B, F, 1]
+        frame_lengths,              # [B] 
         phoneme_encodings,          # [B, P, hidden_dim]
-        phoneme_encodings_mask,     # [B, P, 1] bool
-        phoneme_encodings_lengths,  # [B] long
+        phoneme_encodings_mask,     # [B, P, 1]
+        phoneme_encodings_lengths,  # [B]
     ):
         B, F, _ = audio_encodings.shape
         P = phoneme_encodings.shape[1]
