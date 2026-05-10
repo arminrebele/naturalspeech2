@@ -277,10 +277,11 @@ def maximum_path_indices(
     full citation chain in CLAUDE.md "Aligner Viterbi"). The Python `for f` loop this
     replaces was hostile to `torch.compile` — Inductor would either compile-time-blow-up
     unrolling the 2249-iter FX graph or recompile per bucket length, which is the
-    actual load-bearing motivation. Secondary effect: per-batch CUDA launch overhead
-    drops from a per-frame storm (~18k tiny launches, analytically ~145 ms at
-    F≈2250) to a single CPU op plus one `.cpu()` move; exact wall-clock improvement
-    to be measured on first GPU run.
+    actual load-bearing motivation. Secondary effect: the kernel's wall-clock cost is
+    0.55 ms at typical shapes (B=8, F=375, P=60 — where 97% of VCTK lives) and 5.4 ms
+    at the worst-case bucket (B=8, F=2250, P=120), measured on the PRO 6000 (2026-05-10).
+    The pure-Python alternative was estimated at ~145 ms at worst case but never
+    directly run — see docs/notes/gpu_bringup.md for the perf probe.
 
     `@torch.compiler.disable` because the kernel runs CPU-side after a `.cpu()` move;
     Dynamo treats this as a graph break and compiles around it.

@@ -9,9 +9,12 @@ express as a Python `for f in range(F)` loop, but as a single C call with
 OpenMP-parallelised batches (`prange(num_threads=B)` — explicitly overrides
 any OMP_NUM_THREADS env var). Primary motivation: a 2249-iter Python loop is
 hostile to `torch.compile` (Inductor would either compile-time-blow-up on the
-unrolled FX graph or recompile per bucket length). Secondary: per-batch CUDA
-launch overhead drops from a per-frame storm to a single CPU op plus one
-`.cpu()` move; exact wall-clock improvement to be measured on first GPU run.
+unrolled FX graph or recompile per bucket length). Secondary: replaces a
+per-batch storm of tiny CUDA kernels with one CPU op + one `.cpu()` move.
+Measured on the PRO 6000 (2026-05-10): 0.55 ms at typical shapes (B=8, F=375,
+P=60), 5.4 ms at worst-case bucket (B=8, F=2250, P=120). Components at worst
+case: 0.56 ms .cpu() move + 2.25 ms Cython DP + 0.025 ms back-transfer. See
+docs/notes/gpu_bringup.md for the full perf probe.
 """
 import numpy as np
 import torch
