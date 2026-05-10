@@ -63,12 +63,15 @@ class Aligner(nn.Module):
             w=self.prior_w,
         )
 
-        # Decision 3: a single posterior-label object feeds CTC, Viterbi, and bin loss.
-        # Form is `learned_scores + prior` (not `log_softmax(learned_scores) + prior`)
-        # because the per-frame log-softmax constant is irrelevant for Viterbi (V8) and
-        # would otherwise cost an extra normalization for CTC.
-        posterior_label_logits = learned_scores + prior_logprobs  # [B, F, P] FP32
-        posterior_label_logprobs = posterior_label_logits.log_softmax(dim=-1)  # [B, F, P] FP32
+        # Per-frame log_softmax of learned scores BEFORE the prior is added.
+        # ForwardSumLoss pads a fixed blank logit and softmaxes over [blank, P labels];
+        # without this normalization, label logits sit at an uncalibrated scale (driven
+        # by feature norms × temperature) and silently shift the blank-vs-label calibration.
+        # Viterbi and bin-loss are unaffected: log_softmax adds a per-frame constant, which
+        # is invariant under the monotonic DP and cancels in the second log_softmax below.
+        learned_label_logprobs = learned_scores.log_softmax(dim=-1)             # [B, F, P] FP32
+        posterior_label_logits = learned_label_logprobs + prior_logprobs        # [B, F, P] FP32
+        posterior_label_logprobs = posterior_label_logits.log_softmax(dim=-1)   # [B, F, P] FP32
 
         with torch.no_grad():
             path_indices = maximum_path_indices(  # [B, F] long, padded frames clamped to 0
@@ -222,7 +225,7 @@ def compute_beta_binomial_prior(
         'k -> 1 1 k',
     )                                                                               # [1, 1, P]
 
-    alpha = (w * t_grid).clamp_min(1e-5)                                            # [1, F, 1]
+    alpha = w * t_grid                                                              # [1, F, 1]
     beta = (w * (T - t_grid + 1.0)).clamp_min(1e-5)                                 # [B, F, 1]
 
     N_minus_k = (N - k_grid).clamp_min(0.0)                                         # [B, 1, P]
