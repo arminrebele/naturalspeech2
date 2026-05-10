@@ -149,7 +149,12 @@ We ran the mentioned tests to **verify the correctness** of our implementation, 
 **1. Initialization**
 
 To preserve variance **locally**, we initialize all *Linear*- and *Conv1D*-Layers via a Gaussian Distribution with:
-$$E[w] = 0$$ $$\mathbf{Var[w] = \frac{2}{n_{in}}}$$ where **Biases** are initialized as **0** (*He-Initialization* [8]).
+
+$$E[w] = 0$$ 
+
+$$\mathbf{Var[w] = \frac{2}{n_{in}}}$$ 
+
+where **Biases** are initialized as **0** (*He-Initialization* [8]).
 We assume, the SiLU-activation matches the form of ReLU close enough, for this initialization-scheme to still work sufficiently. 
 Per default, we initialize the **scale-parameters** of *RMSNorm-Blocks* as **1**. 
 
