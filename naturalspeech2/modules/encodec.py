@@ -42,13 +42,18 @@ class EncodecWrapper(nn.Module):
         self,
         audio   # [B, T]
     ):
-        input_values = rearrange(audio, 'b t -> b 1 t')     # [B, C=1, T]   C=1 for mono audio
+        # Force FP32: under BF16 autocast the nearest-codebook L2 in the
+        # quantizer can flip assignments at tight ties, silently corrupting
+        # the GT codes the diffusion model trains against.
+        with torch.autocast(device_type=audio.device.type, enabled=False):
+            audio = audio.float()
+            input_values = rearrange(audio, 'b t -> b 1 t')     # [B, C=1, T]   C=1 for mono audio
 
-        output = self.model.encode(
-            input_values,
-            padding_mask=None,
-            bandwidth=self.bandwidth,
-        )
+            output = self.model.encode(
+                input_values,
+                padding_mask=None,
+                bandwidth=self.bandwidth,
+            )
 
         # output.audio_codes: [C=1, B, Q=32, F]      e.g. 1 second => F=75 frames
         # Q = Quantizer/Codebook
@@ -57,21 +62,22 @@ class EncodecWrapper(nn.Module):
 
     @torch.no_grad()
     def get_latents(
-        self, 
+        self,
         audio,          # [B, T]
         audio_lengths   # [B]
     ):
-        codebook_indices, _ = self.encode(audio)                                           # [C=1, B, Q=32, F]
-        codebook_indices = rearrange(codebook_indices, '1 b q f -> q b f').contiguous()    # [Q, B, F]
+        with torch.autocast(device_type=audio.device.type, enabled=False):
+            codebook_indices, _ = self.encode(audio)                                           # [C=1, B, Q=32, F]
+            codebook_indices = rearrange(codebook_indices, '1 b q f -> q b f').contiguous()    # [Q, B, F]
 
-        audio_latents = self.model.quantizer.decode(codebook_indices)      # [B, D=128, F] | sum of the 32 codebook vectors per frame
-        audio_latents = rearrange(audio_latents, "b d f -> b f d").contiguous() # [B, F, D]
+            audio_latents = self.model.quantizer.decode(codebook_indices)      # [B, D=128, F] | sum of the 32 codebook vectors per frame
+            audio_latents = rearrange(audio_latents, "b d f -> b f d").contiguous() # [B, F, D]
 
-        F = audio_latents.shape[1]
-        audio_latents_lengths = (audio_lengths + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
-        audio_latents_lengths = audio_latents_lengths.clamp(min=1, max=F)
+            F = audio_latents.shape[1]
+            audio_latents_lengths = (audio_lengths + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
+            audio_latents_lengths = audio_latents_lengths.clamp(min=1, max=F)
 
-        codebook_indices = rearrange(codebook_indices, 'q b f -> b f q').contiguous()      # [B, F, Q] long
+            codebook_indices = rearrange(codebook_indices, 'q b f -> b f q').contiguous()      # [B, F, Q] long
 
         return audio_latents, audio_latents_lengths, codebook_indices
 

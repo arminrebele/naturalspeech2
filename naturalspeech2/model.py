@@ -401,9 +401,11 @@ class NaturalSpeech2Model(nn.Module):
             prompt_encodings,
             prompt_encodings_mask,
         )
-        # Inverse of training's torch.log1p: expm1 -> round -> clamp -> mask to 0 on padding.
+        # Inverse of training's torch.log1p: expm1 -> round -> clamp valid phonemes to >=1 frame -> mask padding to 0.
+        # min=1 (not 0) prevents an untrained / early-checkpoint model from collapsing valid phonemes
+        # to zero frames, which would produce max_frames=0 and crash the downstream pitch/diffusion/decode path.
         phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').long()
-        predicted_durations = torch.expm1(predicted_log_durations).round().long().clamp(min=0)
+        predicted_durations = torch.expm1(predicted_log_durations).round().long().clamp(min=1)
         predicted_durations = predicted_durations * phoneme_mask_flat             # [B, P]
 
         # max_frames as Python int forces one CPU<->GPU sync — acceptable inside generate()
@@ -492,10 +494,14 @@ class LossWrapper(torch.nn.Module):
                 self.current_weights[key] = target_weight
 
     def forward(self, loss_dict: dict, step: int = None):
+        # log_dict values are detached tensors, NOT Python floats — materialising
+        # to floats here would force a CPU↔GPU sync at training-step frequency
+        # even when the consumer is only logging every log_interval steps.
+        # Callers .item() at log/eval time (see scripts/train.py).
         total_loss = 0.0
         log_dict = {}
         weighted_tensors = {}
-        
+
         # Update current weights only if step is explicitly passed (train loop)
         if step is not None:
             self._update_weights(step)
@@ -506,26 +512,26 @@ class LossWrapper(torch.nn.Module):
                 weight = self.current_weights[key]
                 weighted_loss = value * weight
                 total_loss += weighted_loss
-                
-                log_dict[key] = value.detach().item()
-                log_dict[f"{key}_weighted"] = weighted_loss.detach().item()
+
+                log_dict[key] = value.detach()
+                log_dict[f"{key}_weighted"] = weighted_loss.detach()
                 weighted_tensors[key] = weighted_loss
             else:
                 group_weight = self.current_weights[key]
                 group_loss = 0.0
-                
+
                 for sub_key, sub_value in value.items():
                     sub_weight = self.current_weights[sub_key]
                     weighted_sub = sub_value * sub_weight
                     group_loss += weighted_sub
-                    
-                    log_dict[sub_key] = sub_value.detach().item()
-                    log_dict[f"{sub_key}_weighted"] = weighted_sub.detach().item()
+
+                    log_dict[sub_key] = sub_value.detach()
+                    log_dict[f"{sub_key}_weighted"] = weighted_sub.detach()
                     weighted_tensors[sub_key] = weighted_sub * group_weight
 
                 weighted_group = group_loss * group_weight
                 total_loss += weighted_group
-                log_dict[f"{key}_total_weighted"] = weighted_group.detach().item()
+                log_dict[f"{key}_total_weighted"] = weighted_group.detach()
 
         return total_loss, log_dict, weighted_tensors
 

@@ -76,7 +76,9 @@ def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, dev
     model.eval()
     for split, loader in [('train', train_loader), ('val', val_loader)]:
         loader_iter = iter(loader)
-        total_loss_sum = 0.0
+        # Tensor-side accumulation across eval_iters; one .item() per split at the end
+        # so the eval loop doesn't sync the GPU on every iteration.
+        total_loss_sum = torch.zeros((), device=device)
         log_dict_sums = {}
         metric_sums = {}
 
@@ -94,16 +96,16 @@ def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, dev
                 loss_dict, metrics = model(**batch)
                 total_loss, logged_losses, _ = loss_wrapper(loss_dict)
 
-            total_loss_sum += total_loss.item()
+            total_loss_sum = total_loss_sum + total_loss.detach()
             for key, val in logged_losses.items():
                 log_dict_sums[key] = log_dict_sums.get(key, 0.0) + val
             for key, val in metrics.items():
-                metric_sums[key] = metric_sums.get(key, 0.0) + val.item()
+                metric_sums[key] = metric_sums.get(key, 0.0) + val
 
         out[split] = {
-            'total_loss': total_loss_sum / eval_iters,
-            'logged_losses': {key: val / eval_iters for key, val in log_dict_sums.items()},
-            'metrics': {key: val / eval_iters for key, val in metric_sums.items()},
+            'total_loss': (total_loss_sum / eval_iters).item(),
+            'logged_losses': {key: (val / eval_iters).item() for key, val in log_dict_sums.items()},
+            'metrics': {key: (val / eval_iters).item() for key, val in metric_sums.items()},
         }
     model.train()
     return out
@@ -237,6 +239,10 @@ def train(cfg: DictConfig):
         iter_num = checkpoint['iter_num'] + 1
         best_val_loss = checkpoint['best_val_loss']
         start_epoch = checkpoint.get('epoch', 0)
+
+        # Subsequent checkpoints must save the cfg the model was actually built with,
+        # not the (possibly drifted) Hydra cfg captured above on resume.
+        model_cfg_dict = checkpoint['model_cfg']
         start_batch_idx = checkpoint.get('batch_idx', 0) # Already points to the next batch due to pre-fetch
 
     model.to(device)
@@ -446,9 +452,10 @@ def train(cfg: DictConfig):
                     "train/time": dt * 1000,
                     "train/lr": lr
                 }
-                # Log individual balanced loss components as well
+                # Log individual balanced loss components as well — .item() here
+                # (inside log_interval) so we don't sync the GPU every step.
                 for k, v in logged_losses.items():
-                    log_payload[f"train/losses/{k}"] = v
+                    log_payload[f"train/losses/{k}"] = v.item()
                 for k, v in metrics.items():
                     log_payload[f"train/{k}"] = v.item()
 
@@ -465,7 +472,7 @@ def train(cfg: DictConfig):
             if cfg.setup.loss_analysis_run:
                 for k, v in logged_losses.items():
                     if not k.endswith("_weighted"):
-                        loss_analysis_accumulators[k] = loss_analysis_accumulators.get(k, 0.0) + v
+                        loss_analysis_accumulators[k] = loss_analysis_accumulators.get(k, 0.0) + v.item()
                 for k, v in metrics.items():
                     loss_analysis_accumulators[k] = loss_analysis_accumulators.get(k, 0.0) + v.item()
 
