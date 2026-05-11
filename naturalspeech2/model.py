@@ -368,6 +368,8 @@ class NaturalSpeech2Model(nn.Module):
         phoneme_tokens: torch.Tensor,            # [B, P]        | text to synthesize, phonemized + tokenized
         phoneme_tokens_mask: torch.Tensor,       # [B, P, 1]     | True/False
         phoneme_tokens_lengths: torch.Tensor,    # [B]
+
+        sampling_steps: int | None = None,       # override the model's configured default for this call
     ):
         # 1. Build speech prompt from reference audio.
         reference_latents, reference_latents_lengths, _ = self.encodec.get_latents(  # [B, Fp, D], [B]
@@ -441,6 +443,7 @@ class NaturalSpeech2Model(nn.Module):
             condition_mask=frame_mask,
             prompt_encodings=prompt_encodings,
             prompt_encodings_mask=prompt_encodings_mask,
+            sampling_steps=sampling_steps,
         )
 
         # 6. Decode latents to waveform.

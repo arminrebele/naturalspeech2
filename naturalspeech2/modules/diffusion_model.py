@@ -265,6 +265,7 @@ class DiffusionModel(nn.Module):
             condition_mask,             # [B, Ft, 1] bool
             prompt_encodings,           # [B, Fp, D]
             prompt_encodings_mask,      # [B, Fp, 1] bool
+            sampling_steps: int | None = None,
     ):
         # Probability-flow ODE reverse solve of the VP-SDE, Euler steps over [1, ε].
         #
@@ -272,6 +273,8 @@ class DiffusionModel(nn.Module):
         #   z_{t-Δt} = z_t + Δt·½β(t)·(√ᾱ(t)·ẑ₀ − ᾱ(t)·z_t) / (1 − ᾱ(t))
         #
         # z_T ~ N(0, τ⁻¹·I) with τ = sampling_temperature (paper §4.3).
+        n_steps = sampling_steps if sampling_steps is not None else self.sampling_steps
+
         B, Ft, _ = condition.shape
         device = condition.device
         float_mask = condition_mask.to(torch.float32)
@@ -285,9 +288,9 @@ class DiffusionModel(nn.Module):
             prompt_encodings_mask,
         )
 
-        timesteps = torch.linspace(1.0, self.timestep_eps, self.sampling_steps + 1, device=device, dtype=torch.float32)
+        timesteps = torch.linspace(1.0, self.timestep_eps, n_steps + 1, device=device, dtype=torch.float32)
 
-        for i in range(self.sampling_steps):
+        for i in range(n_steps):
             t_scalar = timesteps[i]
             dt = t_scalar - timesteps[i + 1]
             t = t_scalar.expand(B)
