@@ -136,7 +136,7 @@ class DiffusionModel(nn.Module):
             beta_max: float = 20.0,
             sampling_steps: int = 150,
             sampling_temperature: float = 1.44,
-            score_loss_weight: float = 0.1,
+            score_loss_weight: float = 1.0,
             score_eps: float = 0.05,            # per-sample timestep gate -> any sample with t < score_eps is excluded from the score loss to prevent instability from large reweighting factors at low t
             ce_rvq_loss_weight: float = 0.1,    # λ_ce-rvq
             timestep_eps: float = 1e-3,

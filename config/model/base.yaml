@@ -78,7 +78,7 @@ diffusion_model:
   beta_max: 20.0
   sampling_steps: 150
   sampling_temperature: 1.44     # τ = 1.2² — initial noise ~ N(0, τ⁻¹·I)
-  score_loss_weight: 0.1
+  score_loss_weight: 1.0    # paper Eq. 4. If first GPU runs show score loss numerically dominates data loss (compare train/diffusion/score_loss vs train/diffusion/data_loss in wandb), drop to 0.1 as a stabiliser — see CLAUDE.md's Phase 2 score loss note for the reweighting math.
   score_eps: 0.05
   ce_rvq_loss_weight: 0.1
   timestep_eps: 0.001

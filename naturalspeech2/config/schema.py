@@ -84,7 +84,7 @@ class DiffusionModelConfig:
     beta_max: float = 20.0
     sampling_steps: int = 150
     sampling_temperature: float = 1.44
-    score_loss_weight: float = 0.1
+    score_loss_weight: float = 1.0
     score_eps: float = 0.05
     ce_rvq_loss_weight: float = 0.1
     timestep_eps: float = 1e-3
