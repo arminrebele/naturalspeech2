@@ -26,7 +26,7 @@ def benchmark(cfg: DictConfig):
 
     if not torch.cuda.is_available():
         raise RuntimeError("NVIDIA GPU required for benchmarking.")
-    device = cfg.training.device 
+    device = cfg.setup.device
 
     logger.info("--- Initializing Dataset ---")
     dataset = DatasetWrapper(
@@ -98,8 +98,8 @@ def benchmark(cfg: DictConfig):
         start_iter = time.perf_counter()
         
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            outputs = model(**batch)
-            loss, _, _ = loss_wrapper(outputs, step=i)
+            loss_dict, _ = model(**batch)
+            loss, _, _ = loss_wrapper(loss_dict, step=i)
             
         # Time DataLoader Pre-fetch
         start_data = time.perf_counter()

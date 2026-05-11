@@ -70,7 +70,7 @@ def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, ba
     
     from naturalspeech2.model import NaturalSpeech2Model
     from naturalspeech2.config.schema import model_cfg_from_omegaconf
-    device = cfg.training.device
+    device = cfg.setup.device
 
     try:
         model_cfg = model_cfg_from_omegaconf(cfg.model)
@@ -91,8 +91,8 @@ def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, ba
         for _ in range(5):
             batch = generate_dummy_batch(batch_size, audio_samples, phoneme_samples, vocab_size, device)
             optimizer.zero_grad(set_to_none=True)
-            outputs = model(**batch)
-            loss, _ = loss_wrapper(outputs)
+            loss_dict, _ = model(**batch)
+            loss, _, _ = loss_wrapper(loss_dict)
             loss.backward()
             optimizer.step()
             torch.cuda.synchronize()

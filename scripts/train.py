@@ -78,28 +78,32 @@ def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, dev
         loader_iter = iter(loader)
         total_loss_sum = 0.0
         log_dict_sums = {}
-        
+        metric_sums = {}
+
         for k in range(eval_iters):
             try:
                 batch = next(loader_iter)
             except StopIteration:
                 loader_iter = iter(loader)
                 batch = next(loader_iter)
-                
+
             for k_b, v in batch.items():
                 batch[k_b] = v.to(device, non_blocking=True)
-                    
+
             with torch.autocast(device_type=device.split(':')[0], dtype=torch.bfloat16):
-                loss_dict = model(**batch)
+                loss_dict, metrics = model(**batch)
                 total_loss, logged_losses, _ = loss_wrapper(loss_dict)
-                
+
             total_loss_sum += total_loss.item()
             for key, val in logged_losses.items():
                 log_dict_sums[key] = log_dict_sums.get(key, 0.0) + val
-                
+            for key, val in metrics.items():
+                metric_sums[key] = metric_sums.get(key, 0.0) + val.item()
+
         out[split] = {
             'total_loss': total_loss_sum / eval_iters,
-            'logged_losses': {key: val / eval_iters for key, val in log_dict_sums.items()}
+            'logged_losses': {key: val / eval_iters for key, val in log_dict_sums.items()},
+            'metrics': {key: val / eval_iters for key, val in metric_sums.items()},
         }
     model.train()
     return out
@@ -312,26 +316,34 @@ def train(cfg: DictConfig):
                     eval_payload[f"eval/train/losses/{k}"] = v
                 for k, v in losses['val']['logged_losses'].items():
                     eval_payload[f"eval/val/losses/{k}"] = v
+                for k, v in losses['train']['metrics'].items():
+                    eval_payload[f"eval/train/{k}"] = v
+                for k, v in losses['val']['metrics'].items():
+                    eval_payload[f"eval/val/{k}"] = v
 
                 # --- Generation Testing ---
                 logger.info("Generating audio samples for evaluation...")
-                
+
+                # estimate_loss() flips back to train mode before returning; bracket the
+                # sampling loop in eval mode so dropout (prompt encoder, predictors,
+                # WaveNet blocks) doesn't perturb inference.
+                unoptimized_model.eval()
                 wandb_audios = []
                 num_gen_samples = min(4, len(val_dataset))
                 test_indices = random.sample(range(len(val_dataset)), num_gen_samples)
-                
+
                 for i, idx in enumerate(test_indices):
                     sample = val_dataset[idx]
                     tokens = custom_prompt_tokens[i % len(custom_prompt_tokens)]
-                    
+
                     # Add batch dimension
                     ref_audio = rearrange(sample["audio"], 't -> 1 t').to(device)
                     ref_audio_len = torch.tensor([sample["audio_length"]]).to(device)
-                    
+
                     ph_tokens = rearrange(torch.tensor(tokens), 'p -> 1 p').to(device)
                     ph_tokens_len = torch.tensor([len(tokens)]).to(device)
                     ph_tokens_mask = torch.ones((1, len(tokens), 1), dtype=torch.bool, device=device)
-                    
+
                     gen_kwargs = {
                         "reference_audio": ref_audio,
                         "reference_audio_lengths": ref_audio_len,
@@ -339,15 +351,16 @@ def train(cfg: DictConfig):
                         "phoneme_tokens_mask": ph_tokens_mask,
                         "phoneme_tokens_lengths": ph_tokens_len
                     }
-                    
-                    # Unbatched generation (Batch size 1)
-                    generated_audio = unoptimized_model.generate(**gen_kwargs)
-                    
+
+                    # Unbatched generation (Batch size 1) — audio_lengths unused since B=1
+                    generated_audio, _ = unoptimized_model.generate(**gen_kwargs)
+
                     audio_np = generated_audio[0].cpu().to(torch.float32).numpy()
                     wandb_audios.append(
                         wandb.Audio(audio_np, sample_rate=cfg.dataloader.sampling_rate, caption=f"Gen Sample {i}")
                     )
-                    
+                unoptimized_model.train()
+
                 eval_payload["eval/generated_samples"] = wandb_audios
                 
                 wandb.log(eval_payload)
@@ -372,7 +385,7 @@ def train(cfg: DictConfig):
         # Forward & Backward Pass
         # -----------------------------
         with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-            loss_dict = model(**batch)
+            loss_dict, metrics = model(**batch)
             loss, logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num)
             
         # Asynchronous pre-fetch of the next batch while backward pass computes
@@ -436,21 +449,25 @@ def train(cfg: DictConfig):
                 # Log individual balanced loss components as well
                 for k, v in logged_losses.items():
                     log_payload[f"train/losses/{k}"] = v
-                    
+                for k, v in metrics.items():
+                    log_payload[f"train/{k}"] = v.item()
+
                 # Perform expensive gradient analysis only when logging
                 if cfg.setup.gradient_analysis_run:
                     for k, v in grad_norms.items():
                         log_payload[f"train/grad_norms/{k}"] = v
                     for k, v in cos_sims.items():
                         log_payload[f"train/cos_sims/{k}"] = v
-                    
+
                 wandb.log(log_payload)
-                
+
             # Accumulate unweighted raw losses exclusively for the analysis table
             if cfg.setup.loss_analysis_run:
                 for k, v in logged_losses.items():
                     if not k.endswith("_weighted"):
                         loss_analysis_accumulators[k] = loss_analysis_accumulators.get(k, 0.0) + v
+                for k, v in metrics.items():
+                    loss_analysis_accumulators[k] = loss_analysis_accumulators.get(k, 0.0) + v.item()
 
     # -----------------------------
     # Loss Analysis Summary Dump

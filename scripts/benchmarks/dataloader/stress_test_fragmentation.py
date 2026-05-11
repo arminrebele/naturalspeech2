@@ -21,7 +21,7 @@ def stress_test(cfg: DictConfig):
     log_file = Path(__file__).parent / "stress_test_fragmentation.log"
     setup_file_logger(logger, log_file, mode="w", format_str="%(message)s")
 
-    device = cfg.training.device
+    device = cfg.setup.device
     
     bucket_mapping = cfg.dataloader.bucket_mapping
 
@@ -69,8 +69,8 @@ def stress_test(cfg: DictConfig):
         
         try:
             optimizer.zero_grad(set_to_none=True)
-            outputs = model(**batch)
-            loss, _ = loss_wrapper(outputs)
+            loss_dict, _ = model(**batch)
+            loss, _, _ = loss_wrapper(loss_dict)
             loss.backward()
             optimizer.step()
             torch.cuda.synchronize()

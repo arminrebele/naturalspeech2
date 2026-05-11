@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from naturalspeech2.config.schema import ModelConfig
-from naturalspeech2.modules.encodec import EncodecWrapper
+from naturalspeech2.modules.encodec import EncodecWrapper, ENCODER_HOP_LENGTH
 from naturalspeech2.modules.log_mel_spectrogram import LogMelSpectrogramGenerator
 from naturalspeech2.modules.phoneme_encoder import PhonemeEncoder
 from naturalspeech2.modules.aligner import Aligner, ForwardSumLoss, BinLoss
@@ -337,7 +337,7 @@ class NaturalSpeech2Model(nn.Module):
         )  # [B, F]
         pitch_predictor_loss = (pitch_loss_per_frame * pitch_loss_mask).sum() / pitch_loss_mask.sum().clamp(min=1.0)
 
-        diffusion_loss, _diffusion_metrics = self.diffusion_model(
+        diffusion_loss, diffusion_metrics = self.diffusion_model(
             target_latents,           # [B, Ft, latent_dim]
             target_latents_mask,      # [B, Ft, 1]
             prompt_encodings,         # [B, Fp, D]
@@ -347,7 +347,7 @@ class NaturalSpeech2Model(nn.Module):
             codebook_embeddings=self.encodec.codebook_embeddings,       # [Q, K, latent_dim]
         )
 
-        return {
+        loss_dict = {
             "diffusion_loss": diffusion_loss,
             "duration_predictor_loss": duration_predictor_loss,
             "pitch_predictor_loss": pitch_predictor_loss,
@@ -356,6 +356,8 @@ class NaturalSpeech2Model(nn.Module):
                 "bin_loss": bin_loss,
             }
         }
+        metrics = {f"diffusion/{k}": v for k, v in diffusion_metrics.items()}
+        return loss_dict, metrics
 
     @torch.no_grad()
     def generate(
@@ -366,9 +368,6 @@ class NaturalSpeech2Model(nn.Module):
         phoneme_tokens: torch.Tensor,            # [B, P]        | text to synthesize, phonemized + tokenized
         phoneme_tokens_mask: torch.Tensor,       # [B, P, 1]     | True/False
         phoneme_tokens_lengths: torch.Tensor,    # [B]
-
-        num_diffusion_steps: int = 150,
-        cfg_scale: float = 1.0,
     ):
         # 1. Build speech prompt from reference audio.
         reference_latents, reference_latents_lengths, _ = self.encodec.get_latents(  # [B, Fp, D], [B]
@@ -436,17 +435,21 @@ class NaturalSpeech2Model(nn.Module):
             frame_mask,
         )
 
-        # 5. Diffusion sampling — pending diffusion model implementation.
-        # Planned call signature:
-        #   generated_latents = self.diffusion_model.sample(
-        #       condition=condition,                    # [B, F', D]
-        #       condition_mask=frame_mask,              # [B, F', 1]
-        #       prompt=prompt_encodings,                # [B, Fp, D]
-        #       prompt_mask=prompt_encodings_mask,      # [B, Fp, 1]
-        #       num_steps=num_diffusion_steps,
-        #       cfg_scale=cfg_scale,
-        #   )  # [B, F', D]
-        # 6. Decode via self.encodec.decode_from_latents(generated_latents).
+        # 5. Diffusion sampling.
+        generated_latents = self.diffusion_model.sample(                          # [B, F', latent_dim]
+            condition=condition,
+            condition_mask=frame_mask,
+            prompt_encodings=prompt_encodings,
+            prompt_encodings_mask=prompt_encodings_mask,
+        )
+
+        # 6. Decode latents to waveform.
+        generated_audio = self.encodec.decode_from_latents(generated_latents)     # [B, 1, T]
+        generated_audio = rearrange(generated_audio, 'b 1 t -> b t')              # [B, T]
+        # T is the max-padded length; per-sample valid lengths let callers trim
+        # away decoder output beyond each item's frame_lengths (matters for B>1).
+        audio_lengths = frame_lengths * ENCODER_HOP_LENGTH                        # [B]
+        return generated_audio, audio_lengths
 
     def configure_optimizers(self, weight_decay, learning_rate, betas):
         # Start with all candidate parameters

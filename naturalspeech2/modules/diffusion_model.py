@@ -258,6 +258,59 @@ class DiffusionModel(nn.Module):
 
         return loss, metrics
 
+    @torch.no_grad()
+    def sample(
+            self,
+            condition,                  # [B, Ft, D]
+            condition_mask,             # [B, Ft, 1] bool
+            prompt_encodings,           # [B, Fp, D]
+            prompt_encodings_mask,      # [B, Fp, 1] bool
+    ):
+        # Probability-flow ODE reverse solve of the VP-SDE, Euler steps over [1, ε].
+        #
+        #   dz/dt   = -½β(t)·(√ᾱ(t)·ẑ₀ − ᾱ(t)·z_t) / (1 − ᾱ(t))
+        #   z_{t-Δt} = z_t + Δt·½β(t)·(√ᾱ(t)·ẑ₀ − ᾱ(t)·z_t) / (1 − ᾱ(t))
+        #
+        # z_T ~ N(0, τ⁻¹·I) with τ = sampling_temperature (paper §4.3).
+        B, Ft, _ = condition.shape
+        device = condition.device
+        float_mask = condition_mask.to(torch.float32)
+
+        z = torch.randn(B, Ft, self.latent_dim, device=device, dtype=torch.float32)
+        z = z / math.sqrt(self.sampling_temperature)
+        z = z * float_mask
+
+        prompt_summary_tokens = self._compute_prompt_summary_tokens(
+            prompt_encodings,
+            prompt_encodings_mask,
+        )
+
+        timesteps = torch.linspace(1.0, self.timestep_eps, self.sampling_steps + 1, device=device, dtype=torch.float32)
+
+        for i in range(self.sampling_steps):
+            t_scalar = timesteps[i]
+            dt = t_scalar - timesteps[i + 1]
+            t = t_scalar.expand(B)
+
+            z0_hat = self._predict_z0(
+                z,
+                condition_mask,
+                t,
+                condition,
+                prompt_summary_tokens,
+            ).float()
+
+            alpha_bar = rearrange(self._alpha_bar(t), 'b -> b 1 1')
+            sqrt_alpha_bar = alpha_bar.sqrt()
+            one_minus_alpha_bar = (1.0 - alpha_bar).clamp(min=1e-5)
+            beta = rearrange(self._beta(t), 'b -> b 1 1')
+
+            drift = 0.5 * beta * (sqrt_alpha_bar * z0_hat - alpha_bar * z) / one_minus_alpha_bar
+            z = z + dt * drift
+            z = z * float_mask
+
+        return z
+
     def _compute_prompt_summary_tokens(
             self,
             prompt_encodings,           # [B, Fp, D]
@@ -359,11 +412,13 @@ class DiffusionModel(nn.Module):
             self,
             t,  # [] or [B]
     ):
-        # ∫₀ᵗ β(s) ds = t · β_min + ½ t² (β_max − β_min)
-        # α̅(t)       = exp(−½ ∫₀ᵗ β(s) ds)   — paper Eq. (3)
+        # Standard VP-SDE convention: α̅(t) = exp(−∫₀ᵗ β(s) ds), with
+        # ∫₀ᵗ β(s) ds = t · β_min + ½ t² (β_max − β_min). Forward marginal
+        # z_t = √α̅·z₀ + √(1 − α̅)·ε then matches the paper (ρ(z₀,t) = √α̅·z₀,
+        # Σ_t = 1 − α̅).
         t = t.float()
         integral_beta = t * self.beta_min + 0.5 * t.square() * (self.beta_max - self.beta_min)
-        return torch.exp(-0.5 * integral_beta)
+        return torch.exp(-integral_beta)
 
     def _beta(
             self,
