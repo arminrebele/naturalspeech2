@@ -131,7 +131,7 @@ Even though batch sizes might be stable individually, dynamically jumping betwee
 python scripts/benchmarks/dataloader/stress_test_fragmentation.py
 ```
 
-*If it passes, the output will yield a safe bucket mapping configuration that you should paste directly into your Hydra `config` setup, in case the setting from the previous step led to an OOM during the stress-test.*
+*If it passes, the output will yield a safe bucket mapping configuration that you should paste directly into your Hydra [config](config/dataloader/), in case the setting from the previous step led to an OOM during the stress-test.*
 
 **4. Dataloader Optimization**  
 

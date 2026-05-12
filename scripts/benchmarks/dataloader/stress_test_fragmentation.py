@@ -1,7 +1,6 @@
 import os
 import re
 import random
-import time
 import logging
 from pathlib import Path
 import torch
@@ -19,12 +18,23 @@ logger = logging.getLogger(__name__)
 
 @hydra.main(version_base=None, config_path="../../../config", config_name="config")
 def stress_test(cfg: DictConfig):
-    log_file = Path(__file__).parent / "stress_test_fragmentation.log"
+    log_file = Path("research/benchmarks/stress_test_fragmentation.log")
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     setup_file_logger(logger, log_file, mode="w", format_str="%(message)s")
 
     device = cfg.setup.device
     
-    bucket_mapping = cfg.dataloader.bucket_mapping
+    sorted_buckets = sorted(cfg.dataloader.bucket_mapping, key=lambda x: x.audio_length)
+    enhanced_buckets = []
+    min_audio_len = 1
+    for b in sorted_buckets:
+        enhanced_buckets.append({
+            "audio_length": b.audio_length,
+            "phoneme_length": b.phoneme_length,
+            "batch_size": b.batch_size,
+            "min_audio_samples": min_audio_len
+        })
+        min_audio_len = b.audio_length + 1
 
     vocab_path = cfg.dataset.token_vocabulary_path
     if vocab_path is None:
@@ -46,9 +56,15 @@ def stress_test(cfg: DictConfig):
         token_vocabulary_size=vocab_size,
         sampling_rate=cfg.dataloader.sampling_rate,
     ).to(device)
+
     logger.info("Compiling model (This will cache multiple graphs during the loop)...")
+    unoptimized_model = model
     model = torch.compile(model)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=True)
+    optimizer = model.configure_optimizers(
+        cfg.training.weight_decay, 
+        cfg.training.learning_rate, 
+        (cfg.training.beta1, cfg.training.beta2)
+    )
     
     loss_wrapper = LossWrapper(
         loss_weights=OmegaConf.to_container(cfg.model.loss_weights, resolve=True),
@@ -58,58 +74,75 @@ def stress_test(cfg: DictConfig):
     num_iterations = 500
     logger.info(f"\nStarting {num_iterations} iterations of forced shape fragmentation...")
     
-    start_time = time.time()
     for i in tqdm(range(num_iterations)):
         # Randomly select a shape to force maximum dynamic memory allocation jumping
-        bucket = random.choice(bucket_mapping)
+        bucket = random.choice(enhanced_buckets)
         
         batch = generate_dummy_batch(
-            batch_size=bucket.batch_size, 
-            audio_samples=bucket.audio_length,
-            phoneme_samples=bucket.phoneme_length,
+            batch_size=bucket["batch_size"], 
+            audio_samples=bucket["audio_length"],
+            phoneme_samples=bucket["phoneme_length"],
+            min_audio_samples=bucket["min_audio_samples"],
             vocab_size=vocab_size,
             device=device
         )
         
         try:
-            optimizer.zero_grad(set_to_none=True)
-            loss_dict, _ = model(**batch)
-            loss, _, _ = loss_wrapper(loss_dict)
+            if i == 0:
+                logger.info("\n--- Pre-flight Graph Break Analysis ---")
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    explanation = torch._dynamo.explain(unoptimized_model, **batch)
+                logger.info(f"Graph Breaks caused by code: {explanation.graph_break_count} (Expected: 1 for the Aligner)")
+                if explanation.graph_break_count != 1:
+                    logger.warning("⚠️ UNEXPECTED NUMBER OF GRAPH BREAKS DETECTED!")
+                elif explanation.graph_break_count > 0:
+                    for reason in explanation.break_reasons:
+                        logger.info(f"  - {reason}")
+                logger.info("---------------------------------------\n")
+
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                loss_dict, _ = model(**batch)
+                loss, _, _ = loss_wrapper(loss_dict)
+                
             loss.backward()
+            
+            if cfg.training.grad_clip != 0.0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
+                
             optimizer.step()
-            torch.cuda.synchronize()
+            optimizer.zero_grad(set_to_none=True)
+            torch.cuda.synchronize(device)
+
         except RuntimeError as e:
             if "out of memory" in str(e).lower():
                 logger.error(f"\n❌ OOM ERROR CAUGHT AT ITERATION {i + 1}/{num_iterations}!")
-                logger.error(f"Failed on Bucket Shape: {bucket.audio_length} audio samples, {bucket.phoneme_length} phonemes, Batch Size: {bucket.batch_size}")
-                logger.error(f"Peak VRAM Reserved: {torch.cuda.max_memory_reserved() / 1024**3:.2f} GB")
-                logger.error(f"Peak VRAM Allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+                logger.error(f"Failed on Bucket Shape: {bucket['audio_length']} audio samples, {bucket['phoneme_length']} phonemes, Batch Size: {bucket['batch_size']}")
+                logger.error(f"Peak VRAM Reserved: {torch.cuda.max_memory_reserved(device) / 1024**3:.2f} GB")
+                logger.error(f"Peak VRAM Allocated: {torch.cuda.max_memory_allocated(device) / 1024**3:.2f} GB")
                 logger.error("\n--- CUDA Memory Summary ---")
                 logger.error(torch.cuda.memory_summary(device=device, abbreviated=True))
                 raise e
             else:
                 raise e
         
-    total_time = time.time() - start_time
     logger.info(f"\n✅ STRESS TEST PASSED SUCCESSFULLY!")
     logger.info(f"Model survived {num_iterations} random shape jumps without memory fragmentation failure.")
-    logger.info(f"Total Time: {total_time:.2f}s | Avg Step: {(total_time/num_iterations)*1000:.1f}ms")
-    logger.info(f"Peak VRAM Reserved: {torch.cuda.max_memory_reserved() / 1024**3:.2f} GB")
-    logger.info(f"Peak VRAM Allocated: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+    logger.info(f"Peak VRAM Reserved: {torch.cuda.max_memory_reserved(device) / 1024**3:.2f} GB")
+    logger.info(f"Peak VRAM Allocated: {torch.cuda.max_memory_allocated(device) / 1024**3:.2f} GB")
 
-    logger.info("\n--- Torch.Compile Summary ---")
+    logger.info("\n========== TORCH.COMPILE STATUS ==========")
     counters = torch._dynamo.utils.counters
+    graph_breaks = counters.get("graph_break", {})
+    total_breaks = sum(graph_breaks.values())
     
-    if "stats" in counters and "unique_graphs" in counters["stats"]:
-        num_graphs = counters["stats"]["unique_graphs"]
-        logger.info(f"Total Unique Graphs Compiled: {num_graphs}")
-        
-        if num_graphs > len(bucket_mapping):
-            logger.warning(f"⚠️ WARNING: Number of compiled graphs ({num_graphs}) exceeds number of buckets ({len(bucket_mapping)}). Graph breaks or dynamic value recompiles are occurring!")
-        else:
-            logger.info("✅ Compilation efficiency is optimal (Graphs <= Buckets).")
-    else:
-        logger.info(f"Dynamo Counters: {dict(counters)}")
+    num_buckets = len(enhanced_buckets)
+    
+    logger.info(f"Total Traced Graph Breaks: {total_breaks} (Expected: {num_buckets} buckets * 1 code break = {num_buckets})")
+    if total_breaks == num_buckets:
+        logger.info("✅ No leaking shapes and exactly 1 intended graph break detected.")
+    elif total_breaks > num_buckets:
+        logger.warning("⚠️ WARNING: Too many traces! Either new graph breaks were introduced, or batch shapes are leaking.")
+    logger.info("==========================================\n")
 
 if __name__ == "__main__":
     # Enable PyTorch Memory Expansion to heavily mitigate fragmentation
