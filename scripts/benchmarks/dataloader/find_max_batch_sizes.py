@@ -21,14 +21,15 @@ def generate_dummy_batch(
     batch_size: int, 
     audio_samples: int, 
     phoneme_samples: int, 
+    min_audio_samples: int,
     vocab_size: int,
     device: str
 ) -> dict[str, torch.Tensor]:
     
     """Generates dummy tensors representing perfectly bucketed sequences."""
 
-    # Simulate real-world variation within the bucket to test torch.compile dynamics
-    audio_lengths = torch.randint(max(1, audio_samples // 2), audio_samples + 1, (batch_size,), device=device)
+    # Audio lengths are strictly bounded by the previous bucket's maximum
+    audio_lengths = torch.randint(min_audio_samples, audio_samples + 1, (batch_size,), device=device)
     # Force at least one sequence to hit the max bucket boundary
     audio_lengths[0] = audio_samples
     idx_a = rearrange(torch.arange(audio_samples, device=device), 't -> 1 t')
@@ -40,6 +41,8 @@ def generate_dummy_batch(
     
     audio_mask = rearrange(audio_mask_2d, 'b t -> b t 1')
     
+    # Phoneme lengths are NOT strictly bounded by previous buckets (fast vs slow speakers)
+    # So we maintain a generous variance down to half the bucket's max length
     phoneme_tokens_lengths = torch.randint(max(1, phoneme_samples // 2), phoneme_samples + 1, (batch_size,), device=device)
     phoneme_tokens_lengths[0] = phoneme_samples
     idx_p = rearrange(torch.arange(phoneme_samples, device=device), 't -> 1 t')
@@ -53,7 +56,11 @@ def generate_dummy_batch(
 
     # Dummy pitch in Hz, frame-aligned to the mel/encodec grid
     frame_count = (audio_samples + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
+    frame_lengths = (audio_lengths + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
+    idx_f = rearrange(torch.arange(frame_count, device=device), 't -> 1 t')
+    pitch_mask = idx_f < rearrange(frame_lengths, 'b -> b 1')
     pitch = torch.rand(batch_size, frame_count, device=device) * 300.0 + 80.0  # ~80..380 Hz
+    pitch = pitch.masked_fill(~pitch_mask, 0.0)
 
     return {
         "audio": audio,
@@ -65,7 +72,7 @@ def generate_dummy_batch(
         "pitch": pitch,
     }
 
-def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, batch_size: int, vocab_size: int) -> None:
+def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, min_audio_samples: int, batch_size: int, vocab_size: int) -> None:
     
     """The isolated process that runs the actual model to test VRAM limits."""
     
@@ -81,21 +88,32 @@ def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, ba
             sampling_rate=cfg.dataloader.sampling_rate,
         ).to(device)
         model = torch.compile(model)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4, fused=True)
+        optimizer = model.configure_optimizers(
+            cfg.training.weight_decay, 
+            cfg.training.learning_rate, 
+            (cfg.training.beta1, cfg.training.beta2)
+        )
         
         loss_wrapper = LossWrapper(
             loss_weights=OmegaConf.to_container(cfg.model.loss_weights, resolve=True),
             loss_warmup_steps=OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
         ).to(device)
         
-        # Perform 5 forward/backward steps to ensure steady-state memory allocation
-        for _ in range(5):
-            batch = generate_dummy_batch(batch_size, audio_samples, phoneme_samples, vocab_size, device)
-            optimizer.zero_grad(set_to_none=True)
-            loss_dict, _ = model(**batch)
-            loss, _, _ = loss_wrapper(loss_dict)
+        # Perform 10 forward/backward steps to ensure steady-state memory allocation
+        for _ in range(10):
+            batch = generate_dummy_batch(batch_size, audio_samples, phoneme_samples, min_audio_samples, vocab_size, device)
+
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                loss_dict, _ = model(**batch)
+                loss, _, _ = loss_wrapper(loss_dict)
+                
             loss.backward()
+            
+            if cfg.training.grad_clip != 0.0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
+                
             optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
             torch.cuda.synchronize()
             
         peak_alloc = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
@@ -110,7 +128,7 @@ def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, ba
         else:
             raise e     # Unexpected error
 
-def test_batch_size(audio_samples: int, phoneme_samples: int, batch_size: int, vocab_size: int) -> tuple[bool, float, float]:
+def test_batch_size(audio_samples: int, phoneme_samples: int, min_audio_samples: int, batch_size: int, vocab_size: int) -> tuple[bool, float, float]:
     
     """Spawns the worker script and returns (Success, Peak_Alloc_GB, Peak_Reserved_GB)."""
 
@@ -119,6 +137,7 @@ def test_batch_size(audio_samples: int, phoneme_samples: int, batch_size: int, v
     env["IS_WORKER"] = "1"
     env["WORKER_AUDIO_SAMPLES"] = str(audio_samples)
     env["WORKER_PHONEME_SAMPLES"] = str(phoneme_samples)
+    env["WORKER_MIN_AUDIO_SAMPLES"] = str(min_audio_samples)
     env["WORKER_BATCH"] = str(batch_size)
     env["WORKER_VOCAB_SIZE"] = str(vocab_size)
     
@@ -149,13 +168,15 @@ def main(cfg: DictConfig) -> None:
             cfg, 
             int(os.environ["WORKER_AUDIO_SAMPLES"]), 
             int(os.environ["WORKER_PHONEME_SAMPLES"]), 
+            int(os.environ["WORKER_MIN_AUDIO_SAMPLES"]),
             int(os.environ["WORKER_BATCH"]),
             int(os.environ["WORKER_VOCAB_SIZE"])
         )
         return
         
     # Setup Orchestrator Logging to File
-    log_file = Path(__file__).parent / "max_batch_sizes_output.log"
+    log_file = Path("research/benchmarks/max_batch_sizes.log")
+    log_file.parent.mkdir(parents=True, exist_ok=True)
     setup_file_logger(logger, log_file, mode="w", format_str="%(message)s")
         
     vocab_path = cfg.dataset.token_vocabulary_path
@@ -171,7 +192,12 @@ def main(cfg: DictConfig) -> None:
     results = []
     
     logger.info("Starting Isolated Max Batch Size Search...\n")
-    for bucket in cfg.dataloader.bucket_mapping:
+    
+    # Sort buckets by audio length to match dataset.py logic perfectly
+    sorted_buckets = sorted(cfg.dataloader.bucket_mapping, key=lambda x: x.audio_length)
+    min_audio_len = 1
+
+    for bucket in sorted_buckets:
         audio_len = bucket.audio_length
         phoneme_len = bucket.phoneme_length
         
@@ -181,7 +207,7 @@ def main(cfg: DictConfig) -> None:
         bs = 2
         last_alloc, last_res = 0.0, 0.0
         while True:
-            success, alloc, res = test_batch_size(audio_len, phoneme_len, bs, vocab_size)
+            success, alloc, res = test_batch_size(audio_len, phoneme_len, min_audio_len, bs, vocab_size)
             if success:
                 last_alloc, last_res = alloc, res
                 bs *= 2
@@ -196,7 +222,7 @@ def main(cfg: DictConfig) -> None:
         
         while low <= high:
             mid = (low + high) // 2
-            success, alloc, res = test_batch_size(audio_len, phoneme_len, mid, vocab_size)
+            success, alloc, res = test_batch_size(audio_len, phoneme_len, min_audio_len, mid, vocab_size)
             if success:
                 max_stable_bs = mid
                 max_alloc, max_res = alloc, res
@@ -221,6 +247,9 @@ def main(cfg: DictConfig) -> None:
         logger.info(f"   -> Peak Allocated VRAM: {max_alloc:.2f} GB")
         logger.info(f"   -> Peak Reserved VRAM:  {max_res:.2f} GB (Fragmentation Overhead: {max_res - max_alloc:.2f} GB)")
         logger.info(f"🟢 Recommended Safe Limit (10% Margin): {safe_bs}\n")
+        
+        # The lower bound for the next bucket is one step above the current bucket's maximum
+        min_audio_len = audio_len + 1
         
     logger.info("="*50)
     logger.info("FINAL RECOMMENDED BUCKET MAPPING (Paste this into default.yaml):")

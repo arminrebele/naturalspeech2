@@ -105,27 +105,33 @@ We highly recommend running these steps before starting a full training run on a
 
 Dynamic batch bucketing relies on grouping sequences by length. Fixed buckets are crucial for maximizing VRAM utilization, utilizing `torch.compile`, and reducing memory fragmentation. This [script](scripts/benchmarks/dataloader/find_optimal_buckets.py) determines the optimal buckets for dynamic batch-bucketing of a specific dataset.
 
+It ultimately logs the found optimal buckets (defined by `audio_samples` and `phoneme_tokens`) for different choices of the total number of buckets *K*. The choice of *K* is a trade-off between the number of different shapes that have to be compiled, and the respective resulting padding waste. 
+
+> **Note:** Paste the found bucket-boundaries for your choice of *K* into the respective [config-files](config/dataloader/) before continuing.
+
 ```bash
 python scripts/benchmarks/dataloader/find_optimal_buckets.py
 ```
 
 **2. Finding Maximum Batch Sizes**
 
-Once your bucket boundaries are defined, you need to assign the respective buckets their [optimal batch size](scripts/benchmarks/dataloader/find_max_batch_sizes.py), as the buckets only contain the optimal sequence length up until that point.
+Once your bucket boundaries are defined, you need to assign the respective buckets their [optimal batch size](scripts/benchmarks/dataloader/find_max_batch_sizes.py), as at that point, the buckets only contain the optimal sequence length.
 
 ```bash
 python scripts/benchmarks/dataloader/find_max_batch_sizes.py
 ```
 
-**3. Stress Testing Memory Fragmentation**
+> **Note:** Paste the bucket-boundaries into the respective [config-files](config/dataloader/) again, to override your values from the previous step. These will represent the *(almost)* final bucket-mapping, since it now includes the found maximum batch-size as well.
 
-Even though batch sizes might be stable individually, dynamically jumping between different shapes during training could trigger memory fragmentation. This [stress test](scripts/benchmarks/dataloader/stress_test_fragmentation.py) makes sure the batch sizes don't lead to an OOM deep into training when specific shapes/buckets follow each other.
+**3. Stress-Testing Memory Fragmentation**
+
+Even though batch sizes might be stable individually, dynamically jumping between different shapes during training could trigger memory fragmentation. This [stress-test](scripts/benchmarks/dataloader/stress_test_fragmentation.py) makes sure the batch sizes don't lead to an OOM deep into training when specific shapes/buckets follow each other.
 
 ```bash
 python scripts/benchmarks/dataloader/stress_test_fragmentation.py
 ```
 
-*If it passes, the output will yield a safe bucket mapping configuration that you can paste directly into your Hydra `config` setup.*
+*If it passes, the output will yield a safe bucket mapping configuration that you should paste directly into your Hydra `config` setup, in case the setting from the previous step led to an OOM during the stress-test.*
 
 **4. Dataloader Optimization**  
 
