@@ -1,8 +1,8 @@
 defaults:
   - _self_
-  - dataset: librispeech
+  - dataset: mls_eng
   - dataloader: default
   - model: base
   - setup: full_run
   - training: full_run
-  - wandb: serious_run
+  - wandb: full_run

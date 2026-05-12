@@ -1,4 +1,4 @@
-name: "LibriSpeech"
+name: "mls_eng"
 source: "parler-tts/mls_eng"
 train_split: "train"                # or "train[:50%]" for a smaller subset
 val_split: "test"

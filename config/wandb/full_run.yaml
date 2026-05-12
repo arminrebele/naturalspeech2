@@ -1,0 +1,4 @@
+log: True
+project: "naturalspeech2"
+group: "main_training"
+run_name: "full_run"
