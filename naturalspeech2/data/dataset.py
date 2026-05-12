@@ -135,15 +135,19 @@ class DatasetWrapper(Dataset):
         self.num_proc_tokenize = num_proc_tokenize
         
         self.dataset_dir = DATA_DIR / self.dataset_name
-        # Remove any special characters or numbers to get the base split name (e.g., "train[:50%]" -> "train")
-        clean_split = re.sub(r'[^a-zA-Z]', '', self.split)
+        # Safely convert the split name into a valid directory name
+        clean_split = self.split.replace("%", "pct")
+        clean_split = re.sub(r'[^a-zA-Z0-9]', '_', clean_split)
+        clean_split = re.sub(r'_+', '_', clean_split).strip('_')
         
-        self.processed_dir = self.dataset_dir / clean_split / "processed"
+        # Ensure OTF and Pre-resampled configs cache to distinct directories to prevent cross-contamination
+        suffix = "otf" if self.resample_on_the_fly else "pre"
+        self.processed_dir = self.dataset_dir / clean_split / f"processed_{suffix}"
         self.resampled_dir = self.dataset_dir / clean_split / "resampled"
         self.cache_dir = self.dataset_dir / clean_split / "cache"
         self.token_vocabulary_path = token_vocabulary_path
         if self.token_vocabulary_path is None:
-            self.token_vocabulary_path = DATA_DIR / f"{self.dataset_name}_token_vocabulary.json"
+            self.token_vocabulary_path = self.dataset_dir / clean_split / "token_vocabulary.json"
         
         # Pre-assign the appropriate get_audio function to avoid if/else overhead in __getitem__
         self._get_audio = self._get_audio_on_the_fly if self.resample_on_the_fly else self._get_audio_pre_resampled
@@ -461,4 +465,3 @@ class BucketedCollateFn:
             "phoneme_tokens_mask": phoneme_tokens_mask, # [B, static_P, 1]
             "phoneme_tokens_lengths": phoneme_tokens_lengths, # [B]
         }
-

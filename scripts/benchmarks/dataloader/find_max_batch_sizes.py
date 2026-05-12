@@ -1,4 +1,5 @@
 import os
+import re
 import sys
 import subprocess
 from pathlib import Path
@@ -159,7 +160,10 @@ def main(cfg: DictConfig) -> None:
         
     vocab_path = cfg.dataset.token_vocabulary_path
     if vocab_path is None:
-        vocab_path = DATA_DIR / f"{cfg.dataset.name}_token_vocabulary.json"
+        clean_split = cfg.dataset.train_split.replace("%", "pct")
+        clean_split = re.sub(r'[^a-zA-Z0-9]', '_', clean_split)
+        clean_split = re.sub(r'_+', '_', clean_split).strip('_')
+        vocab_path = DATA_DIR / cfg.dataset.name / clean_split / "token_vocabulary.json"
         
     tokenizer = PhonemeTokenizer(token_vocabulary_path=str(vocab_path), with_backend=False)
     vocab_size = tokenizer.token_vocabulary_size
