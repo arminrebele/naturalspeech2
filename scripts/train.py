@@ -10,6 +10,7 @@ load_dotenv()
 
 import torch
 from torch.utils.data import DataLoader
+import torch._dynamo
 import wandb
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -25,6 +26,8 @@ from naturalspeech2.paths import CHECKPOINTS_DIR, PROJECT_ROOT
 from naturalspeech2.utils.utils import setup_file_logger
 
 logger = logging.getLogger(__name__)
+
+COMPILE_MILESTONES = [1, 250]
 
 def get_lr(it, cfg):
     learning_rate = cfg.training.learning_rate
@@ -205,7 +208,7 @@ def train(cfg: DictConfig):
     model_cfg_dict = OmegaConf.to_container(cfg.model, resolve=True)
 
     # State initialization variables
-    iter_num = 0
+    start_iter = 0
     best_val_loss = 1e9
     start_epoch = 0
     start_batch_idx = 0
@@ -236,7 +239,7 @@ def train(cfg: DictConfig):
         state_dict = checkpoint['model']
 
         model.load_state_dict(state_dict)
-        iter_num = checkpoint['iter_num'] + 1
+        start_iter = checkpoint['iter_num'] + 1
         best_val_loss = checkpoint['best_val_loss']
         start_epoch = checkpoint.get('epoch', 0)
 
@@ -297,7 +300,7 @@ def train(cfg: DictConfig):
     loss_analysis_accumulators = {}
     t0 = time.perf_counter()
     logger.info("Starting training loop...")
-    for iter_num in range(iter_num, cfg.setup.max_iters):
+    for iter_num in range(start_iter, cfg.setup.max_iters):
         
         # Apply LR scheduling
         lr = get_lr(iter_num, cfg) if cfg.training.decay_lr else cfg.training.learning_rate
@@ -409,6 +412,24 @@ def train(cfg: DictConfig):
             
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
+
+        # -----------------------------
+        # Dynamo Compilation Verdict
+        # -----------------------------
+        if (iter_num - start_iter) in COMPILE_MILESTONES:
+            logger.info(f"\n========== TORCH.COMPILE STATUS (Step {iter_num - start_iter}) ==========")
+            counters = torch._dynamo.utils.counters
+            
+            graph_breaks = counters.get("graph_break", {})
+            total_breaks = sum(graph_breaks.values())
+            num_buckets = len(cfg.dataloader.bucket_mapping)
+            
+            logger.info(f"Total Traced Graph Breaks: {total_breaks} (Expected maximum: {num_buckets} buckets * 1 code break = {num_buckets})")
+            if total_breaks <= num_buckets:
+                logger.info("✅ Batch bucketing is stable and no unintended graph breaks occurred.")
+            else:
+                logger.warning("⚠️ WARNING: Too many traces! Either new graph breaks were introduced, or batch shapes are leaking.")
+            logger.info("==========================================\n")
 
         # -----------------------------
         # Timing & Logging
