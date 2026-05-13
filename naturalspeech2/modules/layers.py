@@ -295,6 +295,11 @@ class Conv1D(nn.Module):
             mask  # [B, T, 1] bool
     ):
         x = x * mask.to(x.dtype)
-        x = rearrange(x, 'b t d -> b d t')
+        # empty_strided + copy_ forces channels-first materialization; .contiguous() after
+        # permute is silently elided by Inductor's clone-elimination pass on PyTorch 2.9.1.
+        x_view = x.permute(0, 2, 1)
+        B, D, T = x_view.shape
+        x = torch.empty_strided((B, D, T), (D * T, T, 1), dtype=x.dtype, device=x.device)
+        x.copy_(x_view)
         x = self.conv1d(x)
-        return rearrange(x, 'b d t -> b t d')
+        return x.permute(0, 2, 1)
