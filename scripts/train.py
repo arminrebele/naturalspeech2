@@ -32,18 +32,30 @@ COMPILE_MILESTONES = [1, 250]
 def get_lr(it, cfg):
     learning_rate = cfg.training.learning_rate
     warmup_iters = cfg.setup.warmup_iters
-    lr_decay_iters = cfg.setup.lr_decay_iters
-    min_lr = cfg.training.min_lr
+    schedule = cfg.training.lr_schedule
 
     if it < warmup_iters:
         return learning_rate * (it + 1) / (warmup_iters + 1)
-    if it > lr_decay_iters:
-        return min_lr
-    
-    decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
-    return min_lr + coeff * (learning_rate - min_lr)
+        
+    elif schedule == "isr":
+        assert warmup_iters > 0, "Inverse square root schedule requires warmup_iters > 0"
+        decay_factor = math.sqrt(warmup_iters / it)
+        return learning_rate * decay_factor
+        
+    elif schedule == "cosine":
+        lr_decay_iters = cfg.setup.lr_decay_iters
+        min_lr = cfg.training.min_lr
+        
+        if it > lr_decay_iters:
+            return min_lr
+        
+        decay_ratio = (it - warmup_iters) / (lr_decay_iters - warmup_iters)
+        assert 0 <= decay_ratio <= 1
+        coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
+        return min_lr + coeff * (learning_rate - min_lr)
+        
+    else:
+        raise ValueError(f"Unknown lr_schedule: {schedule}")
 
 def get_infinite_batches(loader, device, start_epoch=0, start_batch_idx=0, overfit_single_batch=False):
     """Continuously yields batches while tracking and setting dataloader state for instant resuming."""
