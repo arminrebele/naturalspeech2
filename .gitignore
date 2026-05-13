@@ -22,6 +22,7 @@ docker-compose.mergerfs.yml
 outputs/
 multirun/
 scratch/
+wandb/
 
 docs/notes/
 docs/paper/
