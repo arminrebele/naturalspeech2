@@ -140,7 +140,7 @@ def benchmark(cfg: DictConfig):
         # Capture CPU time before blocking for the GPU
         cpu_end = time.perf_counter()
 
-        torch.cuda.synchronize() # Crucial for accurate GPU timing
+        torch.cuda.synchronize(device) # Crucial for accurate GPU timing
         end_iter = time.perf_counter()
 
         if i >= WARMUP_STEPS:

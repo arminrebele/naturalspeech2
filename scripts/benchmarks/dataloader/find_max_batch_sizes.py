@@ -114,7 +114,7 @@ def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, mi
                 
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
-            torch.cuda.synchronize()
+            torch.cuda.synchronize(device)
             
         peak_alloc = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
         peak_res = torch.cuda.max_memory_reserved(device) / (1024 ** 3)
