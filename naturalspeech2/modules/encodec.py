@@ -37,6 +37,7 @@ class EncodecWrapper(nn.Module):
         )  # [Q, K=1024, latent_dim=128] float32
         self.register_buffer('codebook_embeddings', codebook_embeddings, persistent=False)
 
+    @torch.compiler.disable
     @torch.no_grad()
     def encode(
         self,
@@ -60,6 +61,7 @@ class EncodecWrapper(nn.Module):
         # each codebook [codebook_index=0-1023, latent_dim=128]
         return output.audio_codes, output.audio_scales
 
+    @torch.compiler.disable
     @torch.no_grad()
     def get_latents(
         self,
@@ -81,10 +83,12 @@ class EncodecWrapper(nn.Module):
 
         return audio_latents, audio_latents_lengths, codebook_indices
 
+    @torch.compiler.disable
     @torch.no_grad()
     def decode_from_codes(self, codebook_indices, audio_scales):
         return self.model.decode(codebook_indices, audio_scales)
 
+    @torch.compiler.disable
     @torch.no_grad()
     def decode_from_latents(self, latents): # latents: [B, F, D]
         latents = rearrange(latents, "b f d -> b d f").contiguous()  # [B, D, F]
