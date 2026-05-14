@@ -30,5 +30,6 @@ docs/paper-tex/
 
 .claude/
 .codex/
+.vscode/
 
 docs/.obsidian/
