@@ -4,7 +4,7 @@ version = "0.1.0"
 description = ""
 authors = [
   { name = "Armin Rebele", email = "164416228+arminrebele@users.noreply.github.com" },
-  { name = "Lion Pöllath" }
+  { name = "Lion Pöllath", email = "164176075+LionPoellath@users.noreply.github.com" }
 ]
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
