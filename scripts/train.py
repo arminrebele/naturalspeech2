@@ -435,9 +435,11 @@ def train(cfg: DictConfig):
             graph_breaks = counters.get("graph_break", {})
             total_breaks = sum(graph_breaks.values())
             num_buckets = len(cfg.dataloader.bucket_mapping)
-            
-            logger.info(f"Total Traced Graph Breaks: {total_breaks} (Expected maximum: {num_buckets} buckets * 1 code break = {num_buckets})")
-            if total_breaks <= num_buckets:
+            num_disable_points = 2  # encodec.get_latents, aligner.maximum_path_indices
+            expected_breaks = num_buckets * num_disable_points
+
+            logger.info(f"Total Traced Graph Breaks: {total_breaks} (Expected maximum: {num_buckets} buckets * {num_disable_points} disable points = {expected_breaks})")
+            if total_breaks <= expected_breaks:
                 logger.info("✅ Batch bucketing is stable and no unintended graph breaks occurred.")
             else:
                 logger.warning("⚠️ WARNING: Too many traces! Either new graph breaks were introduced, or batch shapes are leaking.")
