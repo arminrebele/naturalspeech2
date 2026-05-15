@@ -140,8 +140,8 @@ class ModelConfig:
     latent_dim: int = 128
     rope_base: float = 10000.0
     rope_max_seq_len: int = 3000
-    min_prompt_pct: float = 0.2
-    max_prompt_pct: float = 0.5
+    prompt_seconds: float = 3.0
+    min_target_seconds: float = 1.0
 
     mel: MelConfig = field(default_factory=MelConfig)
     phoneme_encoder: PhonemeEncoderConfig = field(default_factory=PhonemeEncoderConfig)

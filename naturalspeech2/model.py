@@ -1,4 +1,3 @@
-import math
 from dataclasses import asdict
 
 import torch
@@ -29,8 +28,8 @@ class NaturalSpeech2Model(nn.Module):
         sampling_rate: int,
     ):
         super().__init__()
-        self.min_prompt_pct = cfg.min_prompt_pct
-        self.max_prompt_pct = cfg.max_prompt_pct
+        self.prompt_frames = int(cfg.prompt_seconds * sampling_rate / ENCODER_HOP_LENGTH)
+        self.min_target_frames = int(cfg.min_target_seconds * sampling_rate / ENCODER_HOP_LENGTH)
 
         self.encodec = EncodecWrapper()
 
@@ -115,36 +114,36 @@ class NaturalSpeech2Model(nn.Module):
         audio_latents: torch.Tensor,            # [B, F, D]
         codebook_indices: torch.Tensor,         # [B, F, Q]  | codebook indices per quantizer
         audio_latents_lengths: torch.Tensor,    # [B]
-        min_prompt_pct: float,
-        max_prompt_pct: float,
+        prompt_frames: int,                     # fixed prompt length in frames (e.g. 225 = 3s at 75 Hz)
+        min_target_frames: int,                 # safety net — min target frames preserved on short clips
     ):
         device = audio_latents.device
         B, F, D = audio_latents.shape
 
-        # Compute per-sample prompt length bounds
-        min_lens = (audio_latents_lengths.float() * min_prompt_pct).long().clamp(min=1)  # [B] | minimum number of frames for the speech prompt
-        max_lens = (audio_latents_lengths.float() * max_prompt_pct).long().clamp(min=1)  # [B] | maximum number of frames for the speech prompt
+        # Per-sample prompt length: fixed prompt_frames frames, capped so the target retains
+        # min_target_frames. clamp(min=1) handles degenerate clips shorter than min_target_frames+1.
+        max_allowed_prompt = (audio_latents_lengths - min_target_frames).clamp(min=1)               # [B]
+        prompt_latents_lengths = torch.minimum(                                                     # [B] | number of frames for the speech prompt
+            max_allowed_prompt,
+            audio_latents_lengths.new_full((B,), prompt_frames),
+        )
 
-        # Sample prompt_lengths in [min_lens, max_lens] — one rand call covers both samples (one kernel launch)
-        rand = torch.rand(B, 2, device=device)                                                      # [B, 2]
-        range_lens = (max_lens - min_lens + 1).float()                                              # [B]
-        prompt_latents_lengths = min_lens + (rand[:, 0] * range_lens).floor().long()                # [B] | number of frames for the speech prompt
-
-        # Sample prompt_starts in [0, lengths - prompt_lengths]
+        # Sample prompt_starts in [0, lengths - prompt_lengths]. One rand call per sample — length is deterministic.
+        rand = torch.rand(B, device=device)                                                         # [B]
         max_starts = audio_latents_lengths - prompt_latents_lengths                                 # [B] | maximum starting index for the speech prompt to ensure it fits within the audio latents
-        prompt_starts = (rand[:, 1] * (max_starts + 1).float()).floor().long()                      # [B] | frame index where the prompt starts
+        prompt_starts = (rand * (max_starts + 1).float()).floor().long()                            # [B] | frame index where the prompt starts
         prompt_ends = prompt_starts + prompt_latents_lengths                                        # [B] | frame index where the prompt ends (exclusive)
 
-        # Extract prompt latents
-        max_prompt_len = math.ceil(max_prompt_pct * F)
+        # Extract prompt latents. Buffer width is a Python-int constant — bucket-stable for torch.compile.
+        max_prompt_len = min(prompt_frames, F)
         j_p = rearrange(torch.arange(max_prompt_len, device=device), 'fp -> 1 fp')                              # [1, Fp] | [0, 1, 2, ..., Fp-1] -> relative offset
         prompt_idx = (rearrange(prompt_starts, 'b -> b 1') + j_p).clamp(max=F - 1)                              # [B, Fp] | frame indices for the prompt in the audio latents
         prompt_latents = torch.gather(audio_latents, 1, repeat(prompt_idx, 'b fp -> b fp d', d=D))              # [B, Fp, D]
         prompt_latents_mask = rearrange(j_p < rearrange(prompt_latents_lengths, 'b -> b 1'), 'b fp -> b fp 1')  # [B, Fp, 1]
         prompt_latents = prompt_latents * prompt_latents_mask.to(prompt_latents.dtype)                          # mask out padding frames in the prompt latents
 
-        # Extract target latents
-        max_target_len = F - int(math.floor(min_prompt_pct * F))
+        # Extract target latents. Buffer width is a Python-int constant — bucket-stable for torch.compile.
+        max_target_len = F - max(1, min(prompt_frames, F - min_target_frames))
         j_t = rearrange(torch.arange(max_target_len, device=device), 'ft -> 1 ft')                  # [1, Ft] | [0, 1, 2, ..., Ft-1] 
         target_idx = (                                                                              # [B, Ft]
             j_t
@@ -253,8 +252,8 @@ class NaturalSpeech2Model(nn.Module):
             audio_latents,
             codebook_indices,
             audio_latents_lengths,
-            self.min_prompt_pct,
-            self.max_prompt_pct,
+            self.prompt_frames,
+            self.min_target_frames,
         )
 
         prompt_encodings = self.speech_prompt_encoder(      # [B, Fp, D]

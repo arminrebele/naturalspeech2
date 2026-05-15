@@ -3,8 +3,8 @@ hidden_dim: 512
 latent_dim: 128
 rope_base: 10000.0
 rope_max_seq_len: 3000
-min_prompt_pct: 0.2        # minimum percentage of the audio used as prompt (only training)
-max_prompt_pct: 0.5        # maximum percentage of the audio used as prompt (only training)
+prompt_seconds: 3.0        # fixed prompt length at training; random start position within the clip
+min_target_seconds: 1.0    # safety net — minimum target duration preserved on short clips
 
 # Log Mel Spectrogram Generator
 mel:
