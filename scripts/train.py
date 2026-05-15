@@ -133,6 +133,7 @@ def create_dataloader(cfg, split: str, token_vocabulary_path: str = None):
         token_vocabulary_path=token_vocabulary_path,
         sampling_rate=cfg.dataloader.sampling_rate,
         resample_on_the_fly=cfg.dataloader.resample_on_the_fly,
+        num_proc_pitch=cfg.dataloader.num_proc_pitch,
         num_proc_phonemize=cfg.dataloader.num_proc_phonemize,
         num_proc_tokenize=cfg.dataloader.num_proc_tokenize,
     )

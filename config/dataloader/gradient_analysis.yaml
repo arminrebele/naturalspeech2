@@ -2,6 +2,7 @@
 # NOTE: This config is specifically for the gradient_analysis run.
 # The batch sizes are intentionally set very low to leave VRAM headroom
 
+num_proc_pitch: 4
 num_proc_phonemize: 12
 num_proc_tokenize: 4
 num_workers: 4

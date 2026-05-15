@@ -117,6 +117,7 @@ class DatasetWrapper(Dataset):
         token_vocabulary_path: Optional[str] = None,
         sampling_rate: int = 24000,
         resample_on_the_fly: bool = False,
+        num_proc_pitch: int = 4,
         num_proc_phonemize: int = 24,
         num_proc_tokenize: int = 4,
     ):
@@ -128,9 +129,10 @@ class DatasetWrapper(Dataset):
         self.audio_column = audio_column
         self.filter_column = filter_column
         self.filter_substring = filter_substring
-        
+
         self.sampling_rate = sampling_rate
         self.resample_on_the_fly = resample_on_the_fly
+        self.num_proc_pitch = num_proc_pitch
         self.num_proc_phonemize = num_proc_phonemize
         self.num_proc_tokenize = num_proc_tokenize
         
@@ -194,13 +196,13 @@ class DatasetWrapper(Dataset):
                     extract_f0_and_metadata_batched,
                     batched=True,
                     fn_kwargs={"target_sr": self.sampling_rate},
-                    num_proc=self.num_proc_phonemize,
+                    num_proc=self.num_proc_pitch,
                     desc="Extracting F0 and audio lengths",
                 )
                 dataset.cleanup_cache_files()
             else:
                 logger.info("`resample_on_the_fly` is False. Pre-resampling and saving audio files.")
-                
+
                 # Create the directory for resampled audio
                 self.resampled_dir.mkdir(parents=True, exist_ok=True)
 
@@ -209,7 +211,7 @@ class DatasetWrapper(Dataset):
                     resample_and_save_audio,
                     remove_columns=["audio"],                       # Remove original audio dict column
                     fn_kwargs={"target_sr": self.sampling_rate, "resampled_dir": self.resampled_dir},
-                    num_proc=self.num_proc_phonemize,               # Use the phonemize proc count as it's a heavy task
+                    num_proc=self.num_proc_pitch,                   # Same cost shape as F0 extract (decode + pyworld)
                     desc="Resampling and saving audio",
                 )
                 
