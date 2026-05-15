@@ -406,18 +406,101 @@ def train(cfg: DictConfig):
         # -----------------------------
         # Forward & Backward Pass
         # -----------------------------
-        with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-            loss_dict, metrics = model(**batch)
-            loss, logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num)
-            
-        # Asynchronous pre-fetch of the next batch while backward pass computes
-        batch, current_epoch, current_batch_idx = next(batch_generator)
+        grad_accum_steps = cfg.setup.gradient_accumulation_steps
         
-        grad_norms, cos_sims = {}, {}
-        if cfg.setup.gradient_analysis_run and iter_num % cfg.setup.log_interval == 0:
-            grad_norms, cos_sims = GradientAnalyzer.analyze_gradients(unoptimized_model, optimizer, weighted_tensors)
-
-        loss.backward()
+        accum_loss = torch.zeros((), device=device)
+        accum_logged_losses = {}
+        accum_metrics = {}
+        
+        analyzer = GradientAnalyzer() if (cfg.setup.gradient_analysis_run and iter_num % cfg.setup.log_interval == 0) else None
+        
+        if analyzer:
+            logger.info(f"Performing gradient analysis for step {iter_num} (this takes extra time)...")
+            # 1. Buffer batches for identical sequential forward passes
+            micro_batches = []
+            for _ in range(grad_accum_steps):
+                # Move batch to CPU for buffering so we don't spike VRAM
+                cpu_batch = {k: v.cpu() for k, v in batch.items()}
+                micro_batches.append(cpu_batch)
+                batch, current_epoch, current_batch_idx = next(batch_generator)
+                
+            # Capture RNG states for mathematical fairness during analysis passes
+            cpu_rng_state = torch.get_rng_state()
+            gpu_rng_state = torch.cuda.get_rng_state(device)
+                
+            # 2. Independent passes for each loss term (keys discovered dynamically)
+            optimizer.zero_grad(set_to_none=True)
+            loss_keys = []
+            loss_idx = 0
+            
+            while True:
+                # Restore RNG state for perfect replication of the forward pass per loss term
+                torch.set_rng_state(cpu_rng_state)
+                torch.cuda.set_rng_state(gpu_rng_state, device=device)
+                
+                for b_cpu in micro_batches:
+                    b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items()}
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                        loss_dict, _metrics = model(**b_gpu)
+                        _loss, _logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num)
+                        
+                        if not loss_keys:
+                            loss_keys = list(weighted_tensors.keys())
+                            
+                        loss_term = weighted_tensors[loss_keys[loss_idx]] / grad_accum_steps
+                    loss_term.backward()
+                    
+                    # Prevent High-Water Mark VRAM spikes: immediately free unused graphs
+                    del b_gpu, loss_dict, _metrics, _loss, _logged_losses, weighted_tensors, loss_term
+                
+                # Extract the standard .grad attributes to CPU
+                analyzer.extract_gradients(unoptimized_model, loss_keys[loss_idx])
+                optimizer.zero_grad(set_to_none=True)
+                
+                loss_idx += 1
+                if loss_idx >= len(loss_keys):
+                    break
+                
+            # 3. Standard update pass over the exact same data
+            # Restore RNG state one last time so the actual training step aligns with the analysis
+            torch.set_rng_state(cpu_rng_state)
+            torch.cuda.set_rng_state(gpu_rng_state, device=device)
+            
+            for b_cpu in micro_batches:
+                b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items()}
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    loss_dict, metrics = model(**b_gpu)
+                    loss, logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num)
+                    scaled_loss = loss / grad_accum_steps
+                    
+                scaled_loss.backward()
+                
+                accum_loss = accum_loss + scaled_loss.detach()
+                for k, v in logged_losses.items():
+                    accum_logged_losses[k] = accum_logged_losses.get(k, 0.0) + v / grad_accum_steps
+                for k, v in metrics.items():
+                    accum_metrics[k] = accum_metrics.get(k, 0.0) + v / grad_accum_steps
+                    
+                del b_gpu, loss_dict, metrics, loss, logged_losses, weighted_tensors, scaled_loss
+                    
+        else:
+            for _ in range(grad_accum_steps):
+                with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                    loss_dict, metrics = model(**batch)
+                    loss, logged_losses, _ = loss_wrapper(loss_dict, step=iter_num)
+                    scaled_loss = loss / grad_accum_steps
+                    
+                scaled_loss.backward()
+                
+                # GPU-side accumulation of detached scalars purely for logging
+                accum_loss = accum_loss + scaled_loss.detach()
+                for k, v in logged_losses.items():
+                    accum_logged_losses[k] = accum_logged_losses.get(k, 0.0) + v / grad_accum_steps
+                for k, v in metrics.items():
+                    accum_metrics[k] = accum_metrics.get(k, 0.0) + v / grad_accum_steps
+                    
+                # Asynchronous pre-fetch of the next batch while backward pass computes
+                batch, current_epoch, current_batch_idx = next(batch_generator)
 
         if cfg.training.grad_clip != 0.0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
@@ -454,7 +537,7 @@ def train(cfg: DictConfig):
         
         if iter_num % cfg.setup.log_interval == 0:
             # CPU-GPU sync point due to .item() extraction
-            lossf = loss.item()
+            lossf = accum_loss.item()
             
             logger.info(f"Iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms")
             
@@ -490,13 +573,14 @@ def train(cfg: DictConfig):
                 }
                 # Log individual balanced loss components as well — .item() here
                 # (inside log_interval) so we don't sync the GPU every step.
-                for k, v in logged_losses.items():
+                for k, v in accum_logged_losses.items():
                     log_payload[f"train/losses/{k}"] = v.item()
-                for k, v in metrics.items():
+                for k, v in accum_metrics.items():
                     log_payload[f"train/{k}"] = v.item()
 
                 # Perform expensive gradient analysis only when logging
-                if cfg.setup.gradient_analysis_run:
+                if analyzer is not None:
+                    grad_norms, cos_sims = analyzer.compute_metrics()
                     for k, v in grad_norms.items():
                         log_payload[f"train/grad_norms/{k}"] = v
                     for k, v in cos_sims.items():
@@ -506,10 +590,10 @@ def train(cfg: DictConfig):
 
             # Accumulate unweighted raw losses exclusively for the analysis table
             if cfg.setup.loss_analysis_run:
-                for k, v in logged_losses.items():
+                for k, v in accum_logged_losses.items():
                     if not k.endswith("_weighted"):
                         loss_analysis_accumulators[k] = loss_analysis_accumulators.get(k, 0.0) + v.item()
-                for k, v in metrics.items():
+                for k, v in accum_metrics.items():
                     loss_analysis_accumulators[k] = loss_analysis_accumulators.get(k, 0.0) + v.item()
 
     # -----------------------------

@@ -537,56 +537,57 @@ class LossWrapper(torch.nn.Module):
 
 
 class GradientAnalyzer:
-    @staticmethod
-    def analyze_gradients(model, optimizer, weighted_loss_tensors):
+    def __init__(self):
+        self.grad_vectors = {}
+        
+    def extract_gradients(self, model, name):
+        self.grad_vectors[name] = {}
+            
+        for p_name, p in model.named_parameters():
+            if p.requires_grad and p.grad is not None:
+                # Extract standard .grad to CPU RAM 
+                self.grad_vectors[name][p_name] = p.grad.detach().cpu()
+        
+    def compute_metrics(self):
         grad_norms = {}
-        grad_vectors = {}
-        
-        # 1. Isolate and capture gradients for each individual loss term
-        for name, loss_tensor in weighted_loss_tensors.items():
-            if loss_tensor.requires_grad:
-                optimizer.zero_grad(set_to_none=True)
-                loss_tensor.backward(retain_graph=True)
-                
-                norm_sq = 0.0
-                vec_dict = {}
-                for p_name, p in model.named_parameters():
-                    if p.grad is not None:
-                        # Calculate norm on GPU for maximum speed
-                        norm_sq += torch.sum(p.grad.detach() ** 2).item()
-                        # Store copy in system RAM to prevent massive VRAM accumulation
-                        vec_dict[p_name] = p.grad.detach().cpu().clone()
-                
-                grad_norms[name] = math.sqrt(norm_sq)
-                grad_vectors[name] = vec_dict
-                
-        # Clear the grads so the main backward pass can run cleanly
-        optimizer.zero_grad(set_to_none=True)
-        
-        # 2. Compute Cosine Similarities only over dynamically identified shared parameters
         cos_sims = {}
-        names = list(grad_vectors.keys())
+        
+        # Compute Total Norms
+        for name, vec_dict in self.grad_vectors.items():
+            if vec_dict:
+                v_flat = torch.cat([v.flatten() for v in vec_dict.values()])
+                grad_norms[f"{name}_total"] = torch.norm(v_flat).item()
+                del v_flat
+            else:
+                grad_norms[f"{name}_total"] = 0.0
+            
+        # Compute Cosine Similarities only over dynamically identified shared parameters
+        names = list(self.grad_vectors.keys())
         for i in range(len(names)):
             for j in range(i + 1, len(names)):
                 name_i = names[i]
                 name_j = names[j]
                 
-                shared_params = set(grad_vectors[name_i].keys()).intersection(set(grad_vectors[name_j].keys()))
+                shared_params = sorted(list(set(self.grad_vectors[name_i].keys()).intersection(set(self.grad_vectors[name_j].keys()))))
                 
                 if shared_params:
-                    dot_product = 0.0
-                    norm_i_sq = 0.0
-                    norm_j_sq = 0.0
+                    # Vectorize parameter arithmetic by concatenating all shared parameters
+                    # This is vastly faster on CPU caches than iterating over dictionaries
+                    vi_flat = torch.cat([self.grad_vectors[name_i][p].flatten() for p in shared_params])
+                    vj_flat = torch.cat([self.grad_vectors[name_j][p].flatten() for p in shared_params])
                     
-                    for p in shared_params:
-                        vi = grad_vectors[name_i][p]
-                        vj = grad_vectors[name_j][p]
-                        dot_product += torch.sum(vi * vj).item()
-                        norm_i_sq += torch.sum(vi ** 2).item()
-                        norm_j_sq += torch.sum(vj ** 2).item()
-                        
-                    if norm_i_sq > 0 and norm_j_sq > 0:
-                        sim = dot_product / (math.sqrt(norm_i_sq) * math.sqrt(norm_j_sq))
+                    norm_i = torch.norm(vi_flat).item()
+                    norm_j = torch.norm(vj_flat).item()
+                    dot_product = torch.dot(vi_flat, vj_flat).item()
+                    
+                    del vi_flat, vj_flat
+                    
+                    # Log norms computed STRICTLY over the shared backbone
+                    grad_norms[f"{name_i}_shared_with_{name_j}"] = norm_i
+                    grad_norms[f"{name_j}_shared_with_{name_i}"] = norm_j
+
+                    if norm_i > 0 and norm_j > 0:
+                        sim = dot_product / (norm_i * norm_j)
                         cos_sims[f"{name_i}_vs_{name_j}"] = sim
                     else:
                         cos_sims[f"{name_i}_vs_{name_j}"] = 0.0

@@ -5,6 +5,7 @@ eval_interval: 5000
 log_interval: 100
 eval_iters: 200
 max_iters: 300000
+gradient_accumulation_steps: 5
 warmup_iters: 32000
 lr_decay_iters: 300000
 overfit_single_batch: False

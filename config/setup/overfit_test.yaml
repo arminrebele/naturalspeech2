@@ -5,6 +5,7 @@ eval_interval: 10000     # By disabling checkpoints, we skip the eval loop anywa
 log_interval: 10
 eval_iters: 0
 max_iters: 500           # Short run to observe rapid overfitting
+gradient_accumulation_steps: 5
 warmup_iters: 0          # No warmup needed for overfit
 lr_decay_iters: 500
 overfit_single_batch: True
