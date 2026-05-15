@@ -136,9 +136,7 @@ class DiffusionModel(nn.Module):
             beta_max: float = 20.0,
             sampling_steps: int = 150,
             sampling_temperature: float = 1.44,
-            score_loss_weight: float = 1.0,
             score_eps: float = 0.05,            # per-sample timestep gate -> any sample with t < score_eps is excluded from the score loss to prevent instability from large reweighting factors at low t
-            ce_rvq_loss_weight: float = 0.1,    # λ_ce-rvq
             timestep_eps: float = 1e-3,
     ):
         super().__init__()
@@ -149,9 +147,7 @@ class DiffusionModel(nn.Module):
         self.sampling_steps = sampling_steps
         self.sampling_temperature = sampling_temperature
         self.timestep_eps = timestep_eps
-        self.score_loss_weight = score_loss_weight
         self.score_eps = score_eps
-        self.ce_rvq_loss_weight = ce_rvq_loss_weight
 
         self.input_projection = nn.Linear(latent_dim, hidden_dim, bias=False)
         self.timestep_embedding = TimestepEmbedding(hidden_dim=hidden_dim, time_dim=time_dim)
@@ -249,14 +245,11 @@ class DiffusionModel(nn.Module):
             target_latents_mask,
         )
 
-        loss = data_loss + self.score_loss_weight * score_loss + self.ce_rvq_loss_weight * ce_rvq_loss
-        metrics = {
-            "data_loss": data_loss.detach(),
-            "score_loss": score_loss.detach(),
-            "ce_rvq_loss": ce_rvq_loss.detach(),
+        return {
+            "data_loss": data_loss,
+            "score_loss": score_loss,
+            "ce_rvq_loss": ce_rvq_loss,
         }
-
-        return loss, metrics
 
     @torch.no_grad()
     def sample(

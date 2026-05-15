@@ -337,7 +337,7 @@ class NaturalSpeech2Model(nn.Module):
         )  # [B, F]
         pitch_predictor_loss = (pitch_loss_per_frame * pitch_loss_mask).sum() / pitch_loss_mask.sum().clamp(min=1.0)
 
-        diffusion_loss, diffusion_metrics = self.diffusion_model(
+        diffusion_losses = self.diffusion_model(
             target_latents,           # [B, Ft, latent_dim]
             target_latents_mask,      # [B, Ft, 1]
             prompt_encodings,         # [B, Fp, D]
@@ -348,7 +348,7 @@ class NaturalSpeech2Model(nn.Module):
         )
 
         loss_dict = {
-            "diffusion_loss": diffusion_loss,
+            "diffusion_loss": diffusion_losses,
             "duration_predictor_loss": duration_predictor_loss,
             "pitch_predictor_loss": pitch_predictor_loss,
             "aligner_loss":{
@@ -356,8 +356,7 @@ class NaturalSpeech2Model(nn.Module):
                 "bin_loss": bin_loss,
             }
         }
-        metrics = {f"diffusion/{k}": v for k, v in diffusion_metrics.items()}
-        return loss_dict, metrics
+        return loss_dict
 
     @torch.no_grad()
     def generate(
@@ -478,10 +477,24 @@ class NaturalSpeech2Model(nn.Module):
 class LossWrapper(torch.nn.Module):
     def __init__(self, loss_weights: dict, loss_warmup_steps: dict):
         super().__init__()
-        self.loss_weights = loss_weights
-        self.loss_warmup_steps = loss_warmup_steps
+        self.loss_weights = self._flatten_config(loss_weights, "group_weight")
+        self.loss_warmup_steps = self._flatten_config(loss_warmup_steps, "group_warmup")
         self.current_weights = {}
         self._update_weights(0)  # Initialize weights for step 0
+
+    def _flatten_config(self, config: dict, group_key_name: str) -> dict:
+        """Flattens a nested config dict so group keys and sub-keys share a flat namespace."""
+        flat = {}
+        for key, value in config.items():
+            if isinstance(value, dict):
+                for sub_key, sub_value in value.items():
+                    if sub_key == group_key_name:
+                        flat[key] = sub_value
+                    else:
+                        flat[sub_key] = sub_value
+            else:
+                flat[key] = value
+        return flat
 
     def _update_weights(self, step: int):
         for key, target_weight in self.loss_weights.items():

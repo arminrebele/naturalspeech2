@@ -95,7 +95,6 @@ def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, dev
         # so the eval loop doesn't sync the GPU on every iteration.
         total_loss_sum = torch.zeros((), device=device)
         log_dict_sums = {}
-        metric_sums = {}
 
         for k in range(eval_iters):
             try:
@@ -108,19 +107,16 @@ def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, dev
                 batch[k_b] = v.to(device, non_blocking=True)
 
             with torch.autocast(device_type=device.split(':')[0], dtype=torch.bfloat16):
-                loss_dict, metrics = model(**batch)
+                loss_dict = model(**batch)
                 total_loss, logged_losses, _ = loss_wrapper(loss_dict)
 
             total_loss_sum = total_loss_sum + total_loss.detach()
             for key, val in logged_losses.items():
                 log_dict_sums[key] = log_dict_sums.get(key, 0.0) + val
-            for key, val in metrics.items():
-                metric_sums[key] = metric_sums.get(key, 0.0) + val
 
         out[split] = {
             'total_loss': (total_loss_sum / eval_iters).item(),
             'logged_losses': {key: (val / eval_iters).item() for key, val in log_dict_sums.items()},
-            'metrics': {key: (val / eval_iters).item() for key, val in metric_sums.items()},
         }
     model.train()
     return out
@@ -267,9 +263,14 @@ def train(cfg: DictConfig):
 
     if cfg.setup.loss_analysis_run:
         logger.info("LOSS ANALYSIS RUN: Forcing all dynamic loss weights to 1.0 and warmups to 0.")
-        for k in loss_weights_dict.keys():
-            loss_weights_dict[k] = 1.0
-            loss_warmup_steps_dict[k] = 0
+        def override_dict(d, val):
+            for k, v in d.items():
+                if isinstance(v, dict):
+                    override_dict(v, val)
+                else:
+                    d[k] = val
+        override_dict(loss_weights_dict, 1.0)
+        override_dict(loss_warmup_steps_dict, 0)
             
     loss_wrapper = LossWrapper(
         loss_weights=loss_weights_dict,
@@ -338,10 +339,6 @@ def train(cfg: DictConfig):
                     eval_payload[f"eval/train/losses/{k}"] = v
                 for k, v in losses['val']['logged_losses'].items():
                     eval_payload[f"eval/val/losses/{k}"] = v
-                for k, v in losses['train']['metrics'].items():
-                    eval_payload[f"eval/train/{k}"] = v
-                for k, v in losses['val']['metrics'].items():
-                    eval_payload[f"eval/val/{k}"] = v
 
                 # --- Generation Testing ---
                 logger.info("Generating audio samples for evaluation...")
@@ -410,7 +407,6 @@ def train(cfg: DictConfig):
         
         accum_loss = torch.zeros((), device=device)
         accum_logged_losses = {}
-        accum_metrics = {}
         
         analyzer = GradientAnalyzer() if (cfg.setup.gradient_analysis_run and iter_num % cfg.setup.log_interval == 0) else None
         
@@ -441,7 +437,7 @@ def train(cfg: DictConfig):
                 for b_cpu in micro_batches:
                     b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items()}
                     with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                        loss_dict, _metrics = model(**b_gpu)
+                        loss_dict = model(**b_gpu)
                         _loss, _logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num)
                         
                         if not loss_keys:
@@ -451,7 +447,7 @@ def train(cfg: DictConfig):
                     loss_term.backward()
                     
                     # Prevent High-Water Mark VRAM spikes: immediately free unused graphs
-                    del b_gpu, loss_dict, _metrics, _loss, _logged_losses, weighted_tensors, loss_term
+                    del b_gpu, loss_dict, _loss, _logged_losses, weighted_tensors, loss_term
                 
                 # Extract the standard .grad attributes to CPU
                 analyzer.extract_gradients(unoptimized_model, loss_keys[loss_idx])
@@ -469,7 +465,7 @@ def train(cfg: DictConfig):
             for b_cpu in micro_batches:
                 b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items()}
                 with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    loss_dict, metrics = model(**b_gpu)
+                    loss_dict = model(**b_gpu)
                     loss, logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num)
                     scaled_loss = loss / grad_accum_steps
                     
@@ -478,15 +474,13 @@ def train(cfg: DictConfig):
                 accum_loss = accum_loss + scaled_loss.detach()
                 for k, v in logged_losses.items():
                     accum_logged_losses[k] = accum_logged_losses.get(k, 0.0) + v / grad_accum_steps
-                for k, v in metrics.items():
-                    accum_metrics[k] = accum_metrics.get(k, 0.0) + v / grad_accum_steps
                     
-                del b_gpu, loss_dict, metrics, loss, logged_losses, weighted_tensors, scaled_loss
+                del b_gpu, loss_dict, loss, logged_losses, weighted_tensors, scaled_loss
                     
         else:
             for _ in range(grad_accum_steps):
                 with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    loss_dict, metrics = model(**batch)
+                    loss_dict = model(**batch)
                     loss, logged_losses, _ = loss_wrapper(loss_dict, step=iter_num)
                     scaled_loss = loss / grad_accum_steps
                     
@@ -496,8 +490,6 @@ def train(cfg: DictConfig):
                 accum_loss = accum_loss + scaled_loss.detach()
                 for k, v in logged_losses.items():
                     accum_logged_losses[k] = accum_logged_losses.get(k, 0.0) + v / grad_accum_steps
-                for k, v in metrics.items():
-                    accum_metrics[k] = accum_metrics.get(k, 0.0) + v / grad_accum_steps
                     
                 # Asynchronous pre-fetch of the next batch while backward pass computes
                 batch, current_epoch, current_batch_idx = next(batch_generator)
@@ -575,8 +567,6 @@ def train(cfg: DictConfig):
                 # (inside log_interval) so we don't sync the GPU every step.
                 for k, v in accum_logged_losses.items():
                     log_payload[f"train/losses/{k}"] = v.item()
-                for k, v in accum_metrics.items():
-                    log_payload[f"train/{k}"] = v.item()
 
                 # Perform expensive gradient analysis only when logging
                 if analyzer is not None:
@@ -593,8 +583,6 @@ def train(cfg: DictConfig):
                 for k, v in accum_logged_losses.items():
                     if not k.endswith("_weighted"):
                         loss_analysis_accumulators[k] = loss_analysis_accumulators.get(k, 0.0) + v.item()
-                for k, v in accum_metrics.items():
-                    loss_analysis_accumulators[k] = loss_analysis_accumulators.get(k, 0.0) + v.item()
 
     # -----------------------------
     # Loss Analysis Summary Dump
