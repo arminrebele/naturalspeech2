@@ -92,7 +92,7 @@ loss_weights:
   diffusion_loss:
     group_weight: 1.0
     data_loss: 1.0
-    score_loss: 1.0    # paper Eq. 4. If first GPU runs show score loss numerically dominates data loss (compare train/diffusion/score_loss vs train/diffusion/data_loss in wandb), drop to 0.1 as a stabiliser — see CLAUDE.md's Phase 2 score loss note for the reweighting math.
+    score_loss: 0.1
     ce_rvq_loss: 0.1
 
 loss_warmup_steps:

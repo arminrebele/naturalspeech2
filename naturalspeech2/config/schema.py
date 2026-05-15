@@ -84,10 +84,54 @@ class DiffusionModelConfig:
     beta_max: float = 20.0
     sampling_steps: int = 150
     sampling_temperature: float = 1.44
-    score_loss_weight: float = 1.0
     score_eps: float = 0.05
-    ce_rvq_loss_weight: float = 0.1
     timestep_eps: float = 1e-3
+
+
+@dataclass
+class AlignerLossWeights:
+    group_weight: float = 1.0
+    forward_sum_loss: float = 1.0
+    bin_loss: float = 1.0
+
+
+@dataclass
+class DiffusionLossWeights:
+    group_weight: float = 1.0
+    data_loss: float = 1.0
+    score_loss: float = 1.0
+    ce_rvq_loss: float = 0.1
+
+
+@dataclass
+class LossWeights:
+    duration_predictor_loss: float = 1.0
+    pitch_predictor_loss: float = 1.0
+    aligner_loss: AlignerLossWeights = field(default_factory=AlignerLossWeights)
+    diffusion_loss: DiffusionLossWeights = field(default_factory=DiffusionLossWeights)
+
+
+@dataclass
+class AlignerLossWarmups:
+    group_warmup: int = 0
+    forward_sum_loss: int = 0
+    bin_loss: int = 0
+
+
+@dataclass
+class DiffusionLossWarmups:
+    group_warmup: int = 1000
+    data_loss: int = 0
+    score_loss: int = 0
+    ce_rvq_loss: int = 0
+
+
+@dataclass
+class LossWarmups:
+    duration_predictor_loss: int = 1000
+    pitch_predictor_loss: int = 1000
+    aligner_loss: AlignerLossWarmups = field(default_factory=AlignerLossWarmups)
+    diffusion_loss: DiffusionLossWarmups = field(default_factory=DiffusionLossWarmups)
 
 
 @dataclass
@@ -107,22 +151,8 @@ class ModelConfig:
     pitch_predictor: PitchPredictorConfig = field(default_factory=PitchPredictorConfig)
     diffusion_model: DiffusionModelConfig = field(default_factory=DiffusionModelConfig)
 
-    loss_weights: dict[str, float] = field(default_factory=lambda: {
-        "diffusion_loss": 1.0,
-        "duration_predictor_loss": 1.0,
-        "pitch_predictor_loss": 1.0,
-        "aligner_loss": 1.0,
-        "forward_sum_loss": 1.0,
-        "bin_loss": 1.0,
-    })
-    loss_warmup_steps: dict[str, int] = field(default_factory=lambda: {
-        "diffusion_loss": 1000,
-        "duration_predictor_loss": 1000,
-        "pitch_predictor_loss": 1000,
-        "aligner_loss": 0,
-        "forward_sum_loss": 0,
-        "bin_loss": 0,
-    })
+    loss_weights: LossWeights = field(default_factory=LossWeights)
+    loss_warmup_steps: LossWarmups = field(default_factory=LossWarmups)
 
 
 def model_cfg_from_omegaconf(cfg: Any) -> ModelConfig:
