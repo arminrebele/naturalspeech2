@@ -2,3 +2,5 @@ log: True                # We heavily rely on WandB charts to see the dynamics o
 project: "naturalspeech2"
 group: "gradient-analysis"
 run_name: "gradient_analysis"
+notes: ""
+tags: []

@@ -304,11 +304,13 @@ def train(cfg: DictConfig):
 
     if cfg.wandb.log:
         wandb.init(
-            project=cfg.wandb.project, 
-            name=cfg.wandb.run_name, 
+            project=cfg.wandb.project,
+            name=cfg.wandb.run_name,
             group=cfg.wandb.group,
-            config=OmegaConf.to_container(cfg, resolve=True), 
-            id=resume_wandb_id, 
+            notes=cfg.wandb.notes,
+            tags=list(cfg.wandb.tags),
+            config=OmegaConf.to_container(cfg, resolve=True),
+            id=resume_wandb_id,
             resume="allow" if resume_wandb_id else None
         )
 

@@ -2,3 +2,5 @@ log: False               # No WandB trace needed, we rely on the terminal printo
 project: "naturalspeech2"
 group: "loss-analysis"
 run_name: "loss_analysis"
+notes: ""
+tags: []
