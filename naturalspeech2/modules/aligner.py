@@ -316,7 +316,12 @@ class ForwardSumLoss(nn.Module):
     def __init__(self, blank_logit: float = -1.0):
         super().__init__()
         self.blank_logit = blank_logit
-        self.ctc_loss = nn.CTCLoss(blank=0, reduction='mean', zero_infinity=True)
+        # reduction='sum' (not 'mean') so we can divide by total frame count below.
+        # PyTorch's reduction='mean' divides by target_lengths (phoneme count P), which
+        # puts this loss in nats/phoneme. bin_loss is nats/frame, and the rest of the
+        # training losses are also frame-normalised — keep them all in the same units
+        # so loss_weights are interpretable across terms and don't drift with F/P ratio.
+        self.ctc_loss = nn.CTCLoss(blank=0, reduction='sum', zero_infinity=True)
 
     def forward(
         self,
@@ -343,12 +348,13 @@ class ForwardSumLoss(nn.Module):
             b=B,
         )
 
-        return self.ctc_loss(
+        total_nll = self.ctc_loss(
             log_probs,
             targets,
             frame_lengths.long(),
             phoneme_encodings_lengths.long(),
         )
+        return total_nll / frame_lengths.sum().to(total_nll.dtype)
 
 
 
