@@ -138,6 +138,7 @@ class DiffusionModel(nn.Module):
             sampling_temperature: float = 1.44,
             score_eps: float = 0.05,            # per-sample timestep gate -> any sample with t < score_eps is excluded from the score loss to prevent instability from large reweighting factors at low t
             timestep_eps: float = 1e-3,
+            min_snr_gamma: float = 5.0,         # min-SNR(γ) clip on the implicit α̅/σ² weight in score loss (Hang et al. 2023); see forward()
     ):
         super().__init__()
         self.latent_dim = latent_dim
@@ -148,6 +149,7 @@ class DiffusionModel(nn.Module):
         self.sampling_temperature = sampling_temperature
         self.timestep_eps = timestep_eps
         self.score_eps = score_eps
+        self.min_snr_gamma = min_snr_gamma
 
         self.input_projection = nn.Linear(latent_dim, hidden_dim, bias=False)
         self.timestep_embedding = TimestepEmbedding(hidden_dim=hidden_dim, time_dim=time_dim)
@@ -219,16 +221,24 @@ class DiffusionModel(nn.Module):
         #   ∇ log p_t(z_t|z₀)  = −ε / √(1 − α̅(t))                        (true conditional score)
         #   L_score            = ‖ŝ − ∇ log p_t‖²
         #
+        # Algebraically: L_score = (α̅ / σ²) · ‖ẑ₀ − z₀‖²  where σ = 1 − α̅.
+        # The implicit (α̅/σ²) weight blows up as t → 0 (~1.3k at t=0.05, ~2.8e8 at
+        # t=1e-3), spiking gradients and biasing the loss toward low-t (easy) modes.
+        #
         # Stabilization:
-        #   - Per-item gate t ≥ score_eps (=0.05); below that the reweighting factor
-        #     α̅ / (1−α̅)² blows up (~1.3k at t=0.05, ~2.8e8 at t=1e-3).
+        #   - Min-SNR(γ) clip (Hang et al. 2023): cap the effective weight at γ via
+        #     a per-sample factor min(γ·σ²/α̅, 1). With γ=5, low-t contribution is
+        #     bounded; high-t (where σ²/α̅ ≥ 1) is unchanged.
+        #   - Per-item gate t ≥ score_eps (=0.05); kept as a belt-and-suspenders
+        #     guard alongside min-SNR.
         #   - Clamp (1 − α̅) at 1e-5 as NaN-guard; should never trigger given the gate.
         alpha_bar = rearrange(self._alpha_bar(t), 'b -> b 1 1')
         sigma = (1.0 - alpha_bar).clamp(min=1e-5)
         score_hat = (alpha_bar.sqrt() * z0_hat.float() - z_t) / sigma
         score_target = -epsilon / sigma.sqrt()
 
-        score_diff_sq = (score_hat - score_target) ** 2
+        min_snr_clip = (self.min_snr_gamma * sigma.pow(2) / alpha_bar).clamp(max=1.0)
+        score_diff_sq = (score_hat - score_target) ** 2 * min_snr_clip
         score_gate = rearrange((t >= self.score_eps).to(diff_sq.dtype), 'b -> b 1 1')
         score_mask = loss_mask * score_gate
         score_valid_scalars = score_mask.sum().clamp(min=1.0) * self.latent_dim

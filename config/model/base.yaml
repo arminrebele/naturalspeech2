@@ -80,6 +80,7 @@ diffusion_model:
   sampling_temperature: 1.44     # τ = 1.2² — initial noise ~ N(0, τ⁻¹·I)
   score_eps: 0.05
   timestep_eps: 0.001
+  min_snr_gamma: 5.0
 
 # Loss Balancing Weights
 loss_weights:
@@ -92,7 +93,7 @@ loss_weights:
   diffusion_loss:
     group_weight: 1.0
     data_loss: 1.0
-    score_loss: 0.1
+    score_loss: 1.0
     ce_rvq_loss: 0.1
 
 loss_warmup_steps:
