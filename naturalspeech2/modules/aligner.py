@@ -4,6 +4,7 @@ from einops import rearrange, repeat
 
 from naturalspeech2.modules.layers import Conv1D, RMSNorm
 from naturalspeech2.ops.monotonic_align import maximum_path
+from naturalspeech2.utils.init import standard_init
 
 
 
@@ -124,14 +125,8 @@ class AlignerNet(nn.Module):
 
         self._init_weights()
 
-    def _init_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv1d):
-                nn.init.normal_(m.weight, std=0.02)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, RMSNorm):
-                nn.init.ones_(m.weight)
+    def _init_weights(self) -> None:
+        standard_init(self)
 
     def _encode(
         self,

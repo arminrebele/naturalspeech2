@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from naturalspeech2.modules.layers import TransformerEncoderLayer, RMSNorm
+from naturalspeech2.utils.init import standard_init
 
 class PhonemeEncoder(nn.Module):
     def __init__(
@@ -40,6 +41,18 @@ class PhonemeEncoder(nn.Module):
         ])
 
         self.final_norm = RMSNorm(hidden_dim)
+
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        # Standard N(0, 0.02) base, then Fixup-style zero-init of the two residual-output
+        # projections per TransformerEncoderLayer: the self-attention output projection
+        # (multi_head_attention.to_out) and the FFN output projection (conv2). Each
+        # transformer layer is identity-at-init → the 6-layer stack is identity-at-init.
+        standard_init(self)
+        for layer in self.transformer_layers:
+            nn.init.zeros_(layer.multi_head_attention.to_out.weight)
+            nn.init.zeros_(layer.conv2.conv1d.weight)
 
     def forward(
             self,

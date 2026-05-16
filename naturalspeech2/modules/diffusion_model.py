@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from einops import rearrange, repeat
 
 from naturalspeech2.modules.layers import RMSNorm, MultiHeadCrossAttention, Conv1D
+from naturalspeech2.utils.init import standard_init
 
 
 class TimestepEmbedding(nn.Module):
@@ -70,8 +71,10 @@ class _WaveNetBlock(nn.Module):
             attn_weights_dropout=attn_weights_dropout,
         )
         self.film_projection = nn.Linear(hidden_dim, filter_size * 2)
-        nn.init.zeros_(self.film_projection.weight)
-        nn.init.zeros_(self.film_projection.bias)
+        # ReZero (Bachlechner et al. 2020): per-block learnable scalar, init=0. Multiplies
+        # the gated branch before the residual add — block is identity-at-init regardless of
+        # what the branch computes.
+        self.alpha = nn.Parameter(torch.zeros(1))
 
         self.gate_dropout = nn.Dropout(gate_dropout)
         self.attn_out_dropout = nn.Dropout(attn_out_dropout)
@@ -110,7 +113,7 @@ class _WaveNetBlock(nn.Module):
         gated = gated * float_h_mask
 
         skip = gated                                                         # clean, no dropout
-        wavenet_block_out = (residual + self.gate_dropout(gated)) * float_h_mask   # [B, F, D]
+        wavenet_block_out = (residual + self.alpha * self.gate_dropout(gated)) * float_h_mask   # [B, F, D]
 
         return wavenet_block_out, skip
 
@@ -179,6 +182,17 @@ class DiffusionModel(nn.Module):
 
         self.output_projection_1 = nn.Linear(hidden_dim, hidden_dim, bias=False)
         self.output_projection_2 = nn.Linear(hidden_dim, latent_dim, bias=False)
+
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        # Zero the final ẑ₀ head (DiT-style: data_loss starts at σ²(z₀)) and FiLM in every
+        # WaveNet block. ReZero α scalars are already zero from _WaveNetBlock.__init__.
+        standard_init(self)
+        nn.init.zeros_(self.output_projection_2.weight)
+        for block in self.wavenet_blocks:
+            nn.init.zeros_(block.film_projection.weight)
+            nn.init.zeros_(block.film_projection.bias)
 
     def forward(
             self,

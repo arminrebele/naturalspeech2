@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from einops import rearrange
 
 from naturalspeech2.modules.layers import RMSNorm, MultiHeadCrossAttention, Conv1D
+from naturalspeech2.utils.init import standard_init
 
 
 class DurationPredictor(nn.Module):
@@ -32,6 +33,20 @@ class DurationPredictor(nn.Module):
         self.attn_out_dropout = nn.Dropout(attn_out_dropout)
         self.final_norm = RMSNorm(hidden_dim)
         self.to_duration = Conv1D(hidden_dim, 1, 1)
+
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        # Standard N(0, 0.02) base, then Fixup-style zero-init of every residual-output
+        # projection (convs[i] feeds the conv residual; attns[i].to_out feeds the cross-attn
+        # residual) and the final prediction head (to_duration). All 40 residual writes share
+        # the same stream — every block is identity-at-init.
+        standard_init(self)
+        for conv in self.convs:
+            nn.init.zeros_(conv.conv1d.weight)
+        for attn in self.attns:
+            nn.init.zeros_(attn.to_out.weight)
+        nn.init.zeros_(self.to_duration.conv1d.weight)
 
     def forward(
             self,

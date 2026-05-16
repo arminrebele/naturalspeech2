@@ -17,6 +17,7 @@ from naturalspeech2.modules.pitch_predictor import PitchPredictor
 from naturalspeech2.modules.diffusion_model import DiffusionModel
 from naturalspeech2.modules.layers import Conv1D
 from naturalspeech2.utils.utils import create_mask_from_lengths
+from naturalspeech2.utils.init import standard_init
 
 
 class NaturalSpeech2Model(nn.Module):
@@ -82,6 +83,12 @@ class NaturalSpeech2Model(nn.Module):
             hidden_dim=cfg.hidden_dim,
             **asdict(cfg.diffusion_model),
         )
+
+        self._init_weights()
+
+    def _init_weights(self) -> None:
+        # Submodules self-init; pitch_projection is the only top-level learnable layer owned here.
+        standard_init(self.pitch_projection)
 
     @staticmethod
     def _expand_phoneme_encodings(
