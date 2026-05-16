@@ -22,7 +22,8 @@ docker-compose.mergerfs.yml
 outputs/
 multirun/
 scratch/
-wandb/
+# wandb run artifacts at repo root (NOT config/wandb/ which holds tracked configs)
+/wandb/
 
 docs/notes/
 docs/paper/
