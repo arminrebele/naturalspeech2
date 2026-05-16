@@ -196,13 +196,15 @@ class DiffusionModel(nn.Module):
 
     def forward(
             self,
-            target_latents,                 # [B, Ft, latent_dim]
+            target_latents,                 # [B, Ft, latent_dim]    in normalized space
             target_latents_mask,            # [B, Ft, 1] bool
             prompt_encodings,               # [B, Fp, D]
             prompt_encodings_mask,          # [B, Fp, 1] bool
             c,                              # [B, Ft, D]
             target_codebook_indices,        # [B, Ft, Q] | GT codebook indices per quantizer
-            codebook_embeddings,            # [Q, K=1024, latent_dim=128]   | frozen Encodec codebook vectors
+            codebook_embeddings,            # [Q, K=1024, latent_dim=128]   | frozen Encodec codebook vectors (raw)
+            latent_mean,                    # [latent_dim] | per-channel mean for unnormalizing ẑ₀ before CE-RVQ
+            latent_std,                     # [latent_dim] | per-channel std
     ):
         batch_size = target_latents.shape[0]
         t = (         #  t ∈ [ε, 1−ε], time_step_eps = 0.01 prevents exact 0 or 1 which can cause issues in the noise schedule math
@@ -262,11 +264,16 @@ class DiffusionModel(nn.Module):
         #   Per quantizer j, score the partial residual ẑ₀ − Σᵢ<ⱼ eᵢ against every
         #   codebook entry via −L2 + softmax, and cross-entropy against the GT code
         #   index. Supervises the discrete decoding path that plain MSE misses.
+        #
+        #   Codebook embeddings live in raw Encodec space, so ẑ₀ must be unnormalized
+        #   inside _ce_rvq_loss before residual computation.
         ce_rvq_loss = self._ce_rvq_loss(
             z0_hat,
             target_codebook_indices,
             codebook_embeddings,
             target_latents_mask,
+            latent_mean,
+            latent_std,
         )
 
         return {
@@ -380,10 +387,12 @@ class DiffusionModel(nn.Module):
 
     def _ce_rvq_loss(
             self,
-            z0_hat,                   # [B, Ft, latent_dim]
+            z0_hat,                   # [B, Ft, latent_dim] | in normalized space
             target_codebook_indices,  # [B, Ft, Q]           | GT codebook indices per quantizer
-            codebook_embeddings,      # [Q, K, latent_dim]
+            codebook_embeddings,      # [Q, K, latent_dim]   | raw Encodec codebook vectors
             target_latents_mask,      # [B, Ft, 1] bool
+            latent_mean,              # [latent_dim] | per-channel mean for unnormalization
+            latent_std,               # [latent_dim] | per-channel std
     ):
         # For each quantizer j:
         #   r_j      = ẑ₀ − Σᵢ<ⱼ eᵢ                 (partial residual, GT earlier codes — no error cascade)
@@ -391,7 +400,9 @@ class DiffusionModel(nn.Module):
         #   loss_j   = CE(softmax_k(logit), codes_j)
         # Single Python loop over Q=32 (static), vectorized over (B, Ft, K) per step.
         # Running cumsum avoids materializing a full [Q, B, Ft, latent_dim] residual tensor.
-        z0_hat = z0_hat.float()
+        # Unnormalize ẑ₀ to raw codebook space before residual computation — codebook
+        # embeddings are raw Encodec vectors and the residual interpretation only holds there.
+        z0_hat = z0_hat.float() * latent_std + latent_mean
         Q = target_codebook_indices.shape[2]
         codebooks = codebook_embeddings[:Q].float()                         # [Q, K, latent_dim]
         codebook_sq_norms = codebooks.pow(2).sum(dim=-1)                    # [Q, K]

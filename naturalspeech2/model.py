@@ -32,7 +32,7 @@ class NaturalSpeech2Model(nn.Module):
         self.prompt_frames = int(cfg.prompt_seconds * sampling_rate / ENCODER_HOP_LENGTH)
         self.min_target_frames = int(cfg.min_target_seconds * sampling_rate / ENCODER_HOP_LENGTH)
 
-        self.encodec = EncodecWrapper()
+        self.encodec = EncodecWrapper(latent_stats_path=cfg.encodec.latent_stats_path)
 
         self.log_mel_spectrogram_generator = LogMelSpectrogramGenerator(
             sampling_rate=sampling_rate,
@@ -344,13 +344,15 @@ class NaturalSpeech2Model(nn.Module):
         pitch_predictor_loss = (pitch_loss_per_frame * pitch_loss_mask).sum() / pitch_loss_mask.sum().clamp(min=1.0)
 
         diffusion_losses = self.diffusion_model(
-            target_latents,           # [B, Ft, latent_dim]
+            target_latents,           # [B, Ft, latent_dim]   in normalized space
             target_latents_mask,      # [B, Ft, 1]
             prompt_encodings,         # [B, Fp, D]
             prompt_encodings_mask,    # [B, Fp, 1]
             condition_target,         # [B, Ft, D]
             target_codebook_indices=target_codebook_indices,           # [B, Ft, Q]    | GT codebook indices per quantizer
-            codebook_embeddings=self.encodec.codebook_embeddings,       # [Q, K, latent_dim]
+            codebook_embeddings=self.encodec.codebook_embeddings,       # [Q, K, latent_dim] | raw codebook vectors
+            latent_mean=self.encodec.latent_mean,                       # [latent_dim] | unnormalize ẑ₀ → raw before CE-RVQ
+            latent_std=self.encodec.latent_std,                         # [latent_dim]
         )
 
         loss_dict = {
