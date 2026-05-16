@@ -262,15 +262,19 @@ def train(cfg: DictConfig):
     loss_weights_dict = OmegaConf.to_container(cfg.model.loss_weights, resolve=True)
     loss_warmup_steps_dict = OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
 
+    def override_dict(d, val):
+        for k, v in d.items():
+            if isinstance(v, dict):
+                override_dict(v, val)
+            else:
+                d[k] = val
+
     if cfg.setup.loss_analysis_run:
         logger.info("LOSS ANALYSIS RUN: Forcing all dynamic loss weights to 1.0 and warmups to 0.")
-        def override_dict(d, val):
-            for k, v in d.items():
-                if isinstance(v, dict):
-                    override_dict(v, val)
-                else:
-                    d[k] = val
         override_dict(loss_weights_dict, 1.0)
+        override_dict(loss_warmup_steps_dict, 0)
+    elif cfg.setup.overfit_single_batch:
+        logger.info("OVERFIT TEST: Forcing loss warmups to 0 (the 1000-iter ramp would otherwise eat half a 2000-iter run).")
         override_dict(loss_warmup_steps_dict, 0)
             
     loss_wrapper = LossWrapper(
@@ -495,9 +499,9 @@ def train(cfg: DictConfig):
                 # Asynchronous pre-fetch of the next batch while backward pass computes
                 batch, current_epoch, current_batch_idx = next(batch_generator)
 
-        if cfg.training.grad_clip != 0.0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
-            
+        max_norm = cfg.training.grad_clip if cfg.training.grad_clip != 0.0 else float('inf')
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
@@ -562,7 +566,8 @@ def train(cfg: DictConfig):
                     "train/iter": iter_num,
                     "train/loss": lossf,
                     "train/time": dt * 1000,
-                    "train/lr": lr
+                    "train/lr": lr,
+                    "train/grad_norm": grad_norm.item(),
                 }
                 # Log individual balanced loss components as well — .item() here
                 # (inside log_interval) so we don't sync the GPU every step.
@@ -596,6 +601,63 @@ def train(cfg: DictConfig):
             avg = v / cfg.setup.max_iters
             logger.info(f"  {k}: {avg:.4f}")
         logger.info("===========================================")
+
+    # -----------------------------
+    # Overfit Test Audio Comparison
+    # -----------------------------
+    # Generate audio from the overfit batch so a human reviewer can listen to
+    # (original | prompt | generated) side-by-side in the wandb UI. The prompt
+    # is the deterministic first `prompt_seconds` of each clip's own audio —
+    # training uses a random start position, but a fixed start makes the eval
+    # reproducible across runs.
+    if cfg.setup.overfit_single_batch and cfg.wandb.log:
+        logger.info("Generating audio for overfit-batch comparison...")
+        unoptimized_model.eval()
+
+        sr = cfg.dataloader.sampling_rate
+        prompt_samples = int(cfg.model.prompt_seconds * sr)
+
+        audio_full = batch["audio"]                                # [B, T]
+        audio_lengths_full = batch["audio_lengths"]                # [B]
+        phoneme_tokens = batch["phoneme_tokens"]                   # [B, P]
+        phoneme_tokens_mask = batch["phoneme_tokens_mask"]         # [B, P, 1]
+        phoneme_tokens_lengths = batch["phoneme_tokens_lengths"]   # [B]
+
+        num_compare = min(2, audio_full.shape[0])
+        table_rows = []
+        for i in range(num_compare):
+            T_i = int(audio_lengths_full[i].item())
+            prompt_T = min(prompt_samples, T_i)
+
+            ref_audio = audio_full[i:i+1, :prompt_T]                                # [1, T_p]
+            ref_audio_len = torch.tensor([prompt_T], device=device)                 # [1]
+
+            generated_audio, _ = unoptimized_model.generate(
+                reference_audio=ref_audio,
+                reference_audio_lengths=ref_audio_len,
+                phoneme_tokens=phoneme_tokens[i:i+1],
+                phoneme_tokens_mask=phoneme_tokens_mask[i:i+1],
+                phoneme_tokens_lengths=phoneme_tokens_lengths[i:i+1],
+            )
+
+            original_np = audio_full[i, :T_i].detach().cpu().to(torch.float32).numpy()
+            prompt_np = ref_audio[0].detach().cpu().to(torch.float32).numpy()
+            generated_np = generated_audio[0].detach().cpu().to(torch.float32).numpy()
+
+            table_rows.append([
+                i,
+                wandb.Audio(original_np, sample_rate=sr, caption=f"Original (clip {i})"),
+                wandb.Audio(prompt_np, sample_rate=sr, caption=f"Prompt (clip {i})"),
+                wandb.Audio(generated_np, sample_rate=sr, caption=f"Generated (clip {i})"),
+            ])
+
+        wandb.log({
+            "overfit_audio_comparison": wandb.Table(
+                columns=["clip_idx", "original", "prompt", "generated"],
+                data=table_rows,
+            )
+        })
+        logger.info(f"Logged {num_compare} audio comparison rows to wandb.")
 
 
 if __name__ == "__main__":
