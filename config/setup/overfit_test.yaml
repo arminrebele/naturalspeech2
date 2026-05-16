@@ -1,13 +1,58 @@
-device: "cuda"
-init_from: "scratch"     # 'scratch' or 'resume'
-save_checkpoint: False   # No need to checkpoint a dummy test
-eval_interval: 10000     # By disabling checkpoints, we skip the eval loop anyway
-log_interval: 10
-eval_iters: 0
-max_iters: 500           # Short run to observe rapid overfitting
-gradient_accumulation_steps: 5
-warmup_iters: 0          # No warmup needed for overfit
-lr_decay_iters: 500
-overfit_single_batch: True
-loss_analysis_run: False
-gradient_analysis_run: False
+# @package _global_
+#
+# Overfit-test recipe. The `# @package _global_` directive lets this file write
+# under both `setup.*` (the default for files in config/setup/) AND `model.*`
+# (to zero out all 18 dropout keys), so a single `setup=overfit_test` CLI arg
+# brings the complete recipe instead of 18 trailing `model.<x>_dropout=0` flags.
+#
+# Why dropout off for overfit_test: dropout creates stochastic ẑ₀ predictions
+# that the low-t α̅/(1−α̅)² weighting amplifies into large score-loss spikes
+# (~30–60% reduction in spike magnitude when off; see docs/notes/bringup_log.md
+# 2026-05-16). Min-SNR(γ=5) bounds the rest. Single-batch memorization also
+# benefits from a deterministic forward pass.
+#
+# Loss-weight warmups (`loss_warmup_steps.*`) are auto-zeroed at runtime in
+# scripts/train.py:276-278 — no override needed here.
+
+setup:
+  device: "cuda"
+  init_from: "scratch"     # 'scratch' or 'resume'
+  save_checkpoint: False   # No need to checkpoint a dummy test
+  eval_interval: 10000     # By disabling checkpoints, we skip the eval loop anyway
+  log_interval: 10
+  eval_iters: 0
+  max_iters: 500           # Short run to observe rapid overfitting
+  gradient_accumulation_steps: 5
+  warmup_iters: 0          # No LR warmup needed for overfit
+  lr_decay_iters: ${setup.max_iters}   # Tie cosine decay window to run length so
+                                        # bumping max_iters on the CLI doesn't leave
+                                        # LR flat at min_lr for the trailing iters.
+  overfit_single_batch: True
+  loss_analysis_run: False
+  gradient_analysis_run: False
+
+model:
+  phoneme_encoder:
+    conv_dropout: 0.0
+    attn_weights_dropout: 0.0
+    attn_out_dropout: 0.0
+  aligner:
+    dropout: 0.0
+  speech_prompt_encoder:
+    conv_dropout: 0.0
+    attn_weights_dropout: 0.0
+    attn_out_dropout: 0.0
+  duration_predictor:
+    conv_dropout: 0.0
+    attn_weights_dropout: 0.0
+    attn_out_dropout: 0.0
+  pitch_predictor:
+    conv_dropout: 0.0
+    attn_weights_dropout: 0.0
+    attn_out_dropout: 0.0
+  diffusion_model:
+    attn_weights_dropout: 0.0
+    attn_out_dropout: 0.0
+    wavenet_attn_weights_dropout: 0.0
+    wavenet_attn_out_dropout: 0.0
+    wavenet_gate_dropout: 0.0
