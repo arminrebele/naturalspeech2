@@ -6,71 +6,14 @@ from pathlib import Path
 import logging
 import torch
 import hydra
-from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
 
 from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.model import LossWrapper
-from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
-from naturalspeech2.utils.utils import setup_file_logger, compute_denominators
+from naturalspeech2.utils.utils import setup_file_logger, compute_denominators, generate_dummy_batch
 
 logger = logging.getLogger(__name__)
-
-def generate_dummy_batch(
-    batch_size: int, 
-    audio_samples: int, 
-    phoneme_samples: int, 
-    min_audio_samples: int,
-    vocab_size: int,
-    device: str
-) -> dict[str, torch.Tensor]:
-    
-    """Generates dummy tensors representing perfectly bucketed sequences."""
-
-    # Audio lengths are strictly bounded by the previous bucket's maximum
-    audio_lengths = torch.randint(min_audio_samples, audio_samples + 1, (batch_size,), device=device)
-    # Force at least one sequence to hit the max bucket boundary
-    audio_lengths[0] = audio_samples
-    idx_a = rearrange(torch.arange(audio_samples, device=device), 't -> 1 t')
-    audio_mask_2d = idx_a < rearrange(audio_lengths, 'b -> b 1')
-    
-    # Generate audio and apply zero-padding outside valid lengths
-    audio = torch.randn(batch_size, audio_samples, device=device)
-    audio = audio.masked_fill(~audio_mask_2d, 0.0)
-    
-    audio_mask = rearrange(audio_mask_2d, 'b t -> b t 1')
-    
-    # Phoneme lengths are NOT strictly bounded by previous buckets (fast vs slow speakers)
-    # So we maintain a generous variance down to half the bucket's max length
-    phoneme_tokens_lengths = torch.randint(max(1, phoneme_samples // 2), phoneme_samples + 1, (batch_size,), device=device)
-    phoneme_tokens_lengths[0] = phoneme_samples
-    idx_p = rearrange(torch.arange(phoneme_samples, device=device), 't -> 1 t')
-    phoneme_tokens_mask_2d = idx_p < rearrange(phoneme_tokens_lengths, 'b -> b 1')
-    
-    # Generate tokens and apply zero-padding outside valid lengths (matching pad_token_id=0)
-    phoneme_tokens = torch.randint(0, vocab_size, (batch_size, phoneme_samples), device=device)
-    phoneme_tokens = phoneme_tokens.masked_fill(~phoneme_tokens_mask_2d, 0)
-    
-    phoneme_tokens_mask = rearrange(phoneme_tokens_mask_2d, 'b t -> b t 1')
-
-    # Dummy pitch in Hz, frame-aligned to the mel/encodec grid
-    frame_count = (audio_samples + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
-    frame_lengths = (audio_lengths + ENCODER_HOP_LENGTH - 1) // ENCODER_HOP_LENGTH
-    idx_f = rearrange(torch.arange(frame_count, device=device), 't -> 1 t')
-    pitch_mask = idx_f < rearrange(frame_lengths, 'b -> b 1')
-    pitch = torch.rand(batch_size, frame_count, device=device) * 300.0 + 80.0  # ~80..380 Hz
-    pitch = pitch.masked_fill(~pitch_mask, 0.0)
-
-    return {
-        "audio": audio,
-        "audio_mask": audio_mask,
-        "audio_lengths": audio_lengths,
-        "phoneme_tokens": phoneme_tokens,
-        "phoneme_tokens_mask": phoneme_tokens_mask,
-        "phoneme_tokens_lengths": phoneme_tokens_lengths,
-        "pitch": pitch,
-    }
 
 def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, min_audio_samples: int, batch_size: int, vocab_size: int) -> None:
     

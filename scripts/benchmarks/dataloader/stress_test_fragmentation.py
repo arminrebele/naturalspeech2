@@ -8,11 +8,10 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 import torch._dynamo
-from find_max_batch_sizes import generate_dummy_batch
 from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.model import LossWrapper
-from naturalspeech2.utils.utils import setup_file_logger, compute_denominators
+from naturalspeech2.utils.utils import setup_file_logger, compute_denominators, generate_dummy_batch
 
 logger = logging.getLogger(__name__)
 
