@@ -12,6 +12,7 @@ from naturalspeech2.config.schema import model_cfg_from_omegaconf
 from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, DynamicBucketedBatchSampler
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
+from naturalspeech2.utils.utils import compute_denominators
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,7 @@ def benchmark(cfg: DictConfig):
     
     loader_iter = iter(loader)
     batch = next(loader_iter)
+    denominators = compute_denominators([batch], cfg)
     batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
     
     gpu_start = torch.cuda.Event(enable_timing=True)
@@ -116,21 +118,22 @@ def benchmark(cfg: DictConfig):
 
         gpu_start.record()
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            loss_dict, _ = model(**batch)
-            loss, _, _ = loss_wrapper(loss_dict, step=i)
+            loss_dict = model(**batch)
+            loss, _, _ = loss_wrapper(loss_dict, step=i, denominators=denominators)
         gpu_fwd_end.record()
             
         looped = False
         try:
-            batch = next(loader_iter)
+            batch_cpu = next(loader_iter)
         except StopIteration:
             logger.warning(f"Step {i}: Dataloader ran out of unique data and looped! Page cache may now artificially inflate disk I/O speeds.")
             loader_iter = iter(loader)
-            batch = next(loader_iter)
+            batch_cpu = next(loader_iter)
             looped = True
             
         gpu_h2d_start.record()
-        batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+        denominators = compute_denominators([batch_cpu], cfg)
+        batch = {k: v.to(device, non_blocking=True) for k, v in batch_cpu.items()}
         
         gpu_bwd_start.record()
         loss.backward()

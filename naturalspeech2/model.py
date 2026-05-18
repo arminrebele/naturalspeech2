@@ -326,10 +326,7 @@ class NaturalSpeech2Model(nn.Module):
             reduction='none',
         )  # [B, P]
         phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').to(predicted_log_durations.dtype)
-        duration_predictor_loss = (
-            (duration_loss_per_phoneme * phoneme_mask_flat).sum()
-            / phoneme_mask_flat.sum().clamp_min(1.0)
-        )
+        duration_predictor_loss = (duration_loss_per_phoneme * phoneme_mask_flat).sum()
 
         # Pitch loss
         voiced_mask = (pitch > 0).to(predicted_log_pitch.dtype)                                # [B, F]
@@ -341,7 +338,7 @@ class NaturalSpeech2Model(nn.Module):
             gt_log_pitch,
             reduction='none',
         )  # [B, F]
-        pitch_predictor_loss = (pitch_loss_per_frame * pitch_loss_mask).sum() / pitch_loss_mask.sum().clamp(min=1.0)
+        pitch_predictor_loss = (pitch_loss_per_frame * pitch_loss_mask).sum()
 
         diffusion_losses = self.diffusion_model(
             target_latents,           # [B, Ft, latent_dim]   in normalized space
@@ -514,7 +511,7 @@ class LossWrapper(torch.nn.Module):
             else:
                 self.current_weights[key] = target_weight
 
-    def forward(self, loss_dict: dict, step: int = None):
+    def forward(self, loss_dict: dict, step: int = None, denominators: dict = None):
         # log_dict values are detached tensors, NOT Python floats — materialising
         # to floats here would force a CPU↔GPU sync at training-step frequency
         # even when the consumer is only logging every log_interval steps.
@@ -530,6 +527,8 @@ class LossWrapper(torch.nn.Module):
         for key, value in loss_dict.items():
 
             if not isinstance(value, dict):
+                value = value / max(1, denominators[key])
+
                 weight = self.current_weights[key]
                 weighted_loss = value * weight
                 total_loss += weighted_loss
@@ -542,6 +541,8 @@ class LossWrapper(torch.nn.Module):
                 group_loss = 0.0
 
                 for sub_key, sub_value in value.items():
+                    sub_value = sub_value / max(1, denominators[sub_key])
+
                     sub_weight = self.current_weights[sub_key]
                     weighted_sub = sub_value * sub_weight
                     group_loss += weighted_sub

@@ -229,8 +229,7 @@ class DiffusionModel(nn.Module):
         # Data loss:     L_data = ‖ẑ₀ − z₀‖²,    masked mean over valid scalars.
         diff_sq = (z0_hat.float() - target_latents.float()) ** 2
         loss_mask = target_latents_mask.to(diff_sq.dtype)
-        valid_scalars = loss_mask.sum().clamp(min=1.0) * self.latent_dim
-        data_loss = (diff_sq * loss_mask).sum() / valid_scalars
+        data_loss = (diff_sq * loss_mask).sum()
 
         # Score loss:
         #   ŝ(z_t, t)          = (√α̅(t) · ẑ₀ − z_t) / (1 − α̅(t))        (predicted score, derived from ẑ₀)
@@ -257,8 +256,7 @@ class DiffusionModel(nn.Module):
         score_diff_sq = (score_hat - score_target) ** 2 * min_snr_clip
         score_gate = rearrange((t >= self.score_eps).to(diff_sq.dtype), 'b -> b 1 1')
         score_mask = loss_mask * score_gate
-        score_valid_scalars = score_mask.sum().clamp(min=1.0) * self.latent_dim
-        score_loss = (score_diff_sq * score_mask).sum() / score_valid_scalars
+        score_loss = (score_diff_sq * score_mask).sum()
 
         # CE-RVQ loss:
         #   Per quantizer j, score the partial residual ẑ₀ − Σᵢ<ⱼ eᵢ against every
@@ -426,7 +424,7 @@ class DiffusionModel(nn.Module):
             ce_per_scalar = F.cross_entropy(logits_flat, targets_flat, reduction='none')
             total_ce = total_ce + (ce_per_scalar * flat_mask).sum()
 
-        return total_ce / (Q * num_valid)
+        return total_ce
 
     def _forward_diffusion(
             self,

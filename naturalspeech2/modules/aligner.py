@@ -349,7 +349,7 @@ class ForwardSumLoss(nn.Module):
             frame_lengths.long(),
             phoneme_encodings_lengths.long(),
         )
-        return total_nll / frame_lengths.sum().to(total_nll.dtype)
+        return total_nll
 
 
 
@@ -376,5 +376,4 @@ class BinLoss(nn.Module):
 
         mask = rearrange(frame_mask, 'b f 1 -> b f').to(selected.dtype)
         nll_sum = -(selected * mask).sum()                       # sum over whole batch
-        total_frames = mask.sum().clamp_min(1.0)                 # total valid frames
-        return nll_sum / total_frames
+        return nll_sum

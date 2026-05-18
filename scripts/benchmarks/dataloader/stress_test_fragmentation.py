@@ -12,7 +12,7 @@ from find_max_batch_sizes import generate_dummy_batch
 from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.model import LossWrapper
-from naturalspeech2.utils.utils import setup_file_logger
+from naturalspeech2.utils.utils import setup_file_logger, compute_denominators
 
 logger = logging.getLogger(__name__)
 
@@ -100,9 +100,11 @@ def stress_test(cfg: DictConfig):
                         logger.info(f"  - {reason}")
                 logger.info("---------------------------------------\n")
 
+            denominators = compute_denominators([batch], cfg)
+
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                loss_dict, _ = model(**batch)
-                loss, _, _ = loss_wrapper(loss_dict)
+                loss_dict = model(**batch)
+                loss, _, _ = loss_wrapper(loss_dict, denominators=denominators)
                 
             loss.backward()
             

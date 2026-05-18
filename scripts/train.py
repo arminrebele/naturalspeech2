@@ -23,7 +23,7 @@ from naturalspeech2.model import NaturalSpeech2Model, LossWrapper, GradientAnaly
 from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.paths import CHECKPOINTS_DIR, PROJECT_ROOT
-from naturalspeech2.utils.utils import setup_file_logger
+from naturalspeech2.utils.utils import setup_file_logger, compute_denominators
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def get_lr(it, cfg):
     else:
         raise ValueError(f"Unknown lr_schedule: {schedule}")
 
-def get_infinite_batches(loader, device, start_epoch=0, start_batch_idx=0, overfit_single_batch=False):
+def get_infinite_batches(loader, start_epoch=0, start_batch_idx=0, overfit_single_batch=False, grad_accum_steps=1):
     """Continuously yields batches while tracking and setting dataloader state for instant resuming."""
     epoch = start_epoch
     sampler = loader.batch_sampler
@@ -65,19 +65,17 @@ def get_infinite_batches(loader, device, start_epoch=0, start_batch_idx=0, overf
     sampler.set_start_batch_idx(start_batch_idx)
 
     if overfit_single_batch:
-        logger.info("OVERFIT TEST ACTIVE: Yielding the exact same batch endlessly.")
-        batch = next(iter(loader))
-        for k, v in batch.items():
-            batch[k] = v.to(device, non_blocking=True)
+        logger.info(f"OVERFIT TEST ACTIVE: Yielding the exact same {grad_accum_steps} micro-batches endlessly.")
+        loader_iter = iter(loader)
+        overfit_batches = [next(loader_iter) for _ in range(grad_accum_steps)]
         
         while True:
-            yield batch, epoch, 0
+            for b in overfit_batches:
+                yield b, epoch, 0
 
     while True:
         for batch_idx, batch in enumerate(loader, start=sampler.start_batch_idx):
-            # Move immediately to device asynchronously
-            for k, v in batch.items():
-                batch[k] = v.to(device, non_blocking=True)
+            # Yield CPU batches to buffer into the lookahead queue
             yield batch, epoch, batch_idx
 
         # Epoch finished
@@ -86,7 +84,7 @@ def get_infinite_batches(loader, device, start_epoch=0, start_batch_idx=0, overf
         sampler.set_start_batch_idx(0)
 
 @torch.no_grad()
-def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, device):
+def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, device, cfg):
     out = {}
     model.eval()
     for split, loader in [('train', train_loader), ('val', val_loader)]:
@@ -103,12 +101,14 @@ def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, dev
                 loader_iter = iter(loader)
                 batch = next(loader_iter)
 
+            denominators = compute_denominators([batch], cfg)
+
             for k_b, v in batch.items():
                 batch[k_b] = v.to(device, non_blocking=True)
 
             with torch.autocast(device_type=device.split(':')[0], dtype=torch.bfloat16):
                 loss_dict = model(**batch)
-                total_loss, logged_losses, _ = loss_wrapper(loss_dict)
+                total_loss, logged_losses, _ = loss_wrapper(loss_dict, denominators=denominators)
 
             total_loss_sum = total_loss_sum + total_loss.detach()
             for key, val in logged_losses.items():
@@ -314,8 +314,13 @@ def train(cfg: DictConfig):
             resume="allow" if resume_wandb_id else None
         )
 
-    batch_generator = get_infinite_batches(train_loader, device, start_epoch, start_batch_idx, cfg.setup.overfit_single_batch)
-    batch, current_epoch, current_batch_idx = next(batch_generator)
+    batch_generator = get_infinite_batches(
+        train_loader, 
+        start_epoch, 
+        start_batch_idx, 
+        cfg.setup.overfit_single_batch, 
+        cfg.setup.gradient_accumulation_steps
+    )
     
     loss_analysis_accumulators = {}
     t0 = time.perf_counter()
@@ -326,12 +331,22 @@ def train(cfg: DictConfig):
         lr = get_lr(iter_num, cfg) if cfg.training.decay_lr else cfg.training.learning_rate
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
+
+        # -----------------------------
+        # Lookahead Queue & Denominators
+        # -----------------------------
+        lookahead_queue = []
+        for _ in range(cfg.setup.gradient_accumulation_steps):
+            cpu_batch, current_epoch, current_batch_idx = next(batch_generator)
+            lookahead_queue.append(cpu_batch)
+            
+        global_denominators = compute_denominators(lookahead_queue, cfg)
             
         # -----------------------------
         # Evaluation & Checkpointing
         # -----------------------------
         if iter_num % cfg.setup.eval_interval == 0 and cfg.setup.save_checkpoint:
-            losses = estimate_loss(model, train_loader, val_loader, loss_wrapper, cfg.setup.eval_iters, device)
+            losses = estimate_loss(model, train_loader, val_loader, loss_wrapper, cfg.setup.eval_iters, device, cfg)
             logger.info(f"Step {iter_num}: train loss {losses['train']['total_loss']:.4f}, val loss {losses['val']['total_loss']:.4f}")
             
             if cfg.wandb.log:
@@ -410,7 +425,6 @@ def train(cfg: DictConfig):
         # -----------------------------
         # Forward & Backward Pass
         # -----------------------------
-        grad_accum_steps = cfg.setup.gradient_accumulation_steps
         
         accum_loss = torch.zeros((), device=device)
         accum_logged_losses = {}
@@ -419,13 +433,6 @@ def train(cfg: DictConfig):
         
         if analyzer:
             logger.info(f"Performing gradient analysis for step {iter_num} (this takes extra time)...")
-            # 1. Buffer batches for identical sequential forward passes
-            micro_batches = []
-            for _ in range(grad_accum_steps):
-                # Move batch to CPU for buffering so we don't spike VRAM
-                cpu_batch = {k: v.cpu() for k, v in batch.items()}
-                micro_batches.append(cpu_batch)
-                batch, current_epoch, current_batch_idx = next(batch_generator)
                 
             # Capture RNG states for mathematical fairness during analysis passes
             cpu_rng_state = torch.get_rng_state()
@@ -441,16 +448,16 @@ def train(cfg: DictConfig):
                 torch.set_rng_state(cpu_rng_state)
                 torch.cuda.set_rng_state(gpu_rng_state, device=device)
                 
-                for b_cpu in micro_batches:
+                for b_cpu in lookahead_queue:
                     b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items()}
                     with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                         loss_dict = model(**b_gpu)
-                        _loss, _logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num)
+                        _loss, _logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num, denominators=global_denominators)
                         
                         if not loss_keys:
                             loss_keys = list(weighted_tensors.keys())
                             
-                        loss_term = weighted_tensors[loss_keys[loss_idx]] / grad_accum_steps
+                        loss_term = weighted_tensors[loss_keys[loss_idx]]
                     loss_term.backward()
                     
                     # Prevent High-Water Mark VRAM spikes: immediately free unused graphs
@@ -469,37 +476,35 @@ def train(cfg: DictConfig):
             torch.set_rng_state(cpu_rng_state)
             torch.cuda.set_rng_state(gpu_rng_state, device=device)
             
-            for b_cpu in micro_batches:
+            for b_cpu in lookahead_queue:
                 b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items()}
                 with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     loss_dict = model(**b_gpu)
-                    loss, logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num)
-                    scaled_loss = loss / grad_accum_steps
+                    loss, logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num, denominators=global_denominators)
                     
-                scaled_loss.backward()
+                loss.backward()
                 
-                accum_loss = accum_loss + scaled_loss.detach()
+                accum_loss = accum_loss + loss.detach()
                 for k, v in logged_losses.items():
-                    accum_logged_losses[k] = accum_logged_losses.get(k, 0.0) + v / grad_accum_steps
+                    accum_logged_losses[k] = accum_logged_losses.get(k, 0.0) + v
                     
-                del b_gpu, loss_dict, loss, logged_losses, weighted_tensors, scaled_loss
+                del b_gpu, loss_dict, loss, logged_losses, weighted_tensors
                     
         else:
-            for _ in range(grad_accum_steps):
+            for b_cpu in lookahead_queue:
+                b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items()}
                 with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    loss_dict = model(**batch)
-                    loss, logged_losses, _ = loss_wrapper(loss_dict, step=iter_num)
-                    scaled_loss = loss / grad_accum_steps
+                    loss_dict = model(**b_gpu)
+                    loss, logged_losses, _ = loss_wrapper(loss_dict, step=iter_num, denominators=global_denominators)
                     
-                scaled_loss.backward()
+                loss.backward()
                 
                 # GPU-side accumulation of detached scalars purely for logging
-                accum_loss = accum_loss + scaled_loss.detach()
+                accum_loss = accum_loss + loss.detach()
                 for k, v in logged_losses.items():
-                    accum_logged_losses[k] = accum_logged_losses.get(k, 0.0) + v / grad_accum_steps
+                    accum_logged_losses[k] = accum_logged_losses.get(k, 0.0) + v
                     
-                # Asynchronous pre-fetch of the next batch while backward pass computes
-                batch, current_epoch, current_batch_idx = next(batch_generator)
+                del b_gpu, loss_dict, loss, logged_losses
 
         max_norm = cfg.training.grad_clip if cfg.training.grad_clip != 0.0 else float('inf')
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
@@ -551,7 +556,7 @@ def train(cfg: DictConfig):
                     'best_val_loss': best_val_loss,
                     'wandb_id': wandb.run.id if cfg.wandb.log else None,
                     'epoch': current_epoch,
-                    'batch_idx': current_batch_idx, # Index of the pre-fetched batch for the upcoming step
+                    'batch_idx': current_batch_idx + 1, # Index of the upcoming batch
                 }
                 
                 ckpt_path = CHECKPOINTS_DIR / 'ckpt.pt'
@@ -619,11 +624,13 @@ def train(cfg: DictConfig):
         sr = cfg.dataloader.sampling_rate
         prompt_samples = int(cfg.model.prompt_seconds * sr)
 
-        audio_full = batch["audio"]                                # [B, T]
-        audio_lengths_full = batch["audio_lengths"]                # [B]
-        phoneme_tokens = batch["phoneme_tokens"]                   # [B, P]
-        phoneme_tokens_mask = batch["phoneme_tokens_mask"]         # [B, P, 1]
-        phoneme_tokens_lengths = batch["phoneme_tokens_lengths"]   # [B]
+        batch = lookahead_queue[0]
+
+        audio_full = batch["audio"].to(device)                                # [B, T]
+        audio_lengths_full = batch["audio_lengths"].to(device)                # [B]
+        phoneme_tokens = batch["phoneme_tokens"].to(device)                   # [B, P]
+        phoneme_tokens_mask = batch["phoneme_tokens_mask"].to(device)         # [B, P, 1]
+        phoneme_tokens_lengths = batch["phoneme_tokens_lengths"].to(device)   # [B]
 
         num_compare = min(2, audio_full.shape[0])
         table_rows = []
