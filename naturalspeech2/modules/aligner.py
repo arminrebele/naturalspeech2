@@ -375,6 +375,6 @@ class BinLoss(nn.Module):
         ).squeeze(-1)                                            # [B, F]
 
         mask = rearrange(frame_mask, 'b f 1 -> b f').to(selected.dtype)
-        nll = -(selected * mask).sum(dim=1)                      # [B]
-        denom = mask.sum(dim=1).clamp_min(1.0)                   # [B]
-        return (nll / denom).mean()
+        nll_sum = -(selected * mask).sum()                       # sum over whole batch
+        total_frames = mask.sum().clamp_min(1.0)                 # total valid frames
+        return nll_sum / total_frames
