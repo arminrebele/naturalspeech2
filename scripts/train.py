@@ -29,6 +29,24 @@ logger = logging.getLogger(__name__)
 
 COMPILE_MILESTONES = [1, 250]
 
+def get_loss_section(key: str, phase: str, split: str = "") -> str:
+    is_weighted = key.endswith("weighted")
+    
+    if "total_weighted" in key:
+        group = "Losses"
+    elif any(x in key for x in ["data_loss", "score_loss", "ce_rvq_loss"]):
+        group = "Diffusion-Losses"
+    elif any(x in key for x in ["forward_sum_loss", "bin_loss"]):
+        group = "Aligner-Losses"
+    else:
+        group = "Losses"
+        
+    weight_str = "(Weighted)" if is_weighted else "(Raw)"
+    if phase == "Train":
+        return f"Train: {group} {weight_str}"
+    else:
+        return f"Evaluation: {split}-{group} {weight_str}"
+
 def get_lr(it, cfg):
     learning_rate = cfg.training.learning_rate
     warmup_iters = cfg.setup.warmup_iters
@@ -313,6 +331,43 @@ def train(cfg: DictConfig):
             id=resume_wandb_id,
             resume="allow" if resume_wandb_id else None
         )
+        
+        wandb.define_metric("Train Iteration")
+        wandb.define_metric("Evaluation Iteration")
+        wandb.define_metric("Train: *", step_metric="Train Iteration")
+        wandb.define_metric("Gradient Analysis: *", step_metric="Train Iteration")
+        wandb.define_metric("Evaluation: *", step_metric="Evaluation Iteration")
+        
+        logger.info("Initializing static reference audios for evaluation (Table 2)...")
+        table_2_refs = []
+        num_static_refs = 6
+        prompt_samples_len = int(cfg.model.prompt_seconds * sampling_rate)
+        
+        valid_indices = []
+        all_indices = list(range(len(val_dataset)))
+        random.shuffle(all_indices)
+        
+        for idx in all_indices:
+            if len(valid_indices) == num_static_refs:
+                break
+            if val_dataset.dataset[idx]["audio_length"] >= prompt_samples_len:
+                valid_indices.append(idx)
+                
+        for idx in valid_indices:
+            sample = val_dataset[idx]
+            audio_np = sample["audio"].numpy()
+            
+            max_start = sample["audio_length"] - prompt_samples_len
+            start_idx = random.randint(0, max_start)
+            prompt_audio_np = audio_np[start_idx : start_idx + prompt_samples_len]
+            
+            table_2_refs.append({
+                "original_audio": wandb.Audio(audio_np, sample_rate=sampling_rate),
+                "prompt_audio": wandb.Audio(prompt_audio_np, sample_rate=sampling_rate),
+                "prompt_tensor": torch.from_numpy(prompt_audio_np),
+                "text": sample.get("text", "<Transcript not available>"),
+                "phoneme_tokens": torch.tensor(sample["phoneme_tokens"], dtype=torch.long)
+            })
 
     batch_generator = get_infinite_batches(
         train_loader, 
@@ -351,16 +406,16 @@ def train(cfg: DictConfig):
             
             if cfg.wandb.log:
                 eval_payload = {
-                    "eval/iter": iter_num,
-                    "eval/lr": lr,
-                    "eval/train/total_loss": losses['train']['total_loss'],
-                    "eval/val/total_loss": losses['val']['total_loss'],
+                    "Evaluation Iteration": iter_num,
+                    "Evaluation: Metrics/Learning Rate": lr,
+                    "Evaluation: Metrics/Train-Loss (Total)": losses['train']['total_loss'],
+                    "Evaluation: Metrics/Val-Loss (Total)": losses['val']['total_loss'],
                 }
                 
                 for k, v in losses['train']['logged_losses'].items():
-                    eval_payload[f"eval/train/losses/{k}"] = v
+                    eval_payload[f"{get_loss_section(k, 'Evaluation', 'Train')}/{k}"] = v
                 for k, v in losses['val']['logged_losses'].items():
-                    eval_payload[f"eval/val/losses/{k}"] = v
+                    eval_payload[f"{get_loss_section(k, 'Evaluation', 'Val')}/{k}"] = v
 
                 # --- Generation Testing ---
                 logger.info("Generating audio samples for evaluation...")
@@ -369,40 +424,90 @@ def train(cfg: DictConfig):
                 # sampling loop in eval mode so dropout (prompt encoder, predictors,
                 # WaveNet blocks) doesn't perturb inference.
                 unoptimized_model.eval()
-                wandb_audios = []
-                num_gen_samples = min(4, len(val_dataset))
-                test_indices = random.sample(range(len(val_dataset)), num_gen_samples)
-
-                for i, idx in enumerate(test_indices):
-                    sample = val_dataset[idx]
-                    tokens = custom_prompt_tokens[i % len(custom_prompt_tokens)]
-
-                    # Add batch dimension
-                    ref_audio = rearrange(sample["audio"], 't -> 1 t').to(device)
-                    ref_audio_len = torch.tensor([sample["audio_length"]]).to(device)
-
-                    ph_tokens = rearrange(torch.tensor(tokens), 'p -> 1 p').to(device)
-                    ph_tokens_len = torch.tensor([len(tokens)]).to(device)
-                    ph_tokens_mask = torch.ones((1, len(tokens), 1), dtype=torch.bool, device=device)
-
-                    gen_kwargs = {
-                        "reference_audio": ref_audio,
-                        "reference_audio_lengths": ref_audio_len,
-                        "phoneme_tokens": ph_tokens,
-                        "phoneme_tokens_mask": ph_tokens_mask,
-                        "phoneme_tokens_lengths": ph_tokens_len
-                    }
-
-                    # Unbatched generation (Batch size 1) — audio_lengths unused since B=1
-                    generated_audio, _ = unoptimized_model.generate(**gen_kwargs)
-
-                    audio_np = generated_audio[0].cpu().to(torch.float32).numpy()
-                    wandb_audios.append(
-                        wandb.Audio(audio_np, sample_rate=cfg.dataloader.sampling_rate, caption=f"Gen Sample {i}")
+                
+                # --- Table 1: Random Generation Examples ---
+                table_1_rows = []
+                ten_seconds_samples = int(10.0 * sampling_rate)
+                five_seconds_samples = int(5.0 * sampling_rate)
+                
+                random_indices = list(range(len(val_dataset)))
+                random.shuffle(random_indices)
+                test_idx = next(i for i in random_indices if val_dataset.dataset[i]["audio_length"] >= ten_seconds_samples)
+                sample = val_dataset[test_idx]
+                        
+                audio_np = sample["audio"].numpy()
+                max_start = sample["audio_length"] - ten_seconds_samples
+                start_idx = random.randint(0, max_start)
+                
+                prompt_5s_np = audio_np[start_idx : start_idx + five_seconds_samples]
+                prompt_10s_np = audio_np[start_idx : start_idx + ten_seconds_samples]
+                
+                prompt_idx = random.randint(0, len(custom_prompts) - 1)
+                target_text = custom_prompts[prompt_idx]
+                target_tokens = custom_prompt_tokens[prompt_idx]
+                
+                ph_tokens = rearrange(torch.tensor(target_tokens, dtype=torch.long), 'p -> 1 p').to(device)
+                ph_tokens_len = torch.tensor([len(target_tokens)]).to(device)
+                ph_tokens_mask = torch.ones((1, len(target_tokens), 1), dtype=torch.bool, device=device)
+                
+                for p_len, p_np in [(5.0, prompt_5s_np), (10.0, prompt_10s_np)]:
+                    ref_audio = rearrange(torch.from_numpy(p_np), 't -> 1 t').to(device)
+                    ref_audio_len = torch.tensor([p_np.shape[0]]).to(device)
+                    
+                    generated_audio, _ = unoptimized_model.generate(
+                        reference_audio=ref_audio,
+                        reference_audio_lengths=ref_audio_len,
+                        phoneme_tokens=ph_tokens,
+                        phoneme_tokens_mask=ph_tokens_mask,
+                        phoneme_tokens_lengths=ph_tokens_len
                     )
+                    
+                    table_1_rows.append([
+                        iter_num,
+                        p_len,
+                        target_text,
+                        wandb.Audio(p_np, sample_rate=sampling_rate),
+                        wandb.Audio(generated_audio[0].cpu().to(torch.float32).numpy(), sample_rate=sampling_rate),
+                    ])
+                        
+                # --- Table 2: Original vs. Generated ---
+                table_2_rows = []
+                for ref in table_2_refs:
+                    ref_audio = rearrange(ref["prompt_tensor"], 't -> 1 t').to(device)
+                    ref_audio_len = torch.tensor([ref["prompt_tensor"].shape[0]]).to(device)
+                    
+                    ph_tokens = rearrange(ref["phoneme_tokens"], 'p -> 1 p').to(device)
+                    ph_tokens_len = torch.tensor([ref["phoneme_tokens"].shape[0]]).to(device)
+                    ph_tokens_mask = torch.ones((1, ph_tokens.shape[1], 1), dtype=torch.bool, device=device)
+                    
+                    generated_audio, _ = unoptimized_model.generate(
+                        reference_audio=ref_audio,
+                        reference_audio_lengths=ref_audio_len,
+                        phoneme_tokens=ph_tokens,
+                        phoneme_tokens_mask=ph_tokens_mask,
+                        phoneme_tokens_lengths=ph_tokens_len
+                    )
+                    
+                    table_2_rows.append([
+                        iter_num,
+                        cfg.model.prompt_seconds,
+                        ref["text"],
+                        ref["original_audio"],
+                        ref["prompt_audio"],
+                        wandb.Audio(generated_audio[0].cpu().to(torch.float32).numpy(), sample_rate=sampling_rate),
+                    ])
+
                 unoptimized_model.train()
 
-                eval_payload["eval/generated_samples"] = wandb_audios
+                eval_payload["Evaluation: Random Generation Examples"] = wandb.Table(
+                    columns=["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt", "Speech-Prompt", "Generated Audio"],
+                    data=table_1_rows,
+                )
+                
+                eval_payload["Evaluation: Original vs. Generated"] = wandb.Table(
+                    columns=["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt", "Original Audio", "Speech-Prompt", "Generated Audio"],
+                    data=table_2_rows,
+                )
                 
                 wandb.log(eval_payload)
                 
@@ -570,24 +675,27 @@ def train(cfg: DictConfig):
                 
             if cfg.wandb.log:
                 log_payload = {
-                    "train/iter": iter_num,
-                    "train/loss": lossf,
-                    "train/time": dt * 1000,
-                    "train/lr": lr,
-                    "train/grad_norm": grad_norm.item(),
+                    "Train Iteration": iter_num,
+                    "Train: Metrics/Loss": lossf,
+                    "Train: Metrics/Time (ms)": dt * 1000,
+                    "Train: Metrics/Learning Rate": lr,
+                    "Train: Metrics/Gradient Norm": grad_norm.item(),
                 }
                 # Log individual balanced loss components as well — .item() here
                 # (inside log_interval) so we don't sync the GPU every step.
                 for k, v in accum_logged_losses.items():
-                    log_payload[f"train/losses/{k}"] = v.item()
+                    log_payload[f"{get_loss_section(k, 'Train')}/{k}"] = v.item()
 
                 # Perform expensive gradient analysis only when logging
                 if analyzer is not None:
                     grad_norms, cos_sims = analyzer.compute_metrics()
                     for k, v in grad_norms.items():
-                        log_payload[f"train/grad_norms/{k}"] = v
+                        if k.endswith("_total"):
+                            log_payload[f"Gradient Analysis: L2-Norms (Total)/{k}"] = v
+                        else:
+                            log_payload[f"Gradient Analysis: L2-Norms (Shared)/{k}"] = v
                     for k, v in cos_sims.items():
-                        log_payload[f"train/cos_sims/{k}"] = v
+                        log_payload[f"Gradient Analysis: Cosine-Similarity (Shared)/{k}"] = v
 
                 wandb.log(log_payload)
 
@@ -655,9 +763,9 @@ def train(cfg: DictConfig):
 
             table_rows.append([
                 i,
-                wandb.Audio(original_np, sample_rate=sr, caption=f"Original (clip {i})"),
-                wandb.Audio(prompt_np, sample_rate=sr, caption=f"Prompt (clip {i})"),
-                wandb.Audio(generated_np, sample_rate=sr, caption=f"Generated (clip {i})"),
+                wandb.Audio(original_np, sample_rate=sr),
+                wandb.Audio(prompt_np, sample_rate=sr),
+                wandb.Audio(generated_np, sample_rate=sr),
             ])
 
         wandb.log({
