@@ -210,6 +210,11 @@ class NaturalSpeech2Model(nn.Module):
         phoneme_tokens_lengths: torch.Tensor, # [B]       | int
 
         pitch: torch.Tensor,                  # [B, F]    | float | GT F0 in Hz (0.0 = unvoiced / padding)
+
+        return_diffusion_inputs: bool = False, # if True, also return the tensors that
+                                               # were passed into the diffusion model so a
+                                               # caller can re-run sample() with the same
+                                               # condition (overfit-test diagnostic).
     ):
         """
         B: batch size
@@ -361,6 +366,15 @@ class NaturalSpeech2Model(nn.Module):
                 "bin_loss": bin_loss,
             }
         }
+        if return_diffusion_inputs:
+            diffusion_inputs = {
+                "target_latents": target_latents,                # [B, Ft, latent_dim] normalized
+                "target_latents_mask": target_latents_mask,      # [B, Ft, 1] bool
+                "condition_target": condition_target,            # [B, Ft, D]
+                "prompt_encodings": prompt_encodings,            # [B, Fp, D]
+                "prompt_encodings_mask": prompt_encodings_mask,  # [B, Fp, 1] bool
+            }
+            return loss_dict, diffusion_inputs
         return loss_dict
 
     @torch.no_grad()

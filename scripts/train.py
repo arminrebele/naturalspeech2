@@ -820,6 +820,52 @@ def train(cfg: DictConfig):
         phoneme_tokens_mask = batch["phoneme_tokens_mask"].to(device)         # [B, P, 1]
         phoneme_tokens_lengths = batch["phoneme_tokens_lengths"].to(device)   # [B]
 
+        # -----------------------------
+        # Inference data_loss diagnostic
+        # -----------------------------
+        # Training data_loss is a one-step prediction error from a known noisy z_t.
+        # Inference chains N ODE steps from t=1 to t≈0, each step using the network's
+        # prediction. Per-step errors compound. Measuring the same MSE on the sampler's
+        # actual output tells us whether audio quality issues live in (a) the sampler
+        # trajectory or (b) something downstream (off-manifold predictions, decoder).
+        # Uses GT condition + GT prompt extracted from a fresh forward pass so the only
+        # variable being measured is the sampler integration error.
+        #
+        # Sweep `sampling_steps` to distinguish solver-discretization error from a
+        # weights-side gap (e.g. missing EMA, undertrained t bins). Monotonic drop to
+        # ~training data_loss = solver-bound; flat across step counts = weights-side.
+        logger.info("Computing inference_data_loss diagnostic...")
+        sampling_steps_sweep = [150, 300, 600, 1000]
+        with torch.no_grad():
+            _, diff_inputs = unoptimized_model(
+                audio=audio_full,
+                audio_mask=batch["audio_mask"].to(device),
+                audio_lengths=audio_lengths_full,
+                phoneme_tokens=phoneme_tokens,
+                phoneme_tokens_mask=phoneme_tokens_mask,
+                phoneme_tokens_lengths=phoneme_tokens_lengths,
+                pitch=batch["pitch"].to(device),
+                return_diffusion_inputs=True,
+            )
+            z0_true = diff_inputs["target_latents"].float()
+            z_mask = diff_inputs["target_latents_mask"].to(z0_true.dtype)
+            valid_scalars = z_mask.sum().clamp(min=1.0) * unoptimized_model.diffusion_model.latent_dim
+
+            sweep_payload = {}
+            for n_steps in sampling_steps_sweep:
+                z0_sampled = unoptimized_model.diffusion_model.sample(
+                    condition=diff_inputs["condition_target"],
+                    condition_mask=diff_inputs["target_latents_mask"],
+                    prompt_encodings=diff_inputs["prompt_encodings"],
+                    prompt_encodings_mask=diff_inputs["prompt_encodings_mask"],
+                    sampling_steps=n_steps,
+                )
+                diff_sq = (z0_sampled.float() - z0_true) ** 2
+                loss = (diff_sq * z_mask).sum() / valid_scalars
+                logger.info(f"  inference_data_loss @ {n_steps} steps = {loss.item():.6f}")
+                sweep_payload[f"eval/overfit_inference_data_loss_steps_{n_steps}"] = loss.item()
+        wandb.log(sweep_payload, step=iter_num)
+
         num_compare = min(2, audio_full.shape[0])
         table_rows = []
         for i in range(num_compare):
