@@ -453,7 +453,7 @@ def train(cfg: DictConfig):
     last_log_iter = start_iter - 1
     
     for iter_num in range(start_iter, cfg.setup.max_iters):
-        
+
         # Apply LR scheduling
         lr = get_lr(iter_num, cfg) if cfg.training.decay_lr else cfg.training.learning_rate
         for param_group in optimizer.param_groups:
@@ -585,7 +585,7 @@ def train(cfg: DictConfig):
                     data=table_2_rows,
                 )
                 
-                wandb.log(eval_payload)
+                wandb.log(eval_payload, step=iter_num)
                 
             if iter_num > 0 and losses['dev']['total_loss'] < best_dev_loss:
                 best_dev_loss = losses['dev']['total_loss']
@@ -777,7 +777,7 @@ def train(cfg: DictConfig):
                     for k, v in cos_sims.items():
                         log_payload[f"Gradient Analysis: Cosine-Similarity (Shared)/{k}"] = v
 
-                wandb.log(log_payload)
+                wandb.log(log_payload, step=iter_num)
 
             # Accumulate unweighted raw losses exclusively for the analysis table
             if cfg.setup.loss_analysis_run:
@@ -853,7 +853,7 @@ def train(cfg: DictConfig):
                 columns=["clip_idx", "original", "prompt", "generated"],
                 data=table_rows,
             )
-        })
+        }, step=iter_num)
         logger.info(f"Logged {num_compare} audio comparison rows to wandb.")
 
 
