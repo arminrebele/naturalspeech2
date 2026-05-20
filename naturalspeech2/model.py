@@ -460,6 +460,12 @@ class NaturalSpeech2Model(nn.Module):
         audio_lengths = frame_lengths * ENCODER_HOP_LENGTH                        # [B]
         return generated_audio, audio_lengths
 
+    def num_parameters(self, only_trainable: bool = True) -> int:
+        """Returns the total number of parameters in the model."""
+        if only_trainable:
+            return sum(p.numel() for p in self.parameters() if p.requires_grad)
+        return sum(p.numel() for p in self.parameters())
+
     def configure_optimizers(self, weight_decay, learning_rate, betas):
         # Start with all candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}

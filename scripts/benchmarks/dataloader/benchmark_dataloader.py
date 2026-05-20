@@ -131,8 +131,9 @@ def benchmark(cfg: DictConfig):
             batch_cpu = next(loader_iter)
             looped = True
             
-        gpu_h2d_start.record()
         denominators = compute_denominators([batch_cpu], cfg)
+        
+        gpu_h2d_start.record()
         batch = {k: v.to(device, non_blocking=True) for k, v in batch_cpu.items()}
         
         gpu_bwd_start.record()

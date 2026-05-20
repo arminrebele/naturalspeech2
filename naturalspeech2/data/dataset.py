@@ -343,6 +343,40 @@ class DynamicBucketedBatchSampler(Sampler):
         # Pre-calculate the exact number of batches for tqdm / DataLoader len()
         self._num_batches = self._compute_len()
 
+        # Calculate exact audio throughput statistics for logging
+        self.expected_batch_audio_samples = 0.0
+        self.variance_batch_audio_samples = 0.0
+        
+        bucket_stats = []
+        for b_idx, indices in self.bucket_to_indices.items():
+            bs = self.bucket_mapping[b_idx]['batch_size']
+            
+            if self.drop_last:
+                m_i = len(indices) // bs
+            else:
+                m_i = (len(indices) + bs - 1) // bs
+                
+            if m_i == 0:
+                continue
+                
+            actual_mean_bs = bs if self.drop_last else len(indices) / m_i
+            p_i = m_i / self._num_batches
+            bucket_lengths = lengths_arr[indices]
+            
+            bucket_stats.append({
+                'p_i': p_i,
+                'E_X_i': actual_mean_bs * np.mean(bucket_lengths),
+                'Var_X_i': actual_mean_bs * np.var(bucket_lengths)
+            })
+            
+        # Law of Total Expectation & Law of Total Variance
+        mu_X = sum(stat['p_i'] * stat['E_X_i'] for stat in bucket_stats)
+        expected_var = sum(stat['p_i'] * stat['Var_X_i'] for stat in bucket_stats)
+        var_expected = sum(stat['p_i'] * (stat['E_X_i'] - mu_X)**2 for stat in bucket_stats)
+        
+        self.expected_batch_audio_samples = mu_X
+        self.variance_batch_audio_samples = expected_var + var_expected
+
     def _compute_len(self) -> int:
         num_batches = 0
         for b_idx, indices in self.bucket_to_indices.items():

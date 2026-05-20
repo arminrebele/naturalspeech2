@@ -112,7 +112,7 @@ def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, dev
         total_loss_sum = torch.zeros((), device=device)
         log_dict_sums = {}
 
-        for k in range(eval_iters):
+        for _ in range(eval_iters):
             try:
                 batch = next(loader_iter)
             except StopIteration:
@@ -128,7 +128,7 @@ def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, dev
                 loss_dict = model(**batch)
                 total_loss, logged_losses, _ = loss_wrapper(loss_dict, denominators=denominators)
 
-            total_loss_sum = total_loss_sum + total_loss.detach()
+            total_loss_sum += total_loss.detach()
             for key, val in logged_losses.items():
                 log_dict_sums[key] = log_dict_sums.get(key, 0.0) + val
 
@@ -206,7 +206,6 @@ def train(cfg: DictConfig):
     token_vocabulary_size = tokenizer.token_vocabulary_size
 
     # Setup static generation prompts for evaluation
-    logger.info("Initializing custom text prompts for generation testing...")
     phonemizer = PhonemizerWrapper()
     
     custom_prompts = [
@@ -250,7 +249,6 @@ def train(cfg: DictConfig):
             sampling_rate=sampling_rate,
         )
     elif cfg.setup.init_from == 'resume':
-        logger.info(f"Resuming training from checkpoint in {CHECKPOINTS_DIR}...")
         ckpt_path = CHECKPOINTS_DIR / 'ckpt.pt'
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
 
@@ -275,7 +273,15 @@ def train(cfg: DictConfig):
         model_cfg_dict = checkpoint['model_cfg']
         start_batch_idx = checkpoint.get('batch_idx', 0) # Already points to the next batch due to pre-fetch
 
+        logger.info(f"Resuming training at iteration {start_iter} from checkpoint in {CHECKPOINTS_DIR}...")
+
     model.to(device)
+    
+    logger.info(f"Phoneme vocabulary size: {token_vocabulary_size}")
+    trainable_params = model.num_parameters()
+    total_params = model.num_parameters(only_trainable=False)
+    non_trainable_params = total_params - trainable_params
+    logger.info(f"Model has {total_params / 1e6:.2f}M total parameters ({trainable_params / 1e6:.2f}M trainable, {non_trainable_params / 1e6:.2f}M non-trainable).")
     
     loss_weights_dict = OmegaConf.to_container(cfg.model.loss_weights, resolve=True)
     loss_warmup_steps_dict = OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
@@ -338,7 +344,6 @@ def train(cfg: DictConfig):
         wandb.define_metric("Gradient Analysis: *", step_metric="Train Iteration")
         wandb.define_metric("Evaluation: *", step_metric="Evaluation Iteration")
         
-        logger.info("Initializing static reference audios for evaluation (Table 2)...")
         table_2_refs = []
         num_static_refs = 6
         prompt_samples_len = int(cfg.model.prompt_seconds * sampling_rate)
@@ -377,9 +382,19 @@ def train(cfg: DictConfig):
         cfg.setup.gradient_accumulation_steps
     )
     
+    sampler = train_loader.batch_sampler
+    G = cfg.setup.gradient_accumulation_steps
+    sr = sampling_rate
+    exp_minutes = (G * sampler.expected_batch_audio_samples) / sr / 60.0
+    std_minutes = math.sqrt(G * sampler.variance_batch_audio_samples) / sr / 60.0
+    cv_logical = std_minutes / exp_minutes
+    logger.info(f"Expected audio processed per logical step: ~{exp_minutes:.2f}m (± std of {std_minutes:.2f}m)")
+    logger.info(f"  - Relative Fluctuation (CV): {cv_logical:.1%}. Target: < 10% for good stability.")
+
     loss_analysis_accumulators = {}
-    t0 = time.perf_counter()
     logger.info("Starting training loop...")
+    last_log_time = time.perf_counter()
+    last_log_iter = start_iter - 1
     for iter_num in range(start_iter, cfg.setup.max_iters):
         
         # Apply LR scheduling
@@ -401,6 +416,7 @@ def train(cfg: DictConfig):
         # Evaluation & Checkpointing
         # -----------------------------
         if iter_num % cfg.setup.eval_interval == 0 and cfg.setup.save_checkpoint:
+            logger.info(f"Running evaluation loop...")
             losses = estimate_loss(model, train_loader, val_loader, loss_wrapper, cfg.setup.eval_iters, device, cfg)
             logger.info(f"Step {iter_num}: train loss {losses['train']['total_loss']:.4f}, val loss {losses['val']['total_loss']:.4f}")
             
@@ -513,7 +529,7 @@ def train(cfg: DictConfig):
                 
             if iter_num > 0 and losses['val']['total_loss'] < best_val_loss:
                 best_val_loss = losses['val']['total_loss']
-                logger.info(f"Saving new best model to {CHECKPOINTS_DIR} (Atomic Save)")
+                logger.info(f"Saving new best model to {CHECKPOINTS_DIR}")
                 
                 best_path = CHECKPOINTS_DIR / 'ckpt_best.safetensors'
                 best_tmp_path = CHECKPOINTS_DIR / 'ckpt_best.tmp.safetensors'
@@ -640,15 +656,19 @@ def train(cfg: DictConfig):
         # -----------------------------
         # Timing & Logging
         # -----------------------------
-        t1 = time.perf_counter()
-        dt = t1 - t0
-        t0 = t1
         
         if iter_num % cfg.setup.log_interval == 0:
             # CPU-GPU sync point due to .item() extraction
             lossf = accum_loss.item()
             
-            logger.info(f"Iter {iter_num}: loss {lossf:.4f}, time {dt*1000:.2f}ms")
+            current_time = time.perf_counter()
+            steps_since_last = iter_num - last_log_iter
+            dt_avg = (current_time - last_log_time) / steps_since_last
+            
+            logger.info(f"Iteration: {iter_num}, Loss: {lossf:.4f}, Avg. Time/Step: {dt_avg*1000:.2f}ms")
+            
+            last_log_time = current_time
+            last_log_iter = iter_num
             
             if iter_num > 0 and cfg.setup.save_checkpoint:
                 checkpoint_data = {
@@ -677,7 +697,7 @@ def train(cfg: DictConfig):
                 log_payload = {
                     "Train Iteration": iter_num,
                     "Train: Metrics/Loss": lossf,
-                    "Train: Metrics/Time (ms)": dt * 1000,
+                    "Train: Metrics/Avg. Time per Step (ms)": dt_avg * 1000,
                     "Train: Metrics/Learning Rate": lr,
                     "Train: Metrics/Gradient Norm": grad_norm.item(),
                 }
