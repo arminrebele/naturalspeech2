@@ -1,7 +1,8 @@
 name: "VCTK"
 source: "sanchit-gandhi/vctk"
 train_split: "train"
-val_split: "train" # VCTK doesn't have a predefined validation split
+dev_split: "train"    # VCTK doesn't have a predefined dev split
+test_split: "train"   # VCTK doesn't have a predefined test split
 text_column: "text"
 audio_column: "audio"
 filter_column: "file"

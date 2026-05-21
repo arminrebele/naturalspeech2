@@ -3,6 +3,7 @@ import time
 import math
 import random
 import logging
+import itertools
 from dotenv import load_dotenv
 
 # Load environment variables from .env file (e.g. WANDB_API_KEY)
@@ -28,6 +29,13 @@ from naturalspeech2.utils.utils import setup_file_logger, compute_denominators
 logger = logging.getLogger(__name__)
 
 COMPILE_MILESTONES = [1, 250]
+
+def override_dict(d, val):
+    for k, v in d.items():
+        if isinstance(v, dict):
+            override_dict(v, val)
+        else:
+            d[k] = val
 
 def get_loss_section(key: str, phase: str, split: str = "") -> str:
     is_weighted = key.endswith("weighted")
@@ -102,40 +110,79 @@ def get_infinite_batches(loader, start_epoch=0, start_batch_idx=0, overfit_singl
         sampler.set_start_batch_idx(0)
 
 @torch.no_grad()
-def estimate_loss(model, train_loader, val_loader, loss_wrapper, eval_iters, device, cfg):
+def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, eval_iters, grad_accum_steps, device, cfg):
     out = {}
     model.eval()
-    for split, loader in [('train', train_loader), ('val', val_loader)]:
-        loader_iter = iter(loader)
-        # Tensor-side accumulation across eval_iters; one .item() per split at the end
-        # so the eval loop doesn't sync the GPU on every iteration.
-        total_loss_sum = torch.zeros((), device=device)
-        log_dict_sums = {}
+    
+    # Store main loop's train sampler state
+    train_sampler = train_loader.batch_sampler
+    main_train_epoch = train_sampler.epoch
+    main_train_batch_idx = train_sampler.start_batch_idx
 
-        for _ in range(eval_iters):
+    # Override for eval to pull a random shuffled subset starting from 0
+    train_sampler.set_epoch(random.randint(0, 10000))
+    train_sampler.set_start_batch_idx(0)
+
+    # We evaluate 'dev' first. If it hits the end of the combined dataset
+    # before eval_iters, we restrict 'train' to that exact same number of steps.
+    target_iters = eval_iters
+
+    for split in ['dev', 'train']:
+        if split == 'dev':
+            # Chain both iterators so they act as one continuous dataloader
+            loader_iter = itertools.chain(dev_loader, test_loader)
+        else:
+            loader_iter = iter(train_loader)
+            
+        eval_total_loss_sum = torch.zeros((), device=device)
+        eval_log_dict_sums = {}
+        actual_eval_iters = 0
+
+        for _ in range(target_iters):
+            eval_lookahead_queue = []
             try:
-                batch = next(loader_iter)
+                for _ in range(grad_accum_steps):
+                    eval_lookahead_queue.append(next(loader_iter))
+                    
             except StopIteration:
-                loader_iter = iter(loader)
-                batch = next(loader_iter)
+                break # Drop incomplete logical batch and terminate this split's evaluation
 
-            denominators = compute_denominators([batch], cfg)
+            eval_denominators = compute_denominators(eval_lookahead_queue, cfg)
+            
+            eval_accum_loss = torch.zeros((), device=device)
+            eval_accum_logged_losses = {}
 
-            for k_b, v in batch.items():
-                batch[k_b] = v.to(device, non_blocking=True)
+            for batch in eval_lookahead_queue:
+                for k_b, v in batch.items():
+                    batch[k_b] = v.to(device, non_blocking=True)
 
-            with torch.autocast(device_type=device.split(':')[0], dtype=torch.bfloat16):
-                loss_dict = model(**batch)
-                total_loss, logged_losses, _ = loss_wrapper(loss_dict, denominators=denominators)
+                with torch.autocast(device_type=device.split(':')[0], dtype=torch.bfloat16):
+                    loss_dict = model(**batch)
+                    eval_loss, eval_logged_losses, _ = loss_wrapper(loss_dict, denominators=eval_denominators)
 
-            total_loss_sum += total_loss.detach()
-            for key, val in logged_losses.items():
-                log_dict_sums[key] = log_dict_sums.get(key, 0.0) + val
+                eval_accum_loss += eval_loss.detach()
+                for key, val in eval_logged_losses.items():
+                    eval_accum_logged_losses[key] = eval_accum_logged_losses.get(key, 0.0) + val
 
+            eval_total_loss_sum += eval_accum_loss
+            for key, val in eval_accum_logged_losses.items():
+                eval_log_dict_sums[key] = eval_log_dict_sums.get(key, 0.0) + val
+                
+            actual_eval_iters += 1
+            
+        if split == 'dev':
+            target_iters = actual_eval_iters
+            
+        divisor = actual_eval_iters
         out[split] = {
-            'total_loss': (total_loss_sum / eval_iters).item(),
-            'logged_losses': {key: (val / eval_iters).item() for key, val in log_dict_sums.items()},
+            'total_loss': (eval_total_loss_sum / divisor).item(),
+            'logged_losses': {key: (val / divisor).item() for key, val in eval_log_dict_sums.items()},
         }
+        
+    # Restore main loop's train sampler state
+    train_sampler.set_epoch(main_train_epoch)
+    train_sampler.set_start_batch_idx(main_train_batch_idx)
+
     model.train()
     return out
 
@@ -160,7 +207,7 @@ def create_dataloader(cfg, split: str, token_vocabulary_path: str = None):
         dataset,
         bucket_mapping=bucket_mapping,
         drop_last=cfg.dataloader.drop_last,
-        shuffle=cfg.dataloader.shuffle if split == cfg.dataset.train_split else False
+        shuffle=cfg.dataloader.shuffle
     )
     collate_fn = BucketedCollateFn(bucket_mapping=bucket_mapping)
     loader = DataLoader(
@@ -200,7 +247,8 @@ def train(cfg: DictConfig):
     
     logger.info("Initializing DataLoaders...")
     train_loader, train_dataset = create_dataloader(cfg, cfg.dataset.train_split, cfg.dataset.token_vocabulary_path)
-    val_loader, val_dataset = create_dataloader(cfg, cfg.dataset.val_split, train_dataset.token_vocabulary_path)
+    dev_loader, dev_dataset = create_dataloader(cfg, cfg.dataset.dev_split, train_dataset.token_vocabulary_path)
+    test_loader, _ = create_dataloader(cfg, cfg.dataset.test_split, train_dataset.token_vocabulary_path)
 
     tokenizer = PhonemeTokenizer(token_vocabulary_path=train_dataset.token_vocabulary_path, with_backend=False)
     token_vocabulary_size = tokenizer.token_vocabulary_size
@@ -235,7 +283,7 @@ def train(cfg: DictConfig):
 
     # State initialization variables
     start_iter = 0
-    best_val_loss = 1e9
+    best_dev_loss = 1e9
     start_epoch = 0
     start_batch_idx = 0
 
@@ -265,13 +313,13 @@ def train(cfg: DictConfig):
 
         model.load_state_dict(state_dict)
         start_iter = checkpoint['iter_num'] + 1
-        best_val_loss = checkpoint['best_val_loss']
-        start_epoch = checkpoint.get('epoch', 0)
+        best_dev_loss = checkpoint['best_dev_loss']
+        start_epoch = checkpoint['epoch']
 
         # Subsequent checkpoints must save the cfg the model was actually built with,
         # not the (possibly drifted) Hydra cfg captured above on resume.
         model_cfg_dict = checkpoint['model_cfg']
-        start_batch_idx = checkpoint.get('batch_idx', 0) # Already points to the next batch due to pre-fetch
+        start_batch_idx = checkpoint['batch_idx'] # Already points to the next batch due to pre-fetch
 
         logger.info(f"Resuming training at iteration {start_iter} from checkpoint in {CHECKPOINTS_DIR}...")
 
@@ -285,13 +333,6 @@ def train(cfg: DictConfig):
     
     loss_weights_dict = OmegaConf.to_container(cfg.model.loss_weights, resolve=True)
     loss_warmup_steps_dict = OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
-
-    def override_dict(d, val):
-        for k, v in d.items():
-            if isinstance(v, dict):
-                override_dict(v, val)
-            else:
-                d[k] = val
 
     if cfg.setup.loss_analysis_run:
         logger.info("LOSS ANALYSIS RUN: Forcing all dynamic loss weights to 1.0 and warmups to 0.")
@@ -349,17 +390,17 @@ def train(cfg: DictConfig):
         prompt_samples_len = int(cfg.model.prompt_seconds * sampling_rate)
         
         valid_indices = []
-        all_indices = list(range(len(val_dataset)))
+        all_indices = list(range(len(dev_dataset)))
         random.shuffle(all_indices)
         
         for idx in all_indices:
             if len(valid_indices) == num_static_refs:
                 break
-            if val_dataset.dataset[idx]["audio_length"] >= prompt_samples_len:
+            if dev_dataset.dataset[idx]["audio_length"] >= prompt_samples_len:
                 valid_indices.append(idx)
                 
         for idx in valid_indices:
-            sample = val_dataset[idx]
+            sample = dev_dataset[idx]
             audio_np = sample["audio"].numpy()
             
             max_start = sample["audio_length"] - prompt_samples_len
@@ -395,6 +436,7 @@ def train(cfg: DictConfig):
     logger.info("Starting training loop...")
     last_log_time = time.perf_counter()
     last_log_iter = start_iter - 1
+    
     for iter_num in range(start_iter, cfg.setup.max_iters):
         
         # Apply LR scheduling
@@ -417,21 +459,24 @@ def train(cfg: DictConfig):
         # -----------------------------
         if iter_num % cfg.setup.eval_interval == 0 and cfg.setup.save_checkpoint:
             logger.info(f"Running evaluation loop...")
-            losses = estimate_loss(model, train_loader, val_loader, loss_wrapper, cfg.setup.eval_iters, device, cfg)
-            logger.info(f"Step {iter_num}: train loss {losses['train']['total_loss']:.4f}, val loss {losses['val']['total_loss']:.4f}")
+            losses = estimate_loss(
+                model, train_loader, dev_loader, test_loader, loss_wrapper, 
+                cfg.setup.eval_iters, cfg.setup.gradient_accumulation_steps, device, cfg
+            )
+            logger.info(f"Step {iter_num}: train loss {losses['train']['total_loss']:.4f}, dev loss {losses['dev']['total_loss']:.4f}")
             
             if cfg.wandb.log:
                 eval_payload = {
                     "Evaluation Iteration": iter_num,
                     "Evaluation: Metrics/Learning Rate": lr,
-                    "Evaluation: Metrics/Train-Loss (Total)": losses['train']['total_loss'],
-                    "Evaluation: Metrics/Val-Loss (Total)": losses['val']['total_loss'],
+                    "Evaluation: Metrics/Train-Loss": losses['train']['total_loss'],
+                    "Evaluation: Metrics/Dev-Loss": losses['dev']['total_loss'],
                 }
                 
                 for k, v in losses['train']['logged_losses'].items():
                     eval_payload[f"{get_loss_section(k, 'Evaluation', 'Train')}/{k}"] = v
-                for k, v in losses['val']['logged_losses'].items():
-                    eval_payload[f"{get_loss_section(k, 'Evaluation', 'Val')}/{k}"] = v
+                for k, v in losses['dev']['logged_losses'].items():
+                    eval_payload[f"{get_loss_section(k, 'Evaluation', 'Dev')}/{k}"] = v
 
                 # --- Generation Testing ---
                 logger.info("Generating audio samples for evaluation...")
@@ -446,10 +491,10 @@ def train(cfg: DictConfig):
                 ten_seconds_samples = int(10.0 * sampling_rate)
                 five_seconds_samples = int(5.0 * sampling_rate)
                 
-                random_indices = list(range(len(val_dataset)))
+                random_indices = list(range(len(dev_dataset)))
                 random.shuffle(random_indices)
-                test_idx = next(i for i in random_indices if val_dataset.dataset[i]["audio_length"] >= ten_seconds_samples)
-                sample = val_dataset[test_idx]
+                test_idx = next(i for i in random_indices if dev_dataset.dataset[i]["audio_length"] >= ten_seconds_samples)
+                sample = dev_dataset[test_idx]
                         
                 audio_np = sample["audio"].numpy()
                 max_start = sample["audio_length"] - ten_seconds_samples
@@ -527,8 +572,8 @@ def train(cfg: DictConfig):
                 
                 wandb.log(eval_payload)
                 
-            if iter_num > 0 and losses['val']['total_loss'] < best_val_loss:
-                best_val_loss = losses['val']['total_loss']
+            if iter_num > 0 and losses['dev']['total_loss'] < best_dev_loss:
+                best_dev_loss = losses['dev']['total_loss']
                 logger.info(f"Saving new best model to {CHECKPOINTS_DIR}")
                 
                 best_path = CHECKPOINTS_DIR / 'ckpt_best.safetensors'
@@ -605,7 +650,7 @@ def train(cfg: DictConfig):
                     
                 loss.backward()
                 
-                accum_loss = accum_loss + loss.detach()
+                accum_loss += loss.detach()
                 for k, v in logged_losses.items():
                     accum_logged_losses[k] = accum_logged_losses.get(k, 0.0) + v
                     
@@ -621,7 +666,7 @@ def train(cfg: DictConfig):
                 loss.backward()
                 
                 # GPU-side accumulation of detached scalars purely for logging
-                accum_loss = accum_loss + loss.detach()
+                accum_loss += loss.detach()
                 for k, v in logged_losses.items():
                     accum_logged_losses[k] = accum_logged_losses.get(k, 0.0) + v
                     
@@ -678,7 +723,7 @@ def train(cfg: DictConfig):
                     'token_vocabulary_size': token_vocabulary_size,
                     'sampling_rate': sampling_rate,
                     'iter_num': iter_num,
-                    'best_val_loss': best_val_loss,
+                    'best_dev_loss': best_dev_loss,
                     'wandb_id': wandb.run.id if cfg.wandb.log else None,
                     'epoch': current_epoch,
                     'batch_idx': current_batch_idx + 1, # Index of the upcoming batch
