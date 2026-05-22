@@ -4,7 +4,7 @@ from einops import rearrange, repeat
 
 from naturalspeech2.modules.layers import Conv1D, RMSNorm
 from naturalspeech2.ops.monotonic_align import maximum_path
-from naturalspeech2.utils.init import standard_init
+from naturalspeech2.utils.initialization import standard_init
 
 
 

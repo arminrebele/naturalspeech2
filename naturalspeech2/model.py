@@ -17,7 +17,7 @@ from naturalspeech2.modules.pitch_predictor import PitchPredictor
 from naturalspeech2.modules.diffusion_model import DiffusionModel
 from naturalspeech2.modules.layers import Conv1D
 from naturalspeech2.utils.utils import create_mask_from_lengths
-from naturalspeech2.utils.init import standard_init
+from naturalspeech2.utils.initialization import standard_init
 
 
 class NaturalSpeech2Model(nn.Module):
