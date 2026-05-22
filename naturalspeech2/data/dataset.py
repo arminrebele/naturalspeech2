@@ -104,6 +104,23 @@ def resample_and_save_audio(sample: dict[str, Any], target_sr: int, resampled_di
         "f0": f0,
     }
 
+def filter_by_substring(texts: list[str], substring: str) -> list[bool]:
+    return [substring in text for text in texts]
+
+def filter_audio_lengths(lengths: list[int], min_length: Optional[int], max_length: Optional[int]) -> list[bool]:
+    return [
+        (min_length is None or l >= min_length) and
+        (max_length is None or l <= max_length)
+        for l in lengths
+    ]
+
+def filter_phoneme_lengths(lengths: list[int], min_length: Optional[int], max_length: Optional[int]) -> list[bool]:
+    return [
+        (min_length is None or l >= min_length) and
+        (max_length is None or l <= max_length)
+        for l in lengths
+    ]
+
 class DatasetWrapper(Dataset):
     def __init__(
         self,
@@ -115,6 +132,10 @@ class DatasetWrapper(Dataset):
         filter_column: Optional[str] = None,
         filter_substring: Optional[str] = None,
         token_vocabulary_path: Optional[str] = None,
+        min_audio_length: Optional[int] = 24000,
+        max_audio_length: Optional[int] = None,
+        min_phoneme_length: Optional[int] = 1,
+        max_phoneme_length: Optional[int] = None,
         sampling_rate: int = 24000,
         resample_on_the_fly: bool = False,
         num_proc_pitch: int = 4,
@@ -129,6 +150,10 @@ class DatasetWrapper(Dataset):
         self.audio_column = audio_column
         self.filter_column = filter_column
         self.filter_substring = filter_substring
+        self.min_audio_length = min_audio_length
+        self.max_audio_length = max_audio_length
+        self.min_phoneme_length = min_phoneme_length
+        self.max_phoneme_length = max_phoneme_length
 
         self.sampling_rate = sampling_rate
         self.resample_on_the_fly = resample_on_the_fly
@@ -176,7 +201,14 @@ class DatasetWrapper(Dataset):
             dataset.cleanup_cache_files()
             
             if self.filter_column and self.filter_substring:
-                dataset = dataset.filter(lambda x: self.filter_substring in x, input_columns=[self.filter_column])
+                dataset = dataset.filter(
+                    filter_by_substring,
+                    input_columns=[self.filter_column],
+                    batched=True,
+                    fn_kwargs={"substring": self.filter_substring},
+                    num_proc=self.num_proc_tokenize,
+                    desc="Filtering by substring",
+                )
                 dataset.cleanup_cache_files()
 
             if self.text_column != "text":
@@ -201,7 +233,7 @@ class DatasetWrapper(Dataset):
                 )
                 dataset.cleanup_cache_files()
             else:
-                logger.info("`resample_on_the_fly` is False. Pre-resampling and saving audio files.")
+                logger.info("`resample_on_the_fly` is False. Pre-resampling and saving audio files. Also extracting F0 and lengths.")
 
                 # Create the directory for resampled audio
                 self.resampled_dir.mkdir(parents=True, exist_ok=True)
@@ -212,7 +244,7 @@ class DatasetWrapper(Dataset):
                     remove_columns=["audio"],                       # Remove original audio dict column
                     fn_kwargs={"target_sr": self.sampling_rate, "resampled_dir": self.resampled_dir},
                     num_proc=self.num_proc_pitch,                   # Same cost shape as F0 extract (decode + pyworld)
-                    desc="Resampling and saving audio",
+                    desc="Resampling, extracting F0 and lengths, and saving audio",
                 )
                 
                 # Rename the path column back to 'audio'
@@ -222,6 +254,19 @@ class DatasetWrapper(Dataset):
                 dataset = dataset.cast_column("audio", Value("string"))
                 dataset.cleanup_cache_files()
             
+            if self.min_audio_length or self.max_audio_length:
+                logger.info(f"Filtering audio lengths: min={self.min_audio_length}, max={self.max_audio_length}")
+                
+                dataset = dataset.filter(
+                    filter_audio_lengths,
+                    input_columns=["audio_length"],
+                    batched=True,
+                    fn_kwargs={"min_length": self.min_audio_length, "max_length": self.max_audio_length},
+                    num_proc=self.num_proc_tokenize,
+                    desc="Filtering by audio length",
+                )
+                dataset.cleanup_cache_files()
+
             dataset = dataset.map(
                 phonemize_batch,
                 batched=True,
@@ -248,10 +293,24 @@ class DatasetWrapper(Dataset):
             )
             dataset.cleanup_cache_files()
 
+            if self.min_phoneme_length or self.max_phoneme_length:
+                logger.info(f"Filtering phoneme lengths: min={self.min_phoneme_length}, max={self.max_phoneme_length}")
+                
+                dataset = dataset.filter(
+                    filter_phoneme_lengths,
+                    input_columns=["phoneme_tokens_length"],
+                    batched=True,
+                    fn_kwargs={"min_length": self.min_phoneme_length, "max_length": self.max_phoneme_length},
+                    num_proc=self.num_proc_tokenize,
+                    desc="Filtering by phoneme length",
+                )
+                dataset.cleanup_cache_files()
+
             # Keep only the columns needed for training to save space
             dataset = dataset.select_columns(["audio", "audio_length", "f0", "phoneme_tokens", "phoneme_tokens_length", "original_index"])
             dataset.cleanup_cache_files()
 
+            logger.info(f"Saving processed dataset to {self.processed_dir} ...")
             self.processed_dir.mkdir(parents=True, exist_ok=True)
             dataset.save_to_disk(str(self.processed_dir))
 

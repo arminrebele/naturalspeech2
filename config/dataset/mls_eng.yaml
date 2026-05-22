@@ -8,3 +8,7 @@ audio_column: "audio"
 filter_column: null
 filter_substring: null
 token_vocabulary_path: null
+min_audio_length: 24000             # 1 second of audio at 24kHz
+max_audio_length: null
+min_phoneme_length: 1
+max_phoneme_length: null

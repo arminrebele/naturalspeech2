@@ -187,6 +187,18 @@ def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, ev
     return out
 
 def create_dataloader(cfg, split: str, token_vocabulary_path: str = None):
+    bucket_mapping = OmegaConf.to_container(cfg.dataloader.bucket_mapping, resolve=True)
+    
+    max_audio_length = cfg.dataset.max_audio_length
+    max_phoneme_length = cfg.dataset.max_phoneme_length
+    
+    if split != cfg.dataset.train_split:    # bucket mapping is derived from train split
+        largest_bucket = max(bucket_mapping, key=lambda x: x['audio_length'])
+        max_audio_length = largest_bucket['audio_length']
+        max_phoneme_length = largest_bucket['phoneme_length']
+        logger.info(f"Overriding upper boundaries for '{split}' split to match max bucket: "
+                    f"audio={max_audio_length}, phonemes={max_phoneme_length}")
+
     dataset = DatasetWrapper(
         dataset_source=cfg.dataset.source,
         dataset_name=cfg.dataset.name,
@@ -196,13 +208,16 @@ def create_dataloader(cfg, split: str, token_vocabulary_path: str = None):
         filter_column=cfg.dataset.filter_column,
         filter_substring=cfg.dataset.filter_substring,
         token_vocabulary_path=token_vocabulary_path,
+        min_audio_length=cfg.dataset.min_audio_length,
+        max_audio_length=max_audio_length,
+        min_phoneme_length=cfg.dataset.min_phoneme_length,
+        max_phoneme_length=max_phoneme_length,
         sampling_rate=cfg.dataloader.sampling_rate,
         resample_on_the_fly=cfg.dataloader.resample_on_the_fly,
         num_proc_pitch=cfg.dataloader.num_proc_pitch,
         num_proc_phonemize=cfg.dataloader.num_proc_phonemize,
         num_proc_tokenize=cfg.dataloader.num_proc_tokenize,
     )
-    bucket_mapping = OmegaConf.to_container(cfg.dataloader.bucket_mapping, resolve=True)
     sampler = DynamicBucketedBatchSampler(
         dataset,
         bucket_mapping=bucket_mapping,
