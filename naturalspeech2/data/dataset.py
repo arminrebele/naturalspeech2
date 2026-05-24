@@ -176,15 +176,61 @@ class DatasetWrapper(Dataset):
         if self.token_vocabulary_path is None:
             self.token_vocabulary_path = self.dataset_dir / clean_split / "token_vocabulary.json"
         
+        self.preprocessing_config = {
+            "dataset_source": self.dataset_source,
+            "dataset_name": self.dataset_name,
+            "split": self.split,
+            "text_column": self.text_column,
+            "audio_column": self.audio_column,
+            "filter_column": self.filter_column,
+            "filter_substring": self.filter_substring,
+            "token_vocabulary_path": str(self.token_vocabulary_path),
+            "min_audio_length": self.min_audio_length,
+            "max_audio_length": self.max_audio_length,
+            "min_phoneme_length": self.min_phoneme_length,
+            "max_phoneme_length": self.max_phoneme_length,
+            "sampling_rate": self.sampling_rate,
+            "resample_on_the_fly": self.resample_on_the_fly,
+        }
+
         # Pre-assign the appropriate get_audio function to avoid if/else overhead in __getitem__
         self._get_audio = self._get_audio_on_the_fly if self.resample_on_the_fly else self._get_audio_pre_resampled
 
         self.dataset = self._process_dataset()
 
     def _process_dataset(self) -> HFDataset:
+        config_path = self.processed_dir / "preprocessing_config.json"
+
         try:
             dataset = load_from_disk(str(self.processed_dir))
             logger.info(f"Successfully loaded processed dataset from {self.processed_dir}")
+            
+            if config_path.is_file():
+                with open(config_path, "r") as f:
+                    cached_config = json.load(f)
+                    
+                mismatches = []
+                for k, v in self.preprocessing_config.items():
+                    if k not in cached_config or cached_config[k] != v:
+                        mismatches.append(f"{k}: requested={v}, cached={cached_config.get(k)}")
+                        
+                for k, v in cached_config.items():
+                    if k not in self.preprocessing_config:
+                        mismatches.append(f"{k}: requested=<removed>, cached={v}")
+                
+                if mismatches:
+                    logger.warning(
+                        "\n" + "="*60 + "\n"
+                        "⚠️ PREPROCESSING CONFIGURATION MISMATCH ⚠️\n"
+                        "The cached dataset was loaded, but it was created with different parameters:\n"
+                        + "\n".join(f"  - {m}" for m in mismatches) + "\n\n"
+                        f"If you want to apply your new settings, manually delete the cache directory:\n"
+                        f"  {self.processed_dir}\n"
+                        + "="*60
+                    )
+            else:
+                logger.info("No preprocessing_config.json found in the cache directory. Cannot verify parameters.")
+
             return dataset
         except (
             FileNotFoundError, 
@@ -316,6 +362,10 @@ class DatasetWrapper(Dataset):
             logger.info(f"Saving processed dataset to {self.processed_dir} ...")
             self.processed_dir.mkdir(parents=True, exist_ok=True)
             dataset.save_to_disk(str(self.processed_dir))
+
+            # Save the preprocessing configuration for future cache verification
+            with open(config_path, "w") as f:
+                json.dump(self.preprocessing_config, f, indent=4)
 
             logger.info(f"Completely deleting project cache directory: {self.cache_dir}")
             del dataset
