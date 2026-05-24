@@ -2,7 +2,7 @@ import json
 from tqdm import tqdm
 from collections.abc import Iterable
 
-from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
+from naturalspeech2.data.phonemizer import PhonemizerWrapper
 
 
 class PhonemeTokenizer:

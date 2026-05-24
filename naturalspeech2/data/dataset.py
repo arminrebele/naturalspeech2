@@ -16,7 +16,7 @@ from typing import Any, Optional, Iterator
 
 from naturalspeech2.paths import DATA_DIR
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer, build_token_vocabulary
-from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
+from naturalspeech2.data.phonemizer import PhonemizerWrapper
 from naturalspeech2.data.pitch_extractor import PitchExtractor
 from naturalspeech2.utils.utils import create_mask_from_lengths
 from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
