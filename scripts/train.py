@@ -450,6 +450,7 @@ def train(cfg: DictConfig):
     logger.info(f"  - Relative Fluctuation (CV): {cv_logical:.1%}. Target: < 10% for good stability.")
 
     loss_analysis_accumulators = {}
+    loss_analysis_steps_counted = 0
     logger.info("Starting training loop...")
     last_log_time = time.perf_counter()
     last_log_iter = start_iter - 1
@@ -760,7 +761,8 @@ def train(cfg: DictConfig):
                 wandb.log(log_payload, step=iter_num)
 
             # Accumulate unweighted raw losses exclusively for the analysis table
-            if cfg.setup.loss_analysis_run:
+            if cfg.setup.loss_analysis_run and iter_num >= (cfg.setup.max_iters // 2):
+                loss_analysis_steps_counted += 1
                 for k, v in accum_logged_losses.items():
                     if not k.endswith("_weighted"):
                         loss_analysis_accumulators[k] = loss_analysis_accumulators.get(k, 0.0) + v.item()
@@ -770,10 +772,10 @@ def train(cfg: DictConfig):
     # -----------------------------
     if cfg.setup.loss_analysis_run:
         logger.info("========== LOSS ANALYSIS SUMMARY ==========")
-        logger.info(f"Analyzed over {cfg.setup.max_iters} iterations.")
+        logger.info(f"Analyzed over the last {loss_analysis_steps_counted} logged steps (between iterations {cfg.setup.max_iters // 2} and {cfg.setup.max_iters - 1}).")
         logger.info("Average raw unweighted loss magnitudes:")
         for k, v in loss_analysis_accumulators.items():
-            avg = v / cfg.setup.max_iters
+            avg = v / loss_analysis_steps_counted
             logger.info(f"  {k}: {avg:.4f}")
         logger.info("===========================================")
 
