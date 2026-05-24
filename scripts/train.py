@@ -403,12 +403,6 @@ def train(cfg: DictConfig):
             resume="allow" if resume_wandb_id else None
         )
         
-        wandb.define_metric("Train Iteration")
-        wandb.define_metric("Evaluation Iteration")
-        wandb.define_metric("Train: *", step_metric="Train Iteration")
-        wandb.define_metric("Gradient Analysis: *", step_metric="Train Iteration")
-        wandb.define_metric("Evaluation: *", step_metric="Evaluation Iteration")
-        
         table_2_refs = []
         num_static_refs = 6
         prompt_samples_len = int(cfg.model.prompt_seconds * sampling_rate)
@@ -491,7 +485,6 @@ def train(cfg: DictConfig):
             
             if cfg.wandb.log:
                 eval_payload = {
-                    "Evaluation Iteration": iter_num,
                     "Evaluation: Metrics/Learning Rate": lr,
                     "Evaluation: Metrics/Train-Loss": losses['train']['total_loss'],
                     "Evaluation: Metrics/Dev-Loss": losses['dev']['total_loss'],
@@ -743,7 +736,6 @@ def train(cfg: DictConfig):
                 
             if cfg.wandb.log:
                 log_payload = {
-                    "Train Iteration": iter_num,
                     "Train: Metrics/Loss": lossf,
                     "Train: Metrics/Avg. Time per Step (ms)": dt_avg * 1000,
                     "Train: Metrics/Learning Rate": lr,
