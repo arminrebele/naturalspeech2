@@ -1,13 +1,19 @@
-device: "cuda"
-init_from: "scratch"     
-save_checkpoint: False
-eval_interval: 10000
-log_interval: 10         # Wandb logs the norms every 10 steps so it's not too spammy
-eval_iters: 0
-max_iters: 200
-gradient_accumulation_steps: 5
-warmup_iters: 0          
-lr_decay_iters: 200
-overfit_single_batch: False
-loss_analysis_run: False
-gradient_analysis_run: True
+# @package _global_
+
+setup:
+  device: "cuda"
+  init_from: "scratch"     
+  save_checkpoint: False
+  eval_interval: 10000
+  log_interval: 10         # Wandb logs the norms every 10 steps so it's not too spammy
+  eval_iters: 0
+  max_iters: 200
+  gradient_accumulation_steps: 5
+  warmup_iters: 0          
+  lr_decay_iters: ${setup.max_iters}
+  overfit_single_batch: False
+  loss_analysis_run: False
+  gradient_analysis_run: True
+
+training:
+  lr_schedule: "cosine"

@@ -30,6 +30,9 @@ setup:
   loss_analysis_run: False
   gradient_analysis_run: False
 
+training:
+  lr_schedule: "cosine"
+
 model:
   phoneme_encoder:
     conv_dropout: 0.0

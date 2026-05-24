@@ -363,7 +363,7 @@ def train(cfg: DictConfig):
         override_dict(loss_weights_dict, 1.0)
         override_dict(loss_warmup_steps_dict, 0)
     elif cfg.setup.overfit_single_batch:
-        logger.info("OVERFIT TEST: Forcing loss warmups to 0 (the 1000-iter ramp would otherwise eat half a 2000-iter run).")
+        logger.info("OVERFIT TEST: Forcing loss warmups to 0. Warmups would complicate the verification of each loss term's ability to converge to near-zero.")
         override_dict(loss_warmup_steps_dict, 0)
             
     loss_wrapper = LossWrapper(
