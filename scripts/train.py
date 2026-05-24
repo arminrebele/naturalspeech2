@@ -481,6 +481,7 @@ def train(cfg: DictConfig):
         # Evaluation & Checkpointing
         # -----------------------------
         if iter_num % cfg.setup.eval_interval == 0 and cfg.setup.save_checkpoint:
+            eval_start_time = time.perf_counter()
             logger.info(f"Running evaluation loop...")
             losses = estimate_loss(
                 model, train_loader, dev_loader, test_loader, loss_wrapper, 
@@ -587,6 +588,8 @@ def train(cfg: DictConfig):
                     best_path.replace(best_bak_path)
                 # 3. Rename temp file to final destination (atomic)
                 best_tmp_path.replace(best_path)
+                
+            last_log_time += time.perf_counter() - eval_start_time
 
         # -----------------------------
         # Forward & Backward Pass
