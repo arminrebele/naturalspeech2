@@ -306,8 +306,11 @@ class DatasetWrapper(Dataset):
                 )
                 dataset.cleanup_cache_files()
 
-            # Keep only the columns needed for training to save space
-            dataset = dataset.select_columns(["audio", "audio_length", "f0", "phoneme_tokens", "phoneme_tokens_length", "original_index"])
+            # Keep only the columns needed for training to save space.
+            # `text` survives because the eval block surfaces it in
+            # Table 2 ("Original vs. Generated") and the overfit_audio_comparison
+            # wandb table to show the GT transcript alongside the generated audio.
+            dataset = dataset.select_columns(["audio", "audio_length", "f0", "phoneme_tokens", "phoneme_tokens_length", "original_index", "text"])
             dataset.cleanup_cache_files()
 
             logger.info(f"Saving processed dataset to {self.processed_dir} ...")
@@ -340,16 +343,17 @@ class DatasetWrapper(Dataset):
 
     def __getitem__(self, idx: int) -> dict[str, Any]:
         item = self.dataset[idx]
-        
+
         audio = self._get_audio(item["audio"])
 
         return {
-            "audio": audio, # [T] 
+            "audio": audio, # [T]
             "pitch": torch.tensor(item["f0"], dtype=torch.float32), # [F]
             "phoneme_tokens": item["phoneme_tokens"],
             "phoneme_tokens_length": item["phoneme_tokens_length"],
             "original_index": item["original_index"],
             "audio_length": audio.shape[-1],
+            "text": item["text"],
         }
 
 class DynamicBucketedBatchSampler(Sampler):
@@ -549,14 +553,21 @@ class BucketedCollateFn:
 
         phoneme_tokens_mask = create_mask_from_lengths(phoneme_tokens_lengths, target_phoneme_len) # [B, P, 1]
         
+        # GT transcripts pass through as a list[str] alongside the tensor
+        # payload — consumed by the eval block's Table 2 / overfit_audio_comparison
+        # text columns. Not tensor-collatable; the training loop ignores it.
+        text_list = [item["text"] for item in batch]
+
         return {
             "audio": audio_padded,                      # [B, static_T]
-            "audio_mask": audio_mask,                   # [B, static_T, 1]  
-            "audio_lengths": audio_lengths,             # [B]  
-            
+            "audio_mask": audio_mask,                   # [B, static_T, 1]
+            "audio_lengths": audio_lengths,             # [B]
+
             "pitch": pitch_padded,                      # [B, static_F]
-            
+
             "phoneme_tokens": phoneme_padded,           # [B, static_P]
             "phoneme_tokens_mask": phoneme_tokens_mask, # [B, static_P, 1]
             "phoneme_tokens_lengths": phoneme_tokens_lengths, # [B]
+
+            "text": text_list,                          # list[str] of length B
         }

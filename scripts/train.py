@@ -16,12 +16,11 @@ import wandb
 import hydra
 from omegaconf import DictConfig, OmegaConf
 from safetensors.torch import save_model
-from einops import rearrange
 
 from naturalspeech2.config.schema import model_cfg_from_omegaconf
 from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, DynamicBucketedBatchSampler
+from naturalspeech2.inference import compute_inference_data_loss, generate_audio
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper, GradientAnalyzer
-from naturalspeech2.data.phonemizer_wrapper import PhonemizerWrapper
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.paths import CHECKPOINTS_DIR, PROJECT_ROOT
 from naturalspeech2.utils.utils import setup_file_logger, compute_denominators
@@ -153,11 +152,17 @@ def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, ev
             eval_accum_logged_losses = {}
 
             for batch in eval_lookahead_queue:
-                for k_b, v in batch.items():
-                    batch[k_b] = v.to(device, non_blocking=True)
+                # Skip non-tensor fields (`text: list[str]` from the collate)
+                # and exclude them from the model() call since forward()
+                # has an explicit kwarg list.
+                tensor_batch = {
+                    k: v.to(device, non_blocking=True)
+                    for k, v in batch.items()
+                    if isinstance(v, torch.Tensor)
+                }
 
                 with torch.autocast(device_type=device.split(':')[0], dtype=torch.bfloat16):
-                    loss_dict = model(**batch)
+                    loss_dict = model(**tensor_batch)
                     eval_loss, eval_logged_losses, _ = loss_wrapper(loss_dict, denominators=eval_denominators)
 
                 eval_accum_loss += eval_loss.detach()
@@ -265,12 +270,16 @@ def train(cfg: DictConfig):
     dev_loader, dev_dataset = create_dataloader(cfg, cfg.dataset.dev_split, train_dataset.token_vocabulary_path)
     test_loader, _ = create_dataloader(cfg, cfg.dataset.test_split, train_dataset.token_vocabulary_path)
 
-    tokenizer = PhonemeTokenizer(token_vocabulary_path=train_dataset.token_vocabulary_path, with_backend=False)
-    token_vocabulary_size = tokenizer.token_vocabulary_size
+    # Shared tokenizer with espeak backend: feeds vocab_size to model construction
+    # AND is attached as model._inference_tokenizer below so the eval block's
+    # generate_audio() calls hide phoneme plumbing.
+    inference_tokenizer = PhonemeTokenizer(
+        token_vocabulary_path=train_dataset.token_vocabulary_path, with_backend=True,
+    )
+    token_vocabulary_size = inference_tokenizer.token_vocabulary_size
 
-    # Setup static generation prompts for evaluation
-    phonemizer = PhonemizerWrapper()
-    
+    # Eval block's static text prompts. generate_audio re-phonemizes per call
+    # (~50ms × 4 prompts × eval intervals — negligible per inference.md §4.2).
     custom_prompts = [
         "Hello, world! This is a test.", # Short (~3s)
         "The quick brown fox jumps over the lazy dog, while the sun sets.", # Medium (~6s)
@@ -286,12 +295,6 @@ def train(cfg: DictConfig):
          "voices are becoming indistinguishable. This marks a paradigm shift "
          "in how we interact with technology on a daily basis.") # Very long (~30s)
     ]
-    
-    custom_prompt_tokens = []
-    for prompt in custom_prompts:
-        phonemes = phonemizer(prompt)
-        tokens = tokenizer(phonemes)
-        custom_prompt_tokens.append(tokens)
 
     sampling_rate = cfg.dataloader.sampling_rate
     model_cfg_dict = OmegaConf.to_container(cfg.model, resolve=True)
@@ -339,7 +342,13 @@ def train(cfg: DictConfig):
         logger.info(f"Resuming training at iteration {start_iter} from checkpoint in {CHECKPOINTS_DIR}...")
 
     model.to(device)
-    
+
+    # Attach inference helpers for the eval block's generate_audio() calls.
+    # These are non-Parameter/Buffer attributes — don't pollute state_dict, don't
+    # affect torch.compile, don't affect forward(). generate_audio() reads them.
+    model._inference_tokenizer = inference_tokenizer
+    model._inference_sampling_rate = sampling_rate
+
     logger.info(f"Phoneme vocabulary size: {token_vocabulary_size}")
     trainable_params = model.num_parameters()
     total_params = model.num_parameters(only_trainable=False)
@@ -426,8 +435,7 @@ def train(cfg: DictConfig):
                 "original_audio": wandb.Audio(audio_np, sample_rate=sampling_rate),
                 "prompt_audio": wandb.Audio(prompt_audio_np, sample_rate=sampling_rate),
                 "prompt_tensor": torch.from_numpy(prompt_audio_np),
-                "text": sample.get("text", "<Transcript not available>"),
-                "phoneme_tokens": torch.tensor(sample["phoneme_tokens"], dtype=torch.long)
+                "text": sample["text"],
             })
 
     batch_generator = get_infinite_batches(
@@ -520,57 +528,34 @@ def train(cfg: DictConfig):
                 
                 prompt_idx = random.randint(0, len(custom_prompts) - 1)
                 target_text = custom_prompts[prompt_idx]
-                target_tokens = custom_prompt_tokens[prompt_idx]
-                
-                ph_tokens = rearrange(torch.tensor(target_tokens, dtype=torch.long), 'p -> 1 p').to(device)
-                ph_tokens_len = torch.tensor([len(target_tokens)]).to(device)
-                ph_tokens_mask = torch.ones((1, len(target_tokens), 1), dtype=torch.bool, device=device)
-                
+
                 for p_len, p_np in [(5.0, prompt_5s_np), (10.0, prompt_10s_np)]:
-                    ref_audio = rearrange(torch.from_numpy(p_np), 't -> 1 t').to(device)
-                    ref_audio_len = torch.tensor([p_np.shape[0]]).to(device)
-                    
-                    generated_audio, _ = unoptimized_model.generate(
-                        reference_audio=ref_audio,
-                        reference_audio_lengths=ref_audio_len,
-                        phoneme_tokens=ph_tokens,
-                        phoneme_tokens_mask=ph_tokens_mask,
-                        phoneme_tokens_lengths=ph_tokens_len
+                    audio_np, length = generate_audio(
+                        unoptimized_model, p_np, target_text=target_text,
                     )
-                    
+
                     table_1_rows.append([
                         iter_num,
                         p_len,
                         target_text,
                         wandb.Audio(p_np, sample_rate=sampling_rate),
-                        wandb.Audio(generated_audio[0].cpu().to(torch.float32).numpy(), sample_rate=sampling_rate),
+                        wandb.Audio(audio_np[:length], sample_rate=sampling_rate),
                     ])
                         
                 # --- Table 2: Original vs. Generated ---
                 table_2_rows = []
                 for ref in table_2_refs:
-                    ref_audio = rearrange(ref["prompt_tensor"], 't -> 1 t').to(device)
-                    ref_audio_len = torch.tensor([ref["prompt_tensor"].shape[0]]).to(device)
-                    
-                    ph_tokens = rearrange(ref["phoneme_tokens"], 'p -> 1 p').to(device)
-                    ph_tokens_len = torch.tensor([ref["phoneme_tokens"].shape[0]]).to(device)
-                    ph_tokens_mask = torch.ones((1, ph_tokens.shape[1], 1), dtype=torch.bool, device=device)
-                    
-                    generated_audio, _ = unoptimized_model.generate(
-                        reference_audio=ref_audio,
-                        reference_audio_lengths=ref_audio_len,
-                        phoneme_tokens=ph_tokens,
-                        phoneme_tokens_mask=ph_tokens_mask,
-                        phoneme_tokens_lengths=ph_tokens_len
+                    audio_np, length = generate_audio(
+                        unoptimized_model, ref["prompt_tensor"], target_text=ref["text"],
                     )
-                    
+
                     table_2_rows.append([
                         iter_num,
                         cfg.model.prompt_seconds,
                         ref["text"],
                         ref["original_audio"],
                         ref["prompt_audio"],
-                        wandb.Audio(generated_audio[0].cpu().to(torch.float32).numpy(), sample_rate=sampling_rate),
+                        wandb.Audio(audio_np[:length], sample_rate=sampling_rate),
                     ])
 
                 unoptimized_model.train()
@@ -630,7 +615,7 @@ def train(cfg: DictConfig):
                 torch.cuda.set_rng_state(gpu_rng_state, device=device)
                 
                 for b_cpu in lookahead_queue:
-                    b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items()}
+                    b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items() if isinstance(v, torch.Tensor)}
                     with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                         loss_dict = model(**b_gpu)
                         _loss, _logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num, denominators=global_denominators)
@@ -658,7 +643,7 @@ def train(cfg: DictConfig):
             torch.cuda.set_rng_state(gpu_rng_state, device=device)
             
             for b_cpu in lookahead_queue:
-                b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items()}
+                b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items() if isinstance(v, torch.Tensor)}
                 with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     loss_dict = model(**b_gpu)
                     loss, logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num, denominators=global_denominators)
@@ -673,7 +658,7 @@ def train(cfg: DictConfig):
                     
         else:
             for b_cpu in lookahead_queue:
-                b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items()}
+                b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items() if isinstance(v, torch.Tensor)}
                 with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                     loss_dict = model(**b_gpu)
                     loss, logged_losses, _ = loss_wrapper(loss_dict, step=iter_num, denominators=global_denominators)
@@ -816,9 +801,6 @@ def train(cfg: DictConfig):
 
         audio_full = batch["audio"].to(device)                                # [B, T]
         audio_lengths_full = batch["audio_lengths"].to(device)                # [B]
-        phoneme_tokens = batch["phoneme_tokens"].to(device)                   # [B, P]
-        phoneme_tokens_mask = batch["phoneme_tokens_mask"].to(device)         # [B, P, 1]
-        phoneme_tokens_lengths = batch["phoneme_tokens_lengths"].to(device)   # [B]
 
         # -----------------------------
         # Inference data_loss diagnostic
@@ -835,35 +817,14 @@ def train(cfg: DictConfig):
         # weights-side gap (e.g. missing EMA, undertrained t bins). Monotonic drop to
         # ~training data_loss = solver-bound; flat across step counts = weights-side.
         logger.info("Computing inference_data_loss diagnostic...")
-        sampling_steps_sweep = [150, 300, 600, 1000]
-        with torch.no_grad():
-            _, diff_inputs = unoptimized_model(
-                audio=audio_full,
-                audio_mask=batch["audio_mask"].to(device),
-                audio_lengths=audio_lengths_full,
-                phoneme_tokens=phoneme_tokens,
-                phoneme_tokens_mask=phoneme_tokens_mask,
-                phoneme_tokens_lengths=phoneme_tokens_lengths,
-                pitch=batch["pitch"].to(device),
-                return_diffusion_inputs=True,
-            )
-            z0_true = diff_inputs["target_latents"].float()
-            z_mask = diff_inputs["target_latents_mask"].to(z0_true.dtype)
-            valid_scalars = z_mask.sum().clamp(min=1.0) * unoptimized_model.diffusion_model.latent_dim
-
-            sweep_payload = {}
-            for n_steps in sampling_steps_sweep:
-                z0_sampled = unoptimized_model.diffusion_model.sample(
-                    condition=diff_inputs["condition_target"],
-                    condition_mask=diff_inputs["target_latents_mask"],
-                    prompt_encodings=diff_inputs["prompt_encodings"],
-                    prompt_encodings_mask=diff_inputs["prompt_encodings_mask"],
-                    sampling_steps=n_steps,
-                )
-                diff_sq = (z0_sampled.float() - z0_true) ** 2
-                loss = (diff_sq * z_mask).sum() / valid_scalars
-                logger.info(f"  inference_data_loss @ {n_steps} steps = {loss.item():.6f}")
-                sweep_payload[f"eval/overfit_inference_data_loss_steps_{n_steps}"] = loss.item()
+        sampling_steps_sweep = (150, 300, 600, 1000)
+        sweep_losses = compute_inference_data_loss(
+            unoptimized_model, batch, sampling_steps_sweep=sampling_steps_sweep,
+        )
+        sweep_payload = {}
+        for n_steps, loss_val in sweep_losses.items():
+            logger.info(f"  inference_data_loss @ {n_steps} steps = {loss_val:.6f}")
+            sweep_payload[f"eval/overfit_inference_data_loss_steps_{n_steps}"] = loss_val
         wandb.log(sweep_payload, step=iter_num)
 
         num_compare = min(2, audio_full.shape[0])
@@ -872,31 +833,26 @@ def train(cfg: DictConfig):
             T_i = int(audio_lengths_full[i].item())
             prompt_T = min(prompt_samples, T_i)
 
-            ref_audio = audio_full[i:i+1, :prompt_T]                                # [1, T_p]
-            ref_audio_len = torch.tensor([prompt_T], device=device)                 # [1]
+            ref_audio_slice = audio_full[i, :prompt_T]                              # [T_p]
 
-            generated_audio, _ = unoptimized_model.generate(
-                reference_audio=ref_audio,
-                reference_audio_lengths=ref_audio_len,
-                phoneme_tokens=phoneme_tokens[i:i+1],
-                phoneme_tokens_mask=phoneme_tokens_mask[i:i+1],
-                phoneme_tokens_lengths=phoneme_tokens_lengths[i:i+1],
+            audio_np, length = generate_audio(
+                unoptimized_model, ref_audio_slice, target_text=batch["text"][i],
             )
 
             original_np = audio_full[i, :T_i].detach().cpu().to(torch.float32).numpy()
-            prompt_np = ref_audio[0].detach().cpu().to(torch.float32).numpy()
-            generated_np = generated_audio[0].detach().cpu().to(torch.float32).numpy()
+            prompt_np = ref_audio_slice.detach().cpu().to(torch.float32).numpy()
 
             table_rows.append([
                 i,
+                batch["text"][i],
                 wandb.Audio(original_np, sample_rate=sr),
                 wandb.Audio(prompt_np, sample_rate=sr),
-                wandb.Audio(generated_np, sample_rate=sr),
+                wandb.Audio(audio_np[:length], sample_rate=sr),
             ])
 
         wandb.log({
             "overfit_audio_comparison": wandb.Table(
-                columns=["clip_idx", "original", "prompt", "generated"],
+                columns=["clip_idx", "text", "original", "prompt", "generated"],
                 data=table_rows,
             )
         }, step=iter_num)

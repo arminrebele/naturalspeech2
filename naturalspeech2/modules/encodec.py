@@ -11,6 +11,7 @@ from naturalspeech2.paths import ENCODEC_24KHZ_DIR, PROJECT_ROOT
 
 ENCODER_HOP_LENGTH = 320
 LATENT_DIM = 128  # Encodec 24kHz quantizer output dimension
+SAMPLING_RATE = 24000  # facebook/encodec_24khz operating sample rate (paper deviation: 16 kHz → 24 kHz forced by codec choice)
 
 
 class EncodecWrapper(nn.Module):
@@ -22,7 +23,7 @@ class EncodecWrapper(nn.Module):
     ):
         super().__init__()
         self.bandwidth = bandwidth          # 24.0 kbps -> 32 codebooks
-        self.sampling_rate = 24000
+        self.sampling_rate = SAMPLING_RATE
         self.model_dir = ENCODEC_24KHZ_DIR
         self.model = None
 
