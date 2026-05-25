@@ -5,9 +5,9 @@ setup:
   init_from: "scratch"     
   save_checkpoint: False   # No need to checkpoint
   eval_interval: 10000     # By disabling checkpoints, we skip the eval loop anyway
-  log_interval: 1          # Capture every step since the analysis logic is inside the log block
+  log_interval: 10
   eval_iters: 0
-  max_iters: 2000           # Receive stable averages
+  max_iters: 10000           # Receive stable averages
   gradient_accumulation_steps: 5
   warmup_iters: 0          
   lr_decay_iters: ${setup.max_iters}

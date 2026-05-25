@@ -449,8 +449,17 @@ def train(cfg: DictConfig):
     logger.info(f"Expected audio processed per logical step: ~{exp_minutes:.2f}m (± std of {std_minutes:.2f}m)")
     logger.info(f"  - Relative Fluctuation (CV): {cv_logical:.1%}. Target: < 10% for good stability.")
 
-    loss_analysis_accumulators = {}
-    loss_analysis_steps_counted = 0
+    if cfg.setup.loss_analysis_run:
+        loss_analysis_start_iter = int(cfg.setup.max_iters * 0.8)   # Last 20% of steps for loss analysis to ensure stable logged values
+        loss_analysis_accumulators = {}
+        loss_analysis_steps_counted = 0
+        
+    if cfg.setup.gradient_analysis_run:
+        grad_analysis_start_iter = int(cfg.setup.max_iters * 0.8)   # Last 20% of steps for gradient analysis to ensure stable logged values
+        grad_norm_accumulators = {}
+        cos_sim_accumulators = {}
+        grad_analysis_steps_counted = 0
+        
     logger.info("Starting training loop...")
     last_log_time = time.perf_counter()
     last_log_iter = start_iter - 1
@@ -592,7 +601,7 @@ def train(cfg: DictConfig):
         accum_loss = torch.zeros((), device=device)
         accum_logged_losses = {}
         
-        analyzer = GradientAnalyzer() if (cfg.setup.gradient_analysis_run and iter_num % cfg.setup.log_interval == 0) else None
+        analyzer = GradientAnalyzer() if (cfg.setup.gradient_analysis_run and iter_num >= grad_analysis_start_iter and iter_num % cfg.setup.log_interval == 0) else None
         
         if analyzer:
             logger.info(f"Performing gradient analysis for step {iter_num} (this takes extra time)...")
@@ -758,10 +767,17 @@ def train(cfg: DictConfig):
                     for k, v in cos_sims.items():
                         log_payload[f"Gradient Analysis: Cosine-Similarity (Shared)/{k}"] = v
 
+                    if iter_num >= grad_analysis_start_iter:
+                        grad_analysis_steps_counted += 1
+                        for k, v in grad_norms.items():
+                            grad_norm_accumulators[k] = grad_norm_accumulators.get(k, 0.0) + v
+                        for k, v in cos_sims.items():
+                            cos_sim_accumulators[k] = cos_sim_accumulators.get(k, 0.0) + v
+
                 wandb.log(log_payload, step=iter_num)
 
             # Accumulate unweighted raw losses exclusively for the analysis table
-            if cfg.setup.loss_analysis_run and iter_num >= (cfg.setup.max_iters // 2):
+            if cfg.setup.loss_analysis_run and iter_num >= loss_analysis_start_iter:
                 loss_analysis_steps_counted += 1
                 for k, v in accum_logged_losses.items():
                     if not k.endswith("_weighted"):
@@ -772,12 +788,29 @@ def train(cfg: DictConfig):
     # -----------------------------
     if cfg.setup.loss_analysis_run:
         logger.info("========== LOSS ANALYSIS SUMMARY ==========")
-        logger.info(f"Analyzed over the last {loss_analysis_steps_counted} logged steps (between iterations {cfg.setup.max_iters // 2} and {cfg.setup.max_iters - 1}).")
+        logger.info(f"Analyzed over the last {loss_analysis_steps_counted} logged steps (between iterations {loss_analysis_start_iter} and {cfg.setup.max_iters - 1}).")
         logger.info("Average raw unweighted loss magnitudes:")
         for k, v in loss_analysis_accumulators.items():
             avg = v / loss_analysis_steps_counted
             logger.info(f"  {k}: {avg:.4f}")
         logger.info("===========================================")
+
+    # -----------------------------
+    # Gradient Analysis Summary Dump
+    # -----------------------------
+    if cfg.setup.gradient_analysis_run:
+        logger.info("========== GRADIENT ANALYSIS SUMMARY ==========")
+        logger.info(f"Analyzed over the last {grad_analysis_steps_counted} logged steps (between iterations {grad_analysis_start_iter} and {cfg.setup.max_iters - 1}).")
+        logger.info("Average Gradient L2-Norms (Shared Backbone):")
+        for k, v in grad_norm_accumulators.items():
+            if not k.endswith("_total"):
+                avg = v / grad_analysis_steps_counted
+                logger.info(f"  {k}: {avg:.4f}")
+        logger.info("Average Gradient Cosine Similarities (Shared Backbone):")
+        for k, v in cos_sim_accumulators.items():
+            avg = v / grad_analysis_steps_counted
+            logger.info(f"  {k}: {avg:.4f}")
+        logger.info("===============================================")
 
     # -----------------------------
     # Overfit Test Audio Comparison
