@@ -1,4 +1,4 @@
-log: False               # No WandB trace needed, we rely on the terminal printout
+log: True
 project: "naturalspeech2"
 group: "loss-analysis"
 run_name: "loss_analysis"

@@ -13,6 +13,9 @@
 # Loss-weight warmups (`loss_warmup_steps.*`) are auto-zeroed at runtime in
 # scripts/train.py — no override needed here.
 
+defaults:
+  - override /wandb: overfit_test
+
 setup:
   device: "cuda"
   init_from: "scratch"     # 'scratch' or 'resume'

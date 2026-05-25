@@ -174,7 +174,7 @@ Additionally, to prevent exponential variance-growth **globally**, we initialize
 To verify that there are no fundamental errors preventing the model from learning, we intentionally overfit it by running the [Train-Loop](scripts/train.py) on a single batch for multiple iterations.
 
 ```bash
-python scripts/train.py setup=overfit_test wandb=overfit_test
+python scripts/train.py setup=overfit_test
 ```
 
 **3. Loss-Analysis**
@@ -184,7 +184,7 @@ Since our Loss comprises multiple individual Loss-Terms, we run a few iterations
 We then scale the Loss-Terms accordingly, so they influence the shared parameters equally (actually we might still want to introduce intentional biases towards individual Terms afterwards).
 
 ```bash
-python scripts/train.py setup=loss_analysis wandb=loss_analysis
+python scripts/train.py setup=loss_analysis
 ```
 
 **4. Gradient-Analysis**
@@ -194,7 +194,7 @@ In order to verify, if the Loss-Balancing from the previous step actually worked
 We additionally calculate cosine-similarities between the gradients, to make sure that individual Loss-Terms do not compete with each other. If that were the case, we would need to introduce further measures, like slowly warming up those specific Loss-Terms.
 
 ```bash
-python scripts/train.py setup=gradient_analysis wandb=gradient_analysis
+python scripts/train.py setup=gradient_analysis
 ```
 
 **5. Hyperparameter-Tuning**

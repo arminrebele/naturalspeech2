@@ -1,5 +1,8 @@
 # @package _global_
 
+defaults:
+  - override /wandb: loss_analysis
+
 setup:
   device: "cuda"
   init_from: "scratch"     
