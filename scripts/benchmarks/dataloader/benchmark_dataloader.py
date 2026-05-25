@@ -1,4 +1,5 @@
 import time
+import os
 import logging
 import torch
 import numpy as np
@@ -16,8 +17,8 @@ from naturalspeech2.utils.utils import compute_denominators
 
 logger = logging.getLogger(__name__)
 
-NUM_BENCHMARK_STEPS = 500
-WARMUP_STEPS = 50
+NUM_BENCHMARK_STEPS = int(os.environ["NUM_BENCHMARK_STEPS"])
+WARMUP_STEPS = int(os.environ["WARMUP_STEPS"])
 
 @hydra.main(version_base=None, config_path="../../../config", config_name="config")
 def benchmark(cfg: DictConfig):
@@ -190,10 +191,10 @@ def benchmark(cfg: DictConfig):
                 
             if cfg.wandb.log:
                 wandb.log({
-                    "benchmark/total_iter_time": it,
-                    "benchmark/cpu_dispatch_time": ct,
-                    "benchmark/gpu_compute_time": gt,
-                    "benchmark/starved_flag": 1 if is_starved else 0,
+                    "Dataloader Benchmark/Total Iteration Time": it,
+                    "Dataloader Benchmark/CPU Dispatch Time": ct,
+                    "Dataloader Benchmark/GPU Compute Time": gt,
+                    "Dataloader Benchmark/Starved Flag": 1 if is_starved else 0,
                 }, step=i - WARMUP_STEPS)
 
     valid_steps = len(iter_times)

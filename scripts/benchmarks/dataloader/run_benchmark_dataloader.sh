@@ -20,8 +20,11 @@ mkdir -p "$(dirname "$LOG_FILE")"
 
 # Benchmark Parameters for Dataset Sizing
 ASSUMED_MAX_BATCH_SIZE=32
-TOTAL_STEPS=550 # 500 steps + 50 warmup
-DATASET_SPLIT_SIZE=$((ASSUMED_MAX_BATCH_SIZE * TOTAL_STEPS + 400))
+# These are actual iterations without gradient accumulation steps
+export NUM_BENCHMARK_STEPS=10000
+export WARMUP_STEPS=100
+TOTAL_STEPS=$((NUM_BENCHMARK_STEPS + WARMUP_STEPS))
+DATASET_SPLIT_SIZE=$((ASSUMED_MAX_BATCH_SIZE * TOTAL_STEPS))
 
 if [[ "$TEST_MODE" == "pre-resample" ]]; then
   echo -e "\nStarting Offline Resampling Benchmark (Mode: $TEST_MODE)..." >> $LOG_FILE
