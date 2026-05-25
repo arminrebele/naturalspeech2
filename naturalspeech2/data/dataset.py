@@ -245,7 +245,24 @@ class DatasetWrapper(Dataset):
             logger.info(f"Local dataset unavailable or corrupted ({type(e).__name__}). Triggering preprocessing...")
 
             logger.info(f"Loading dataset '{self.dataset_name}' with split '{self.split}'...")
-            dataset = load_dataset(self.dataset_source, split=self.split, cache_dir=str(self.cache_dir))
+            # Restrict the parquet builder to only the requested split's files.
+            # HF's `split=` filters at `as_dataset()` (post-generation), so without
+            # `data_files=` the builder iterates `_split_generators()` for every
+            # declared split and materializes Arrow files for all of them. Passing
+            # an explicit data_files mapping with just our split tells the builder
+            # there's only one split to prepare. Pattern follows HF's standard
+            # `push_to_hub` layout: data/<split>-*.parquet.
+            # `verification_mode="no_checks"` disables the post-generation
+            # sanity check that all README-declared splits are recorded —
+            # without it, generating only dev triggers ExpectedMoreSplitsError
+            # because the dataset README declares 3 splits and we built 1.
+            dataset = load_dataset(
+                self.dataset_source,
+                data_files={self.split: f"data/{self.split}-*.parquet"},
+                split=self.split,
+                cache_dir=str(self.cache_dir),
+                verification_mode="no_checks",
+            )
             # Add index before filtering to keep track of original rows
             dataset = dataset.add_column("original_index", range(len(dataset)))
             dataset.cleanup_cache_files()
