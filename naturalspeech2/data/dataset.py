@@ -166,15 +166,19 @@ class DatasetWrapper(Dataset):
         clean_split = self.split.replace("%", "pct")
         clean_split = re.sub(r'[^a-zA-Z0-9]', '_', clean_split)
         clean_split = re.sub(r'_+', '_', clean_split).strip('_')
-        
+
         # Ensure OTF and Pre-resampled configs cache to distinct directories to prevent cross-contamination
         suffix = "otf" if self.resample_on_the_fly else "pre"
         self.processed_dir = self.dataset_dir / clean_split / f"processed_{suffix}"
         self.resampled_dir = self.dataset_dir / clean_split / "resampled"
         self.cache_dir = self.dataset_dir / clean_split / "cache"
+        # Vocabulary is a dataset-level artifact (phoneme inventory is a property
+        # of the dataset, not a split). First split preprocessed builds it;
+        # subsequent splits reuse it. Manual rebuild if a later split introduces
+        # phonemes the original didn't see.
         self.token_vocabulary_path = token_vocabulary_path
         if self.token_vocabulary_path is None:
-            self.token_vocabulary_path = self.dataset_dir / clean_split / "token_vocabulary.json"
+            self.token_vocabulary_path = self.dataset_dir / "token_vocabulary.json"
         
         self.preprocessing_config = {
             "dataset_source": self.dataset_source,

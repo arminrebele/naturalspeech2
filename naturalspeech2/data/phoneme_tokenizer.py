@@ -62,18 +62,3 @@ def build_token_vocabulary(
         json.dump(token_vocabulary, f, ensure_ascii=False, indent=2)
 
     return token_vocabulary
-
-if __name__ == "__main__":
-
-    # # Code to build token vocabulary based on VCTK dataset
-    # from naturalspeech2.data.vctk import VCTKDataset
-    # dataset = VCTKDataset()
-    # #dataset.dataset = dataset.dataset.select(range(200))
-    # token_vocabulary = build_token_vocabulary(dataset)
-    # print(len(token_vocabulary))
-
-    # Test code to verify tokenizer
-    # tokenizer = PhonemeTokenizer(token_vocabulary_path="path/to/vocab.json")
-    # text = "This is a test!"
-    # print(tokenizer(text))
-    pass

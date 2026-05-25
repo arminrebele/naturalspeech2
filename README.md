@@ -58,7 +58,7 @@ You can start the training process and dynamically override config values direct
 For example:
 
 ```bash
-python scripts/train.py dataset=vctk training.learning_rate=1e-4 wandb=serious_run
+python scripts/train.py training.learning_rate=1e-4 wandb=serious_run
 ```
 
 Running the [training script](scripts/train.py) will automatically initiate our [Preprocessing-Pipeline](naturalspeech2/data/dataset.py) and prepare the dataset, before the Train-Loop starts. 
@@ -72,7 +72,7 @@ Following the paper [1], we use the english subset of [**Multilingual LibriSpeec
 > **Note:** This will download **705 GB** of Parquet files, which will translate to an additional **~800 GB** worth of Arrow files after deserializing. During preprocessing, the peak disk usage is **~2x** the dataset in arrow format. 
 Additionally, if you choose to use `resample_on_the_fly=False` (e.g. if your CPU-node can't handle resampling during dataloading fast enough), the pre-resampled FLAC files will require an additional **~3.8 TB** of disk space.
 
-We also provide the option to instead use the significantly smaller [**VCTK**](https://huggingface.co/datasets/sanchit-gandhi/vctk) dataset, in case you just want to play around with the codebase.
+For fast development iteration, the `setup=overfit_test`, `setup=loss_analysis`, and `setup=gradient_analysis` configs override the train split to MLS' small `dev` split, so they don't trigger preprocessing of the full ~800 GB train data. The `setup=full_run` workflow uses the train split as usual.
 
 If your dataset spans multiple physical disks, the provided [`entrypoint.sh`](entrypoint.sh) natively supports MergerFS to seamlessly pool them into the `/workspace/data` directory expected by the codebase.
 You can configure this by adding the following lines to your `docker-compose.override.yml` file on your host machine to supply the `MERGERFS_DISKS` environment variable and mount the required drives:
@@ -140,7 +140,7 @@ Determine the most efficient data loading strategy (resampling during pre-proces
 This can be done by running [this bash script](scripts/benchmarks/dataloader/run_benchmark_dataloader.sh), which will [benchmark](scripts/benchmarks/dataloader/benchmark_dataloader.py) the dataloader across multiple configurations. You might have to update the tested `WORKER_COUNTS` and `ASSUMED_MAX_BATCH_SIZE` to match your machine. 
 Per default, it only evaluates, if the resampling on-the-fly option will run efficiently on your hardware, but you can use command-line arguments to test other options as well. 
 
-`--full` tests both the otf-resampling and the pre-resampling option, `--pre-resample` tests only the pre-resampling option (e.g. if you ran the default otf-setting, but your dataloader starved the GPU). You can also specify the dataset to be used in the benchmark via `--dataset=vctk` (the default is `mls_eng`).
+`--full` tests both the otf-resampling and the pre-resampling option, `--pre-resample` tests only the pre-resampling option (e.g. if you ran the default otf-setting, but your dataloader starved the GPU).
 
 ```bash
 python scripts/benchmarks/dataloader/run_benchmark_dataloader.sh

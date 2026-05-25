@@ -10,12 +10,13 @@ min_target_seconds: 1.0    # safety net — minimum target duration preserved on
 encodec:
   # Per-channel latent normalization stats (mean, std of length 128). Generated once
   # by `scripts/compute_encodec_latent_stats.py` on a representative subset of the
-  # training data. Encodec's `quantizer.decode` output has per-scalar var ≈ 22 on VCTK
-  # with 6.8× per-channel std heterogeneity; the VP-SDE noise schedule assumes
-  # unit-variance signals, so we standardize per-channel before training and invert
-  # before the codec decoder. See bringup_log.md (2026-05-16) for the rationale.
-  # Set to null to disable (identity transform — buffers stay at mean=0, std=1).
-  latent_stats_path: "models/encodec_24khz/vctk_latent_stats.pt"
+  # training data. Encodec's `quantizer.decode` output has per-scalar var ≈ 22 with
+  # ~6.8× per-channel std heterogeneity (measured on VCTK during bring-up); the
+  # VP-SDE noise schedule assumes unit-variance signals, so we standardize
+  # per-channel before training and invert before the codec decoder. See
+  # bringup_log.md (2026-05-16) for the rationale. Set to null to disable
+  # (identity transform — buffers stay at mean=0, std=1).
+  latent_stats_path: "models/encodec_24khz/encodec_latent_stats.pt"
 
 # Log Mel Spectrogram Generator
 mel:

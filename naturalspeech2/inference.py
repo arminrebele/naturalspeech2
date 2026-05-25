@@ -13,8 +13,6 @@ Three-layer architecture (see .claude/plans/inference.md §2):
 """
 
 import logging
-import re
-from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -38,17 +36,6 @@ logger = logging.getLogger(__name__)
 # Private helpers
 # ----------------------------------------------------------------------------
 
-@lru_cache(maxsize=4)
-def _get_tokenizer(token_vocabulary_path: str) -> PhonemeTokenizer:
-    """Module-level cached PhonemeTokenizer (with espeak backend) keyed by vocab path.
-
-    Espeak subprocess startup is ~50 ms; lru_cache avoids paying that on every
-    `generate_audio` call. Cache size 4 is enough for typical usage (one vocab
-    per dataset; rarely more than a couple in flight).
-    """
-    return PhonemeTokenizer(token_vocabulary_path=token_vocabulary_path, with_backend=True)
-
-
 def _load_default_cfg() -> DictConfig:
     """Compose the project default Hydra config (config/config.yaml + groups).
 
@@ -66,17 +53,14 @@ def _load_default_cfg() -> DictConfig:
 
 
 def _resolve_vocab_path(cfg: DictConfig) -> Path:
-    """Resolve token_vocabulary_path from cfg, mirroring DatasetWrapper's resolution."""
+    """Resolve token_vocabulary_path from cfg, mirroring DatasetWrapper's resolution.
+
+    Vocab is a dataset-level artifact: one file per dataset, shared across splits.
+    """
     explicit = cfg.dataset.token_vocabulary_path
     if explicit is not None:
         return Path(explicit)
-    # Mirror DatasetWrapper._process_dataset's split-name sanitization
-    # (`naturalspeech2/data/dataset.py:166-172`).
-    split = cfg.dataset.train_split
-    clean_split = split.replace("%", "pct")
-    clean_split = re.sub(r"[^a-zA-Z0-9]", "_", clean_split)
-    clean_split = re.sub(r"_+", "_", clean_split).strip("_")
-    return DATA_DIR / cfg.dataset.name / clean_split / "token_vocabulary.json"
+    return DATA_DIR / cfg.dataset.name / "token_vocabulary.json"
 
 
 def _load_audio(
@@ -186,9 +170,7 @@ def load_inference_model(
     state_dict and `load_model` picks them up transparently with no API change.
 
     Attaches a phonemizing `PhonemeTokenizer` at `model._inference_tokenizer`
-    so downstream `generate_audio()` calls don't need it threaded through. The
-    tokenizer is module-level cached (per vocab path) — one espeak subprocess
-    per unique vocabulary across the process lifetime.
+    so downstream `generate_audio()` calls don't need it threaded through.
     """
     if cfg is None:
         cfg = _load_default_cfg()
@@ -204,9 +186,7 @@ def load_inference_model(
             "is preprocessed and cfg.dataset.* points to the right place."
         )
 
-    # Need vocab size for model construction; build the tokenizer once via the
-    # cached helper and reuse it for both vocab-size lookup and inference.
-    tokenizer = _get_tokenizer(str(vocab_path))
+    tokenizer = PhonemeTokenizer(token_vocabulary_path=str(vocab_path), with_backend=True)
     token_vocabulary_size = tokenizer.token_vocabulary_size
 
     model = NaturalSpeech2Model(

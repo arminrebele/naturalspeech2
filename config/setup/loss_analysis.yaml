@@ -17,3 +17,8 @@ setup:
 
 training:
   lr_schedule: "cosine"
+
+# Use the small dev split for development workflows so we don't preprocess
+# the full train split (~8h / ~500GB for MLS). full_run keeps train.
+dataset:
+  train_split: "dev"

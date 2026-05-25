@@ -8,8 +8,8 @@ loads at construction time and registers as persistent buffers.
 Example:
     # in container
     python scripts/compute_encodec_latent_stats.py \
-        --dataset data/VCTK/train/processed_otf \
-        --output models/encodec_24khz/vctk_latent_stats.pt \
+        --dataset data/mls_eng/dev/processed_otf \
+        --output models/encodec_24khz/encodec_latent_stats.pt \
         --num-clips 1024
 """
 import argparse
@@ -27,18 +27,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--dataset",
-        default="data/VCTK/train/processed_otf",
+        default="data/mls_eng/dev/processed_otf",
         help="Path (relative to repo root or absolute) to a preprocessed HF dataset loadable via `load_from_disk`.",
     )
     parser.add_argument(
         "--num-clips",
         type=int,
         default=1024,
-        help="Number of clips to encode. 1024 gives ~36M per-channel samples on VCTK — plenty for stable mean/std.",
+        help="Number of clips to encode. 1024 gives ~36M per-channel samples — plenty for stable mean/std.",
     )
     parser.add_argument(
         "--output",
-        default="models/encodec_24khz/vctk_latent_stats.pt",
+        default="models/encodec_24khz/encodec_latent_stats.pt",
         help="Output .pt path (relative to repo root or absolute).",
     )
     parser.add_argument("--bandwidth", type=int, default=24, help="Encodec bandwidth (kbps).")
