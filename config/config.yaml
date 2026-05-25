@@ -3,6 +3,12 @@ defaults:
   - dataset: mls_eng
   - dataloader: default
   - model: base
-  - setup: full_run
   - training: full_run
+  # `setup:` loads after `training:` so setup recipes (`# @package _global_`)
+  # can override training fields like `lr_schedule`. Reordering this back to
+  # setup-before-training reintroduces the ISR-vs-cosine bug — overfit_test /
+  # loss_analysis / gradient_analysis all need lr_schedule=cosine (warmup_iters=0
+  # would otherwise trip `get_lr`'s assert), and the cleanest place to set that
+  # is inside the setup yamls themselves.
+  - setup: full_run
   - wandb: full_run
