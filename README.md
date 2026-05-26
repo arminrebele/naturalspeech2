@@ -157,17 +157,21 @@ We ran the mentioned tests to **verify the correctness** of our implementation, 
 
 **1. Initialization**
 
-To preserve variance **locally**, we initialize all *Linear*- and *Conv1D*-Layers via a Gaussian Distribution with:
+To preserve variance **locally**, we initialize all *Linear*, *Conv1D*, and *Embedding* layers via a Gaussian Distribution with:
 
 $$E[w] = 0$$ 
 
-$$\mathbf{Var[w] = \frac{2}{n_{in}}}$$ 
+$$\mathbf{Var[w] = 0.02^2}$$ 
 
-where **Biases** are initialized as **0** (*He-Initialization* [8]).
-We assume, the SiLU-activation matches the form of ReLU close enough, for this initialization-scheme to still work sufficiently. 
+where **Biases** are initialized as **0**. 
+
+> **Note:** While older architectures relied on He-Initialization ($\frac{2}{n_{in}}$) [8], modern Pre-Norm Transformer/Diffusion stacks with zero-initialized residuals naturally prevent variance explosion globally. We use a conservative fixed standard deviation of $\mathcal{N}(0, 0.02)$ to prevent artificially huge updates in narrow low-dimensional layers (like 1D pitch projections) on the first optimizer step.
+
 Per default, we initialize the **scale-parameters** of *RMSNorm-Blocks* as **1**. 
 
-Additionally, to prevent exponential variance-growth **globally**, we initialize the weights of the final operation of every *Residual-Layer* to exactly **0**, which turns each *Residual-Layer* into an Identity-Function during the first iteration.
+Additionally, to safely route gradients through the deep predictor and WaveNet stacks, we strictly apply Fixup/ReZero principles. We initialize the final operation of every *Residual-Branch* (and FiLM projection) to exactly **0**, forcing the entire network into a perfect Identity-Function at step 0.
+
+> **Note:** Because we use SiLU activations, which have a non-zero derivative at $x=0$, zeroing the weights of a 1-layer residual branch does not kill the gradient, allowing the branch to safely "wake up" during training.
 
 **2. Overfit-Test**
 
