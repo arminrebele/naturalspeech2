@@ -29,6 +29,7 @@ docs/notes/
 docs/paper/
 docs/paper-tex/
 
+CLAUDE.md
 .claude/
 .codex/
 .vscode/
