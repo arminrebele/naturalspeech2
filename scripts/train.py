@@ -4,6 +4,7 @@ import math
 import random
 import logging
 import itertools
+from contextlib import nullcontext
 from dotenv import load_dotenv
 
 # Load environment variables from .env file (e.g. WANDB_API_KEY)
@@ -23,6 +24,7 @@ from naturalspeech2.inference import compute_inference_data_loss, generate_audio
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper, GradientAnalyzer
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.paths import CHECKPOINTS_DIR, PROJECT_ROOT
+from naturalspeech2.utils.ema import EMA
 from naturalspeech2.utils.utils import setup_file_logger, compute_denominators
 
 logger = logging.getLogger(__name__)
@@ -244,10 +246,20 @@ def train(cfg: DictConfig):
 
     if not torch.cuda.is_available():
         raise RuntimeError("This script requires an NVIDIA GPU and CUDA installed, but none were detected.")
-    
+
     device = cfg.setup.device
     device_type = 'cuda'
-    
+
+    # Seed torch + Python random so model init, diffusion t/ε sampling, prompt
+    # windows, eval-block prompt picks, and DataLoader worker RNG state are
+    # reproducible across runs. cuDNN-level determinism is NOT enforced (would
+    # cost ~5–10% perf and force slower compiled kernels) — sufficient for
+    # fair A/B comparisons. The bucketed sampler uses np.random.default_rng
+    # with its own hardcoded seed so the 5 overfit batches stay fixed
+    # regardless of cfg.setup.seed.
+    torch.manual_seed(cfg.setup.seed)
+    random.seed(cfg.setup.seed)
+
     # Create checkpoints directory and setup specific logs
     if cfg.setup.loss_analysis_run:
         log_dir = PROJECT_ROOT / "research"
@@ -380,13 +392,34 @@ def train(cfg: DictConfig):
     if cfg.setup.init_from == 'resume':
         optimizer.load_state_dict(checkpoint['optimizer'])
         resume_wandb_id = checkpoint.get('wandb_id')
+        resume_ema_state = checkpoint.get('ema')
+        resume_cur_kimg = checkpoint.get('cur_kimg', 0.0)
         logger.info("Resumed optimizer from checkpoint.")
     else:
         resume_wandb_id = None
-        
+        resume_ema_state = None
+        resume_cur_kimg = 0.0
+
     # Free memory
     checkpoint = None
-    
+
+    ema = EMA(model, halflife_kimg=cfg.model.ema.halflife_kimg) if cfg.model.ema.enabled else None
+    cur_kimg = resume_cur_kimg
+    if ema is not None and resume_ema_state is not None:
+        ema.load_state_dict(resume_ema_state)
+        if ema.halflife_kimg != cfg.model.ema.halflife_kimg:
+            logger.warning(
+                f"halflife_kimg changed: checkpoint={ema.halflife_kimg}, "
+                f"config={cfg.model.ema.halflife_kimg}. Using config value."
+            )
+            ema.halflife_kimg = cfg.model.ema.halflife_kimg
+    elif ema is not None and cfg.setup.init_from == 'resume':
+        logger.warning(
+            "EMA enabled but no EMA state in checkpoint. "
+            "Initializing fresh EMA from current model weights — "
+            "the shadow will need to re-converge."
+        )
+
     logger.info("Compiling the model... (this takes a minute)")
     unoptimized_model = model
     model = torch.compile(model)
@@ -478,8 +511,9 @@ def train(cfg: DictConfig):
         for _ in range(cfg.setup.gradient_accumulation_steps):
             cpu_batch, current_epoch, current_batch_idx = next(batch_generator)
             lookahead_queue.append(cpu_batch)
-            
+
         global_denominators = compute_denominators(lookahead_queue, cfg)
+        examples_this_step = sum(b["audio"].shape[0] for b in lookahead_queue)
             
         # -----------------------------
         # Evaluation & Checkpointing
@@ -487,111 +521,115 @@ def train(cfg: DictConfig):
         if iter_num % cfg.setup.eval_interval == 0 and cfg.setup.save_checkpoint:
             eval_start_time = time.perf_counter()
             logger.info(f"Running evaluation loop...")
-            losses = estimate_loss(
-                model, train_loader, dev_loader, test_loader, loss_wrapper, 
-                cfg.setup.eval_iters, cfg.setup.gradient_accumulation_steps, device, cfg
-            )
-            logger.info(f"Step {iter_num}: train loss {losses['train']['total_loss']:.4f}, dev loss {losses['dev']['total_loss']:.4f}")
-            
-            if cfg.wandb.log:
-                eval_payload = {
-                    "Evaluation: Metrics/Learning Rate": lr,
-                    "Evaluation: Metrics/Train-Loss": losses['train']['total_loss'],
-                    "Evaluation: Metrics/Dev-Loss": losses['dev']['total_loss'],
-                }
-                
-                for k, v in losses['train']['logged_losses'].items():
-                    eval_payload[f"{get_loss_section(k, 'Evaluation', 'Train')}/{k}"] = v
-                for k, v in losses['dev']['logged_losses'].items():
-                    eval_payload[f"{get_loss_section(k, 'Evaluation', 'Dev')}/{k}"] = v
+            # Eval + generation + best-checkpoint save all run under EMA shadow
+            # weights so that (a) audio samples reflect what we'd ship, and
+            # (b) best_dev_loss gating is consistent with the weights saved.
+            with ema.swap_in(unoptimized_model) if ema is not None else nullcontext():
+                losses = estimate_loss(
+                    model, train_loader, dev_loader, test_loader, loss_wrapper,
+                    cfg.setup.eval_iters, cfg.setup.gradient_accumulation_steps, device, cfg
+                )
+                logger.info(f"Step {iter_num}: train loss {losses['train']['total_loss']:.4f}, dev loss {losses['dev']['total_loss']:.4f}")
 
-                # --- Generation Testing ---
-                logger.info("Generating audio samples for evaluation...")
+                if cfg.wandb.log:
+                    eval_payload = {
+                        "Evaluation: Metrics/Learning Rate": lr,
+                        "Evaluation: Metrics/Train-Loss": losses['train']['total_loss'],
+                        "Evaluation: Metrics/Dev-Loss": losses['dev']['total_loss'],
+                    }
 
-                # estimate_loss() flips back to train mode before returning; bracket the
-                # sampling loop in eval mode so dropout (prompt encoder, predictors,
-                # WaveNet blocks) doesn't perturb inference.
-                unoptimized_model.eval()
-                
-                # --- Table 1: Random Generation Examples ---
-                table_1_rows = []
-                ten_seconds_samples = int(10.0 * sampling_rate)
-                five_seconds_samples = int(5.0 * sampling_rate)
-                
-                random_indices = list(range(len(dev_dataset)))
-                random.shuffle(random_indices)
-                test_idx = next(i for i in random_indices if dev_dataset.dataset[i]["audio_length"] >= ten_seconds_samples)
-                sample = dev_dataset[test_idx]
-                        
-                audio_np = sample["audio"].numpy()
-                max_start = sample["audio_length"] - ten_seconds_samples
-                start_idx = random.randint(0, max_start)
-                
-                prompt_5s_np = audio_np[start_idx : start_idx + five_seconds_samples]
-                prompt_10s_np = audio_np[start_idx : start_idx + ten_seconds_samples]
-                
-                prompt_idx = random.randint(0, len(custom_prompts) - 1)
-                target_text = custom_prompts[prompt_idx]
+                    for k, v in losses['train']['logged_losses'].items():
+                        eval_payload[f"{get_loss_section(k, 'Evaluation', 'Train')}/{k}"] = v
+                    for k, v in losses['dev']['logged_losses'].items():
+                        eval_payload[f"{get_loss_section(k, 'Evaluation', 'Dev')}/{k}"] = v
 
-                for p_len, p_np in [(5.0, prompt_5s_np), (10.0, prompt_10s_np)]:
-                    audio_np, length = generate_audio(
-                        unoptimized_model, p_np, target_text=target_text,
+                    # --- Generation Testing ---
+                    logger.info("Generating audio samples for evaluation...")
+
+                    # estimate_loss() flips back to train mode before returning; bracket the
+                    # sampling loop in eval mode so dropout (prompt encoder, predictors,
+                    # WaveNet blocks) doesn't perturb inference.
+                    unoptimized_model.eval()
+
+                    # --- Table 1: Random Generation Examples ---
+                    table_1_rows = []
+                    ten_seconds_samples = int(10.0 * sampling_rate)
+                    five_seconds_samples = int(5.0 * sampling_rate)
+
+                    random_indices = list(range(len(dev_dataset)))
+                    random.shuffle(random_indices)
+                    test_idx = next(i for i in random_indices if dev_dataset.dataset[i]["audio_length"] >= ten_seconds_samples)
+                    sample = dev_dataset[test_idx]
+
+                    audio_np = sample["audio"].numpy()
+                    max_start = sample["audio_length"] - ten_seconds_samples
+                    start_idx = random.randint(0, max_start)
+
+                    prompt_5s_np = audio_np[start_idx : start_idx + five_seconds_samples]
+                    prompt_10s_np = audio_np[start_idx : start_idx + ten_seconds_samples]
+
+                    prompt_idx = random.randint(0, len(custom_prompts) - 1)
+                    target_text = custom_prompts[prompt_idx]
+
+                    for p_len, p_np in [(5.0, prompt_5s_np), (10.0, prompt_10s_np)]:
+                        audio_np, length = generate_audio(
+                            unoptimized_model, p_np, target_text=target_text,
+                        )
+
+                        table_1_rows.append([
+                            iter_num,
+                            p_len,
+                            target_text,
+                            wandb.Audio(p_np, sample_rate=sampling_rate),
+                            wandb.Audio(audio_np[:length], sample_rate=sampling_rate),
+                        ])
+
+                    # --- Table 2: Original vs. Generated ---
+                    table_2_rows = []
+                    for ref in table_2_refs:
+                        audio_np, length = generate_audio(
+                            unoptimized_model, ref["prompt_tensor"], target_text=ref["text"],
+                        )
+
+                        table_2_rows.append([
+                            iter_num,
+                            cfg.model.prompt_seconds,
+                            ref["text"],
+                            ref["original_audio"],
+                            ref["prompt_audio"],
+                            wandb.Audio(audio_np[:length], sample_rate=sampling_rate),
+                        ])
+
+                    unoptimized_model.train()
+
+                    eval_payload["Evaluation: Random Generation Examples"] = wandb.Table(
+                        columns=["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt", "Speech-Prompt", "Generated Audio"],
+                        data=table_1_rows,
                     )
 
-                    table_1_rows.append([
-                        iter_num,
-                        p_len,
-                        target_text,
-                        wandb.Audio(p_np, sample_rate=sampling_rate),
-                        wandb.Audio(audio_np[:length], sample_rate=sampling_rate),
-                    ])
-                        
-                # --- Table 2: Original vs. Generated ---
-                table_2_rows = []
-                for ref in table_2_refs:
-                    audio_np, length = generate_audio(
-                        unoptimized_model, ref["prompt_tensor"], target_text=ref["text"],
+                    eval_payload["Evaluation: Original vs. Generated"] = wandb.Table(
+                        columns=["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt", "Original Audio", "Speech-Prompt", "Generated Audio"],
+                        data=table_2_rows,
                     )
 
-                    table_2_rows.append([
-                        iter_num,
-                        cfg.model.prompt_seconds,
-                        ref["text"],
-                        ref["original_audio"],
-                        ref["prompt_audio"],
-                        wandb.Audio(audio_np[:length], sample_rate=sampling_rate),
-                    ])
+                    wandb.log(eval_payload, step=iter_num)
 
-                unoptimized_model.train()
+                if iter_num > 0 and losses['dev']['total_loss'] < best_dev_loss:
+                    best_dev_loss = losses['dev']['total_loss']
+                    logger.info(f"Saving new best model to {CHECKPOINTS_DIR}")
 
-                eval_payload["Evaluation: Random Generation Examples"] = wandb.Table(
-                    columns=["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt", "Speech-Prompt", "Generated Audio"],
-                    data=table_1_rows,
-                )
-                
-                eval_payload["Evaluation: Original vs. Generated"] = wandb.Table(
-                    columns=["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt", "Original Audio", "Speech-Prompt", "Generated Audio"],
-                    data=table_2_rows,
-                )
-                
-                wandb.log(eval_payload, step=iter_num)
-                
-            if iter_num > 0 and losses['dev']['total_loss'] < best_dev_loss:
-                best_dev_loss = losses['dev']['total_loss']
-                logger.info(f"Saving new best model to {CHECKPOINTS_DIR}")
-                
-                best_path = CHECKPOINTS_DIR / 'ckpt_best.safetensors'
-                best_tmp_path = CHECKPOINTS_DIR / 'ckpt_best.tmp.safetensors'
-                best_bak_path = CHECKPOINTS_DIR / 'ckpt_best_bak.safetensors'
-                
-                # 1. Save to a temporary file
-                save_model(unoptimized_model, best_tmp_path)
-                # 2. Backup the previous best file if it exists
-                if best_path.exists():
-                    best_path.replace(best_bak_path)
-                # 3. Rename temp file to final destination (atomic)
-                best_tmp_path.replace(best_path)
-                
+                    best_path = CHECKPOINTS_DIR / 'ckpt_best.safetensors'
+                    best_tmp_path = CHECKPOINTS_DIR / 'ckpt_best.tmp.safetensors'
+                    best_bak_path = CHECKPOINTS_DIR / 'ckpt_best_bak.safetensors'
+
+                    # 1. Save to a temporary file
+                    save_model(unoptimized_model, best_tmp_path)
+                    # 2. Backup the previous best file if it exists
+                    if best_path.exists():
+                        best_path.replace(best_bak_path)
+                    # 3. Rename temp file to final destination (atomic)
+                    best_tmp_path.replace(best_path)
+
             last_log_time += time.perf_counter() - eval_start_time
 
         # -----------------------------
@@ -682,7 +720,10 @@ def train(cfg: DictConfig):
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
 
         optimizer.step()
+        if ema is not None:
+            ema.update(unoptimized_model, batch_size=examples_this_step, cur_kimg=cur_kimg)
         optimizer.zero_grad(set_to_none=True)
+        cur_kimg += examples_this_step / 1000.0
 
         # -----------------------------
         # Dynamo Compilation Verdict
@@ -733,7 +774,10 @@ def train(cfg: DictConfig):
                     'wandb_id': wandb.run.id if cfg.wandb.log else None,
                     'epoch': current_epoch,
                     'batch_idx': current_batch_idx + 1, # Index of the upcoming batch
+                    'cur_kimg': cur_kimg,
                 }
+                if ema is not None:
+                    checkpoint_data['ema'] = ema.state_dict()
                 
                 ckpt_path = CHECKPOINTS_DIR / 'ckpt.pt'
                 ckpt_tmp_path = CHECKPOINTS_DIR / 'ckpt.pt.tmp'
@@ -773,6 +817,24 @@ def train(cfg: DictConfig):
                             grad_norm_accumulators[k] = grad_norm_accumulators.get(k, 0.0) + v
                         for k, v in cos_sims.items():
                             cos_sim_accumulators[k] = cos_sim_accumulators.get(k, 0.0) + v
+
+                if ema is not None:
+                    log_payload["EMA/effective_decay"] = ema._effective_decay(
+                        batch_size=examples_this_step, cur_kimg=cur_kimg,
+                    )
+                    log_payload["EMA/effective_halflife_kimg"] = min(cur_kimg, ema.halflife_kimg)
+                    log_payload["EMA/cur_kimg"] = cur_kimg
+                    # RMS drift between live and shadow weights — grows during
+                    # training then plateaus once the shadow centers on the
+                    # SGD oscillation around the loss minimum.
+                    with torch.no_grad():
+                        drift_sq = torch.zeros((), device=device)
+                        n_drift = 0
+                        for name, p in unoptimized_model.named_parameters():
+                            if name in ema.shadow:
+                                drift_sq += (p.data.float() - ema.shadow[name]).pow(2).sum()
+                                n_drift += p.numel()
+                    log_payload["EMA/weight_drift_rms"] = (drift_sq / max(n_drift, 1)).sqrt().item()
 
                 wandb.log(log_payload, step=iter_num)
 
@@ -832,61 +894,62 @@ def train(cfg: DictConfig):
         audio_full = batch["audio"].to(device)                                # [B, T]
         audio_lengths_full = batch["audio_lengths"].to(device)                # [B]
 
-        # -----------------------------
-        # Inference data_loss diagnostic
-        # -----------------------------
-        # Training data_loss is a one-step prediction error from a known noisy z_t.
-        # Inference chains N ODE steps from t=1 to t≈0, each step using the network's
-        # prediction. Per-step errors compound. Measuring the same MSE on the sampler's
-        # actual output tells us whether audio quality issues live in (a) the sampler
-        # trajectory or (b) something downstream (off-manifold predictions, decoder).
-        # Uses GT condition + GT prompt extracted from a fresh forward pass so the only
-        # variable being measured is the sampler integration error.
-        #
-        # Sweep `sampling_steps` to distinguish solver-discretization error from a
-        # weights-side gap (e.g. missing EMA, undertrained t bins). Monotonic drop to
-        # ~training data_loss = solver-bound; flat across step counts = weights-side.
-        logger.info("Computing inference_data_loss diagnostic...")
-        sampling_steps_sweep = (150, 300, 600, 1000)
-        sweep_losses = compute_inference_data_loss(
-            unoptimized_model, batch, sampling_steps_sweep=sampling_steps_sweep,
-        )
-        sweep_payload = {}
-        for n_steps, loss_val in sweep_losses.items():
-            logger.info(f"  inference_data_loss @ {n_steps} steps = {loss_val:.6f}")
-            sweep_payload[f"eval/overfit_inference_data_loss_steps_{n_steps}"] = loss_val
-        wandb.log(sweep_payload, step=iter_num)
-
-        num_compare = min(2, audio_full.shape[0])
-        table_rows = []
-        for i in range(num_compare):
-            T_i = int(audio_lengths_full[i].item())
-            prompt_T = min(prompt_samples, T_i)
-
-            ref_audio_slice = audio_full[i, :prompt_T]                              # [T_p]
-
-            audio_np, length = generate_audio(
-                unoptimized_model, ref_audio_slice, target_text=batch["text"][i],
+        with ema.swap_in(unoptimized_model) if ema is not None else nullcontext():
+            # -----------------------------
+            # Inference data_loss diagnostic
+            # -----------------------------
+            # Training data_loss is a one-step prediction error from a known noisy z_t.
+            # Inference chains N ODE steps from t=1 to t≈0, each step using the network's
+            # prediction. Per-step errors compound. Measuring the same MSE on the sampler's
+            # actual output tells us whether audio quality issues live in (a) the sampler
+            # trajectory or (b) something downstream (off-manifold predictions, decoder).
+            # Uses GT condition + GT prompt extracted from a fresh forward pass so the only
+            # variable being measured is the sampler integration error.
+            #
+            # Sweep `sampling_steps` to distinguish solver-discretization error from a
+            # weights-side gap (undertrained t bins, etc.). Monotonic drop to ~training
+            # data_loss = solver-bound; flat across step counts = weights-side.
+            logger.info("Computing inference_data_loss diagnostic...")
+            sampling_steps_sweep = (150, 300, 600, 1000)
+            sweep_losses = compute_inference_data_loss(
+                unoptimized_model, batch, sampling_steps_sweep=sampling_steps_sweep,
             )
+            sweep_payload = {}
+            for n_steps, loss_val in sweep_losses.items():
+                logger.info(f"  inference_data_loss @ {n_steps} steps = {loss_val:.6f}")
+                sweep_payload[f"eval/overfit_inference_data_loss_steps_{n_steps}"] = loss_val
+            wandb.log(sweep_payload, step=iter_num)
 
-            original_np = audio_full[i, :T_i].detach().cpu().to(torch.float32).numpy()
-            prompt_np = ref_audio_slice.detach().cpu().to(torch.float32).numpy()
+            num_compare = min(2, audio_full.shape[0])
+            table_rows = []
+            for i in range(num_compare):
+                T_i = int(audio_lengths_full[i].item())
+                prompt_T = min(prompt_samples, T_i)
 
-            table_rows.append([
-                i,
-                batch["text"][i],
-                wandb.Audio(original_np, sample_rate=sr),
-                wandb.Audio(prompt_np, sample_rate=sr),
-                wandb.Audio(audio_np[:length], sample_rate=sr),
-            ])
+                ref_audio_slice = audio_full[i, :prompt_T]                              # [T_p]
 
-        wandb.log({
-            "overfit_audio_comparison": wandb.Table(
-                columns=["clip_idx", "text", "original", "prompt", "generated"],
-                data=table_rows,
-            )
-        }, step=iter_num)
-        logger.info(f"Logged {num_compare} audio comparison rows to wandb.")
+                audio_np, length = generate_audio(
+                    unoptimized_model, ref_audio_slice, target_text=batch["text"][i],
+                )
+
+                original_np = audio_full[i, :T_i].detach().cpu().to(torch.float32).numpy()
+                prompt_np = ref_audio_slice.detach().cpu().to(torch.float32).numpy()
+
+                table_rows.append([
+                    i,
+                    batch["text"][i],
+                    wandb.Audio(original_np, sample_rate=sr),
+                    wandb.Audio(prompt_np, sample_rate=sr),
+                    wandb.Audio(audio_np[:length], sample_rate=sr),
+                ])
+
+            wandb.log({
+                "overfit_audio_comparison": wandb.Table(
+                    columns=["clip_idx", "text", "original", "prompt", "generated"],
+                    data=table_rows,
+                )
+            }, step=iter_num)
+            logger.info(f"Logged {num_compare} audio comparison rows to wandb.")
 
 
 if __name__ == "__main__":

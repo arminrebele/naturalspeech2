@@ -5,7 +5,8 @@ defaults:
 
 setup:
   device: "cuda"
-  init_from: "scratch"     
+  seed: 42
+  init_from: "scratch"
   save_checkpoint: False
   eval_interval: 10000
   log_interval: 10         # Wandb logs the norms every 10 steps so it's not too spammy

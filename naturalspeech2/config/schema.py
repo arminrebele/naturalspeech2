@@ -75,6 +75,12 @@ class PitchPredictorConfig:
 
 
 @dataclass
+class EMAConfig:
+    enabled: bool = True
+    halflife_kimg: float = 50.0
+
+
+@dataclass
 class DiffusionModelConfig:
     wavenet_layers: int = 40
     wavenet_kernel_size: int = 3
@@ -160,6 +166,7 @@ class ModelConfig:
     duration_predictor: DurationPredictorConfig = field(default_factory=DurationPredictorConfig)
     pitch_predictor: PitchPredictorConfig = field(default_factory=PitchPredictorConfig)
     diffusion_model: DiffusionModelConfig = field(default_factory=DiffusionModelConfig)
+    ema: EMAConfig = field(default_factory=EMAConfig)
 
     loss_weights: LossWeights = field(default_factory=LossWeights)
     loss_warmup_steps: LossWarmups = field(default_factory=LossWarmups)

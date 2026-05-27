@@ -94,6 +94,14 @@ diffusion_model:
   timestep_eps: 0.001
   min_snr_gamma: 5.0
 
+# EMA of model weights for sampling. halflife_kimg is the EMA halflife in
+# thousands of training examples (Karras EDM Appendix B.4 parameterization);
+# the rampup phase below cur_kimg < halflife_kimg keeps the early shadow
+# from being contaminated by the random init.
+ema:
+  enabled: true
+  halflife_kimg: 50.0
+
 # Loss Balancing Weights
 loss_weights:
   duration_predictor_loss: 1.0

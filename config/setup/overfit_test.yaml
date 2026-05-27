@@ -18,6 +18,7 @@ defaults:
 
 setup:
   device: "cuda"
+  seed: 42                 # Override per-run for seed-sensitivity sweeps
   init_from: "scratch"     # 'scratch' or 'resume'
   save_checkpoint: False   # No need to checkpoint a dummy test
   eval_interval: 10000     # By disabling checkpoints, we skip the eval loop anyway

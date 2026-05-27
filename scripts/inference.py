@@ -38,17 +38,12 @@ def main():
     parser.add_argument("--sampling-steps", type=int, default=150,
                         help="Number of Euler ODE steps (default: 150, matches training).")
     parser.add_argument("--device", type=str, default="cuda")
-    parser.add_argument("--no-ema", action="store_true",
-                        help="Use live training weights instead of EMA shadow "
-                             "(silent no-op until the EMA plan lands).")
     args = parser.parse_args()
 
     output_path = args.output if args.output is not None else _default_output_path()
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    model = load_inference_model(
-        args.checkpoint, device=args.device, use_ema=not args.no_ema,
-    )
+    model = load_inference_model(args.checkpoint, device=args.device)
     audio_np, length = generate_audio(
         model, args.prompt, target_text=args.text,
         sampling_steps=args.sampling_steps,

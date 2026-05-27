@@ -5,7 +5,8 @@ defaults:
 
 setup:
   device: "cuda"
-  init_from: "scratch"     
+  seed: 42
+  init_from: "scratch"
   save_checkpoint: False   # No need to checkpoint
   eval_interval: 10000     # By disabling checkpoints, we skip the eval loop anyway
   log_interval: 10

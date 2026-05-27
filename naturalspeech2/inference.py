@@ -157,17 +157,14 @@ def load_inference_model(
     checkpoint_path: Path | str,
     cfg: DictConfig | None = None,
     device: str = "cuda",
-    use_ema: bool = True,
 ) -> NaturalSpeech2Model:
     """Build the model from cfg, load weights, move to device, set eval mode.
 
     `cfg=None` falls back to composing the project default
     (`config/config.yaml` with all `defaults:` groups resolved via Hydra).
 
-    `use_ema=True` is the contract per plan §6 — until the EMA plan lands it's
-    a silent no-op (the best-only safetensors stores only one weight set). After
-    EMA lands, best-only checkpoints will store EMA weights as the primary
-    state_dict and `load_model` picks them up transparently with no API change.
+    The best-only safetensors checkpoint stores EMA-averaged weights as its
+    primary state_dict, so `load_model` picks them up transparently.
 
     Attaches a phonemizing `PhonemeTokenizer` at `model._inference_tokenizer`
     so downstream `generate_audio()` calls don't need it threaded through.
