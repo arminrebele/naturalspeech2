@@ -1,5 +1,4 @@
 device: "cuda"
-seed: 42                 # Override per-run for seed-sensitivity sweeps
 init_from: "scratch"     # 'scratch' or 'resume'
 save_checkpoint: True
 eval_interval: 5000

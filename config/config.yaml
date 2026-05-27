@@ -8,3 +8,9 @@ defaults:
   # `setup:` loads after `training:` and `wandb:` so setup recipes (`# @package _global_`)
   # can override training fields like `lr_schedule` and wandb configs.
   - setup: full_run
+
+# Process-level reproducibility knob — seeds torch + Python random at train()
+# entry. Affects model init, diffusion t/ε sampling, prompt windows, eval-block
+# prompt picks, DataLoader worker RNG. cuDNN determinism is NOT enforced.
+# Override per-run for seed-sensitivity sweeps: `seed=1234`.
+seed: 42

@@ -256,9 +256,9 @@ def train(cfg: DictConfig):
     # cost ~5–10% perf and force slower compiled kernels) — sufficient for
     # fair A/B comparisons. The bucketed sampler uses np.random.default_rng
     # with its own hardcoded seed so the 5 overfit batches stay fixed
-    # regardless of cfg.setup.seed.
-    torch.manual_seed(cfg.setup.seed)
-    random.seed(cfg.setup.seed)
+    # regardless of cfg.seed.
+    torch.manual_seed(cfg.seed)
+    random.seed(cfg.seed)
 
     # Create checkpoints directory and setup specific logs
     if cfg.setup.loss_analysis_run:
