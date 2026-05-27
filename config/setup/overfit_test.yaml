@@ -66,3 +66,10 @@ model:
     wavenet_attn_weights_dropout: 0.0
     wavenet_attn_out_dropout: 0.0
     wavenet_gate_dropout: 0.0
+  # Override base.yaml's halflife_kimg=50 (right for full_run at ~300k iters).
+  # On this 2000-iter overfit_test (~14 examples/iter = 27.87 kimg total), 50 leaves
+  # the rampup unfinished at end-of-run and the EMA shadow stays contaminated by
+  # rampup-region weights. halflife=5 puts rampup-end at iter ~360 and concentrates
+  # 90% of the shadow's mass on iter 814-1990 (post-rampup, more-converged weights).
+  ema:
+    halflife_kimg: 5.0
