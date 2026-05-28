@@ -150,6 +150,29 @@ class LossWarmups:
 
 
 @dataclass
+class AlignerLossStartIters:
+    group_start: int = 0
+    forward_sum_loss: int = 0
+    bin_loss: int = 60000
+
+
+@dataclass
+class DiffusionLossStartIters:
+    group_start: int = 0
+    data_loss: int = 0
+    score_loss: int = 0
+    ce_rvq_loss: int = 0
+
+
+@dataclass
+class LossStartIters:
+    duration_predictor_loss: int = 0
+    pitch_predictor_loss: int = 0
+    aligner_loss: AlignerLossStartIters = field(default_factory=AlignerLossStartIters)
+    diffusion_loss: DiffusionLossStartIters = field(default_factory=DiffusionLossStartIters)
+
+
+@dataclass
 class ModelConfig:
     hidden_dim: int = 512
     latent_dim: int = 128
@@ -170,6 +193,7 @@ class ModelConfig:
 
     loss_weights: LossWeights = field(default_factory=LossWeights)
     loss_warmup_steps: LossWarmups = field(default_factory=LossWarmups)
+    loss_start_iters: LossStartIters = field(default_factory=LossStartIters)
 
 
 def model_cfg_from_omegaconf(cfg: Any) -> ModelConfig:

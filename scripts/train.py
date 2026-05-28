@@ -369,18 +369,24 @@ def train(cfg: DictConfig):
     
     loss_weights_dict = OmegaConf.to_container(cfg.model.loss_weights, resolve=True)
     loss_warmup_steps_dict = OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
+    loss_start_iters_dict = OmegaConf.to_container(cfg.model.loss_start_iters, resolve=True)
 
     if cfg.setup.loss_analysis_run:
-        logger.info("LOSS ANALYSIS RUN: Forcing all dynamic loss weights to 1.0 and warmups to 0.")
+        logger.info("LOSS ANALYSIS RUN: Forcing all dynamic loss weights to 1.0, warmups to 0, and start iters to 0.")
         override_dict(loss_weights_dict, 1.0)
         override_dict(loss_warmup_steps_dict, 0)
+        override_dict(loss_start_iters_dict, 0)
+    elif cfg.setup.gradient_analysis_run:
+        logger.info("GRADIENT ANALYSIS RUN: Forcing loss start iters to 0 so per-loss gradient norms are measurable from iter 0.")
+        override_dict(loss_start_iters_dict, 0)
     elif cfg.setup.overfit_single_batch:
         logger.info("OVERFIT TEST: Forcing loss warmups to 0. Warmups would complicate the verification of each loss term's ability to converge to near-zero.")
         override_dict(loss_warmup_steps_dict, 0)
-            
+
     loss_wrapper = LossWrapper(
         loss_weights=loss_weights_dict,
-        loss_warmup_steps=loss_warmup_steps_dict
+        loss_warmup_steps=loss_warmup_steps_dict,
+        loss_start_iters=loss_start_iters_dict
     ).to(device)
     
     optimizer = model.configure_optimizers(
