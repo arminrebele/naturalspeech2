@@ -12,16 +12,11 @@ setup:
   eval_iters: 0
   max_iters: 10000
   gradient_accumulation_steps: 5
-  warmup_iters: 0          
+  warmup_iters: 1100       # ~11% fractional match to the main run's ISR warmup
   lr_decay_iters: ${setup.max_iters}
   overfit_single_batch: False
   loss_analysis_run: False
   gradient_analysis_run: True
 
 training:
-  lr_schedule: "cosine"
-
-# Use the small dev split for development workflows so we don't preprocess
-# the full train split (~8h / ~500GB for MLS). full_run keeps train.
-dataset:
-  train_split: "dev"
+  lr_schedule: "isr"   # match main run; cosine's min_lr tail over-settles the balance readout
