@@ -6,11 +6,13 @@
 # LR schedule stays at base.yaml's ISR — matches the main run so the
 # unweighted-loss balance readout reflects the schedule the production model
 # will see. Cosine's min_lr tail would over-settle the magnitudes.
+#
+# Uses the train split (inherits from dataset/mls_eng.yaml). The MLS dev split
+# is too small — at grad_accum_steps=5 and ~3807 dev rows, the loop runs out
+# of data well before max_iters=10000 (commit fa68d66 reverted the dev
+# experiment after hitting this).
 
 defaults:
   - override /model: loss_analysis
   - override /setup: loss_analysis
   - override /wandb: loss_analysis
-
-dataset:
-  train_split: "dev"

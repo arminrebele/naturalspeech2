@@ -4,11 +4,9 @@
 #   python scripts/train.py +experiment=gradient_analysis
 #
 # LR schedule stays at base.yaml's ISR — same rationale as loss_analysis.
-# No per-mode model config: uses model/base.yaml unchanged.
+# Uses the train split for the same reason — dev runs out of data before
+# max_iters. No per-mode model config: uses model/base.yaml unchanged.
 
 defaults:
   - override /setup: gradient_analysis
   - override /wandb: gradient_analysis
-
-dataset:
-  train_split: "dev"
