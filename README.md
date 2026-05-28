@@ -53,12 +53,12 @@ docker compose run --rm --build ns2
 
 We use Hydra for hierarchical configuration management. Configurations are defined in the [`config/`](config/) directory, where [`config/config.yaml`](config/config.yaml) is the default configuration.
 
-You can start the training process and dynamically override config values directly from the terminal. This includes individual values like the Learning Rate, but also full sets of configurations like setting up a specific dataset.
+You can start the training process and dynamically override config values directly from the terminal. This includes individual values like the Learning Rate, but also full sets of configurations like switching to a predefined experiment.
 
 For example:
 
 ```bash
-python scripts/train.py training.learning_rate=1e-4 wandb=serious_run
+python scripts/train.py training.learning_rate=1e-4 +experiment=overfit_test
 ```
 
 Running the [training script](scripts/train.py) will automatically initiate our [Preprocessing-Pipeline](naturalspeech2/data/dataset.py) and prepare the dataset, before the Train-Loop starts. 
