@@ -77,7 +77,14 @@ class EMA:
         return {"shadow": self.shadow, "halflife_kimg": self.halflife_kimg}
 
     def load_state_dict(self, state: dict) -> None:
-        self.shadow = state["shadow"]
+        # Coerce the loaded shadow onto the device the live shadow already lives
+        # on (set in __init__ from the on-device model). Checkpoints load with
+        # map_location="cpu", so state["shadow"] is on CPU; without this move the
+        # first update()'s in-place add_ against on-GPU params raises a
+        # cross-device error. Mirrors torch.optim.Optimizer.load_state_dict,
+        # which casts loaded state onto each param's device.
+        device = next(iter(self.shadow.values())).device
+        self.shadow = {k: v.to(device) for k, v in state["shadow"].items()}
         self.halflife_kimg = state["halflife_kimg"]
 
     @property
