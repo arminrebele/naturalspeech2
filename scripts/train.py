@@ -944,6 +944,13 @@ def train(cfg: DictConfig):
                 for k, v in accum_logged_losses.items():
                     log_payload[f"{get_loss_section(k, 'Train')}/{k}"] = v.item()
 
+                # Each raw term's share of the summed raw magnitudes — flat once the balance stabilizes 
+                # (run-length signal in loss_analysis; drift signal in the main run).
+                raw_terms = {k: v for k, v in accum_logged_losses.items() if not k.endswith("_weighted")}
+                raw_total = sum(raw_terms.values())
+                for k, v in raw_terms.items():
+                    log_payload[f"Train: Loss Composition (Raw Fraction)/{k}"] = (v / raw_total).item()
+
                 # Perform expensive gradient analysis only when logging
                 if analyzer is not None:
                     grad_norms, cos_sims = analyzer.compute_metrics()
