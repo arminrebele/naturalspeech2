@@ -90,7 +90,6 @@ diffusion_model:
   beta_max: 20.0
   sampling_steps: 150
   sampling_temperature: 1.44     # τ = 1.2² — initial noise ~ N(0, τ⁻¹·I)
-  score_eps: 0.05
   timestep_eps: 0.001
   min_snr_gamma: 5.0
 

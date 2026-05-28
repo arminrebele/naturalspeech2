@@ -139,7 +139,6 @@ class DiffusionModel(nn.Module):
             beta_max: float = 20.0,
             sampling_steps: int = 150,
             sampling_temperature: float = 1.44,
-            score_eps: float = 0.05,            # per-sample timestep gate -> any sample with t < score_eps is excluded from the score loss to prevent instability from large reweighting factors at low t
             timestep_eps: float = 1e-3,
             min_snr_gamma: float = 5.0,         # min-SNR(γ) clip on the implicit α̅/σ² weight in score loss (Hang et al. 2023); see forward()
     ):
@@ -151,7 +150,6 @@ class DiffusionModel(nn.Module):
         self.sampling_steps = sampling_steps
         self.sampling_temperature = sampling_temperature
         self.timestep_eps = timestep_eps
-        self.score_eps = score_eps
         self.min_snr_gamma = min_snr_gamma
 
         self.input_projection = nn.Linear(latent_dim, hidden_dim, bias=False)
@@ -244,9 +242,7 @@ class DiffusionModel(nn.Module):
         #   - Min-SNR(γ) clip (Hang et al. 2023): cap the effective weight at γ via
         #     a per-sample factor min(γ·σ²/α̅, 1). With γ=5, low-t contribution is
         #     bounded; high-t (where σ²/α̅ ≥ 1) is unchanged.
-        #   - Per-item gate t ≥ score_eps (=0.05); kept as a belt-and-suspenders
-        #     guard alongside min-SNR.
-        #   - Clamp (1 − α̅) at 1e-5 as NaN-guard; should never trigger given the gate.
+        #   - Clamp (1 − α̅) at 1e-5 as NaN-guard at timestep_eps boundary.
         alpha_bar = rearrange(self._alpha_bar(t), 'b -> b 1 1')
         sigma = (1.0 - alpha_bar).clamp(min=1e-5)
         score_hat = (alpha_bar.sqrt() * z0_hat.float() - z_t) / sigma
@@ -254,9 +250,7 @@ class DiffusionModel(nn.Module):
 
         min_snr_clip = (self.min_snr_gamma * sigma.pow(2) / alpha_bar).clamp(max=1.0)
         score_diff_sq = (score_hat - score_target) ** 2 * min_snr_clip
-        score_gate = rearrange((t >= self.score_eps).to(diff_sq.dtype), 'b -> b 1 1')
-        score_mask = loss_mask * score_gate
-        score_loss = (score_diff_sq * score_mask).sum()
+        score_loss = (score_diff_sq * loss_mask).sum()
 
         # CE-RVQ loss:
         #   Per quantizer j, score the partial residual ẑ₀ − Σᵢ<ⱼ eᵢ against every

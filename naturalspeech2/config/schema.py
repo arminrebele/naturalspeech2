@@ -98,7 +98,6 @@ class DiffusionModelConfig:
     beta_max: float = 20.0
     sampling_steps: int = 150
     sampling_temperature: float = 1.44
-    score_eps: float = 0.05
     timestep_eps: float = 1e-3
     min_snr_gamma: float = 5.0
 
