@@ -338,6 +338,7 @@ def render_overfit_batch_table(deps: EvalDeps) -> tuple[str, list, list]:
         prompt_np = ref_audio_slice.detach().cpu().to(torch.float32).numpy()
 
         rows.append([
+            deps.iter_num,
             i,
             batch["text"][i],
             wandb.Audio(original_np, sample_rate=sr),
@@ -347,7 +348,7 @@ def render_overfit_batch_table(deps: EvalDeps) -> tuple[str, list, list]:
 
     return (
         "overfit_audio_comparison",
-        ["clip_idx", "text", "original", "prompt", "generated"],
+        ["iter", "clip_idx", "text", "original", "prompt", "generated"],
         rows,
     )
 
