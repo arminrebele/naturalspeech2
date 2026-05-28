@@ -397,6 +397,7 @@ def run_eval_block(
     loss_wrapper: LossWrapper,
     ema: Optional[EMA],
     best_dev_loss: float,
+    incremental_audio_tables: dict,
 ) -> float:
     """Single eval pass under EMA-swapped weights. Returns possibly-updated best_dev_loss.
 
@@ -445,7 +446,16 @@ def run_eval_block(
                 logger.info("Generating audio samples for evaluation...")
                 for table_name in deps.cfg.setup.audio_tables:
                     wandb_key, columns, rows = AUDIO_TABLES[table_name](deps)
-                    eval_payload[wandb_key] = wandb.Table(columns=columns, data=rows)
+                    # INCREMENTAL so each eval's rows accumulate into one table
+                    # (compare audio across iters); a fresh table per eval would
+                    # make the panel show only the latest step's audio.
+                    table = incremental_audio_tables.get(wandb_key)
+                    if table is None:
+                        table = wandb.Table(columns=columns, log_mode="INCREMENTAL")
+                        incremental_audio_tables[wandb_key] = table
+                    for row in rows:
+                        table.add_data(*row)
+                    eval_payload[wandb_key] = table
 
             if (
                 deps.cfg.setup.best_safetensors
@@ -560,6 +570,9 @@ def train(cfg: DictConfig):
     best_dev_loss = 1e9
     start_epoch = 0
     start_batch_idx = 0
+    # Persistent INCREMENTAL wandb.Tables, keyed by table name, so eval audio
+    # accumulates across eval firings instead of each eval overwriting the last.
+    incremental_audio_tables: dict = {}
 
     # Instantiate Model
     if cfg.setup.init_from == 'scratch':
@@ -785,6 +798,7 @@ def train(cfg: DictConfig):
                 eval_deps,
                 train_loader, dev_loader, test_loader,
                 loss_wrapper, ema, best_dev_loss,
+                incremental_audio_tables,
             )
             last_log_time += time.perf_counter() - eval_start_time
 
@@ -1059,6 +1073,7 @@ def train(cfg: DictConfig):
         final_eval_deps,
         train_loader, dev_loader, test_loader,
         loss_wrapper, ema, best_dev_loss,
+        incremental_audio_tables,
     )
 
     if cfg.setup.final_safetensors:
