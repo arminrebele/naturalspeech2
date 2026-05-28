@@ -1,75 +1,25 @@
-# @package _global_
-#
-# Overfit-test recipe. The `# @package _global_` directive lets this file write
-# under both `setup.*` (the default for files in config/setup/) AND `model.*`
-# (to zero out all 18 dropout keys), so a single `setup=overfit_test` CLI arg
-# brings the complete recipe instead of 18 trailing `model.<x>_dropout=0` flags.
-#
-# Why dropout off for overfit_test: dropout creates stochastic ẑ₀ predictions
-# that the low-t α̅/(1−α̅)² weighting amplifies into large score-loss spikes
-# (~30–60% reduction in spike magnitude when off. Min-SNR(γ=5) bounds the rest. 
-# Single-batch memorization also benefits from a deterministic forward pass.
-#
-# Loss-weight warmups (`loss_warmup_steps.*`) are auto-zeroed at runtime in
-# scripts/train.py — no override needed here.
-
 defaults:
-  - override /wandb: overfit_test
+  - base
+  - _self_
 
-setup:
-  device: "cuda"
-  init_from: "scratch"     # 'scratch' or 'resume'
-  save_checkpoint: False   # No need to checkpoint a dummy test
-  eval_interval: 10000     # By disabling checkpoints, we skip the eval loop anyway
-  log_interval: 10
-  eval_iters: 0
-  max_iters: 2000           # Short run to observe rapid overfitting
-  gradient_accumulation_steps: 5
-  warmup_iters: 0          # No LR warmup needed for overfit
-  lr_decay_iters: ${setup.max_iters}   # Tie cosine decay window to run length so
-                                        # bumping max_iters on the CLI doesn't leave
-                                        # LR flat at min_lr for the trailing iters.
-  overfit_single_batch: True
-  loss_analysis_run: False
-  gradient_analysis_run: False
+# Overrides on top of setup/base.yaml — only the deltas live here.
 
-training:
-  lr_schedule: "cosine"
+max_iters: 2000
+warmup_iters: 0
+lr_decay_iters: ${setup.max_iters}   # cosine tracks max_iters so CLI bumps don't
+                                      # leave LR flat at min_lr for trailing iters
 
-# Use the small dev split for development workflows so we don't preprocess
-# the full train split (~8h / ~500GB for MLS). full_run keeps train.
-dataset:
-  train_split: "dev"
+overfit_single_batch: True
 
-model:
-  phoneme_encoder:
-    conv_dropout: 0.0
-    attn_weights_dropout: 0.0
-    attn_out_dropout: 0.0
-  aligner:
-    dropout: 0.0
-  speech_prompt_encoder:
-    conv_dropout: 0.0
-    attn_weights_dropout: 0.0
-    attn_out_dropout: 0.0
-  duration_predictor:
-    conv_dropout: 0.0
-    attn_weights_dropout: 0.0
-    attn_out_dropout: 0.0
-  pitch_predictor:
-    conv_dropout: 0.0
-    attn_weights_dropout: 0.0
-    attn_out_dropout: 0.0
-  diffusion_model:
-    attn_weights_dropout: 0.0
-    attn_out_dropout: 0.0
-    wavenet_attn_weights_dropout: 0.0
-    wavenet_attn_out_dropout: 0.0
-    wavenet_gate_dropout: 0.0
-  # Override base.yaml's halflife_kimg=50 (right for full_run at ~300k iters).
-  # On this 2000-iter overfit_test (~14 examples/iter = 27.87 kimg total), 50 leaves
-  # the rampup unfinished at end-of-run and the EMA shadow stays contaminated by
-  # rampup-region weights. halflife=5 puts rampup-end at iter ~360 and concentrates
-  # 90% of the shadow's mass on iter 814-1990 (post-rampup, more-converged weights).
-  ema:
-    halflife_kimg: 5.0
+log_interval: 10
+eval_interval: 500
+checkpoint_interval: 0           # 0 disables periodic ckpt.pt (overfit doesn't need crash recovery)
+
+eval_iters: 0                    # 0 disables estimate_loss in run_eval_block
+audio_tables: [overfit_batch]
+inference_data_loss_sweep: [150, 300, 600, 1000]
+
+best_safetensors: False          # no dev_loss gating on overfit
+
+log_subdir: "research"
+log_name: "overfit_test"

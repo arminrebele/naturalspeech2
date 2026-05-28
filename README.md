@@ -72,7 +72,7 @@ Following the paper [1], we use the english subset of [**Multilingual LibriSpeec
 > **Note:** This will download **705 GB** of Parquet files, which will translate to an additional **~800 GB** worth of Arrow files after deserializing. During preprocessing, the peak disk usage is **~2x** the dataset in arrow format. 
 Additionally, if you choose to use `resample_on_the_fly=False` (e.g. if your CPU-node can't handle resampling during dataloading fast enough), the pre-resampled FLAC files will require an additional **~3.8 TB** of disk space.
 
-For fast development iteration, the `setup=overfit_test`, `setup=loss_analysis`, and `setup=gradient_analysis` configs override the train split to MLS' small `dev` split, so they don't trigger preprocessing of the full ~800 GB train data. The `setup=full_run` workflow uses the train split as usual.
+For fast development iteration, the `+experiment=overfit_test`, `+experiment=loss_analysis`, and `+experiment=gradient_analysis` configs override the train split to MLS' small `dev` split, so they don't trigger preprocessing of the full ~800 GB train data. The default no-arg invocation (the `full_run` composition) uses the train split as usual.
 
 If your dataset spans multiple physical disks, the provided [`entrypoint.sh`](entrypoint.sh) natively supports MergerFS to seamlessly pool them into the `/workspace/data` directory expected by the codebase.
 You can configure this by adding the following lines to your `docker-compose.override.yml` file on your host machine to supply the `MERGERFS_DISKS` environment variable and mount the required drives:
@@ -178,7 +178,7 @@ Additionally, to safely route gradients through the deep predictor and WaveNet s
 To verify that there are no fundamental errors preventing the model from learning, we intentionally overfit it by running the [Train-Loop](scripts/train.py) on a single batch for multiple iterations.
 
 ```bash
-python scripts/train.py setup=overfit_test
+python scripts/train.py +experiment=overfit_test
 ```
 
 **3. Loss-Analysis**
@@ -188,7 +188,7 @@ Since our Loss comprises multiple individual Loss-Terms, we run a few iterations
 We then scale the Loss-Terms accordingly, so they influence the shared parameters equally (actually we might still want to introduce intentional biases towards individual Terms afterwards).
 
 ```bash
-python scripts/train.py setup=loss_analysis
+python scripts/train.py +experiment=loss_analysis
 ```
 
 **4. Gradient-Analysis**
@@ -198,7 +198,7 @@ In order to verify, if the Loss-Balancing from the previous step actually worked
 We additionally calculate cosine-similarities between the gradients, to make sure that individual Loss-Terms do not compete with each other. If that were the case, we would need to introduce further measures, like slowly warming up those specific Loss-Terms.
 
 ```bash
-python scripts/train.py setup=gradient_analysis
+python scripts/train.py +experiment=gradient_analysis
 ```
 
 **5. Hyperparameter-Tuning**

@@ -1,0 +1,14 @@
+# @package _global_
+#
+# Hydra "experiment" pattern: additive overrides on top of config.yaml's defaults.
+#   python scripts/train.py +experiment=gradient_analysis
+#
+# LR schedule stays at base.yaml's ISR — same rationale as loss_analysis.
+# No per-mode model config: uses model/base.yaml unchanged.
+
+defaults:
+  - override /setup: gradient_analysis
+  - override /wandb: gradient_analysis
+
+dataset:
+  train_split: "dev"

@@ -1,0 +1,20 @@
+# @package _global_
+#
+# Hydra "experiment" pattern (https://hydra.cc/docs/patterns/configuring_experiments/):
+# additive overrides on top of config.yaml's defaults.
+#   python scripts/train.py +experiment=overfit_test
+#
+# Single-batch memorization sanity check. Cosine LR over the short run (ISR's
+# warmup>0 assert would otherwise trip with warmup_iters=0), dev split as the
+# data source, dropout/halflife/warmups overridden via model/overfit_test.yaml.
+
+defaults:
+  - override /model: overfit_test
+  - override /setup: overfit_test
+  - override /wandb: overfit_test
+
+training:
+  lr_schedule: "cosine"
+
+dataset:
+  train_split: "dev"

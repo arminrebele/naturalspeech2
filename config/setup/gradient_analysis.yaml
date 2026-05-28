@@ -1,22 +1,24 @@
-# @package _global_
-
 defaults:
-  - override /wandb: gradient_analysis
+  - base
+  - _self_
 
-setup:
-  device: "cuda"
-  init_from: "scratch"
-  save_checkpoint: False
-  eval_interval: 10000
-  log_interval: 10         # Wandb logs the norms every 10 steps so it's not too spammy
-  eval_iters: 0
-  max_iters: 10000
-  gradient_accumulation_steps: 5
-  warmup_iters: 1100       # ~11% fractional match to the main run's ISR warmup
-  lr_decay_iters: ${setup.max_iters}
-  overfit_single_batch: False
-  loss_analysis_run: False
-  gradient_analysis_run: True
+# Overrides on top of setup/base.yaml — only the deltas live here.
 
-training:
-  lr_schedule: "isr"   # match main run; cosine's min_lr tail over-settles the balance readout
+max_iters: 10000
+warmup_iters: 1100               # ~11% fractional match to the main run's ISR warmup
+lr_decay_iters: ${setup.max_iters}
+
+gradient_analysis_run: True
+
+log_interval: 10                 # wandb logs the norms every 10 steps so it's not too spammy
+eval_interval: 10000             # >= max_iters → in-loop eval never fires
+checkpoint_interval: 0
+
+eval_iters: 0
+audio_tables: []
+
+best_safetensors: False
+final_safetensors: False
+
+log_subdir: "research"
+log_name: "gradient_analysis"

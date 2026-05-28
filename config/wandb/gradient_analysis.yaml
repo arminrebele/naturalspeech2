@@ -1,6 +1,6 @@
-log: True                # We heavily rely on WandB charts to see the dynamics of gradients
-project: "naturalspeech2"
+defaults:
+  - base
+  - _self_
+
 group: "gradient-analysis"
 run_name: "gradient_analysis"
-notes: ""
-tags: []

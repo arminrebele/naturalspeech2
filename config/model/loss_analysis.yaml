@@ -1,0 +1,32 @@
+defaults:
+  - base
+  - _self_
+
+# Uniform 1.0 weights so the loss-magnitude analysis reads unweighted truth —
+# weight tuning is what the analysis output informs, not the input.
+loss_weights:
+  duration_predictor_loss: 1.0
+  pitch_predictor_loss: 1.0
+  aligner_loss:
+    group_weight: 1.0
+    forward_sum_loss: 1.0
+    bin_loss: 1.0
+  diffusion_loss:
+    group_weight: 1.0
+    data_loss: 1.0
+    score_loss: 1.0
+    ce_rvq_loss: 1.0
+
+# Zero warmups so loss magnitudes are comparable across early/late iters.
+loss_warmup_steps:
+  duration_predictor_loss: 0
+  pitch_predictor_loss: 0
+  aligner_loss:
+    group_warmup: 0
+    forward_sum_loss: 0
+    bin_loss: 0
+  diffusion_loss:
+    group_warmup: 0
+    data_loss: 0
+    score_loss: 0
+    ce_rvq_loss: 0

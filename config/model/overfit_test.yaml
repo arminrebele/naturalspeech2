@@ -1,0 +1,55 @@
+defaults:
+  - base
+  - _self_
+
+# Dropout off for overfit_test: dropout creates stochastic ẑ₀ predictions that
+# the low-t α̅/(1−α̅)² weighting amplifies into score-loss spikes (~30–60%
+# reduction in spike magnitude when off; min-SNR(γ=5) bounds the rest). Single-
+# batch memorization also benefits from a deterministic forward pass.
+phoneme_encoder:
+  conv_dropout: 0.0
+  attn_weights_dropout: 0.0
+  attn_out_dropout: 0.0
+aligner:
+  dropout: 0.0
+speech_prompt_encoder:
+  conv_dropout: 0.0
+  attn_weights_dropout: 0.0
+  attn_out_dropout: 0.0
+duration_predictor:
+  conv_dropout: 0.0
+  attn_weights_dropout: 0.0
+  attn_out_dropout: 0.0
+pitch_predictor:
+  conv_dropout: 0.0
+  attn_weights_dropout: 0.0
+  attn_out_dropout: 0.0
+diffusion_model:
+  attn_weights_dropout: 0.0
+  attn_out_dropout: 0.0
+  wavenet_attn_weights_dropout: 0.0
+  wavenet_attn_out_dropout: 0.0
+  wavenet_gate_dropout: 0.0
+
+# Override base.yaml's halflife_kimg=50 (right for full_run at ~300k iters).
+# On a 2000-iter overfit_test (~14 examples/iter = 27.87 kimg total), 50 leaves
+# the rampup unfinished at end-of-run and the EMA shadow stays contaminated by
+# rampup-region weights. halflife=5 puts rampup-end at iter ~360 and
+# concentrates 90% of the shadow's mass on iter 814–1990.
+ema:
+  halflife_kimg: 5.0
+
+# Loss-weight warmups zeroed: warmups would complicate the verification of each
+# loss term's ability to converge to near-zero on a single batch.
+loss_warmup_steps:
+  duration_predictor_loss: 0
+  pitch_predictor_loss: 0
+  aligner_loss:
+    group_warmup: 0
+    forward_sum_loss: 0
+    bin_loss: 0
+  diffusion_loss:
+    group_warmup: 0
+    data_loss: 0
+    score_loss: 0
+    ce_rvq_loss: 0

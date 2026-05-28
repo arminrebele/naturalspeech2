@@ -1,13 +1,15 @@
 defaults:
   - _self_
   - dataset: mls_eng
-  - dataloader: default
+  - dataloader: base
   - model: base
-  - training: full_run
-  - wandb: full_run
-  # `setup:` loads after `training:` and `wandb:` so setup recipes (`# @package _global_`)
-  # can override training fields like `lr_schedule` and wandb configs.
-  - setup: full_run
+  - training: base
+  - setup: base
+  - wandb: base
+  # Per-experiment additive overrides (Hydra canonical experiment pattern):
+  #   python scripts/train.py +experiment=overfit_test
+  # See config/experiment/*.yaml. No-arg runs use the canonical full-scale
+  # training defaults (the base files of every group).
 
 # Process-level reproducibility knob — seeds torch + Python random at train()
 # entry. Affects model init, diffusion t/ε sampling, prompt windows, eval-block

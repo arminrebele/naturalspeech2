@@ -1,6 +1,6 @@
-log: True
-project: "naturalspeech2"
+defaults:
+  - base
+  - _self_
+
 group: "loss-analysis"
 run_name: "loss_analysis"
-notes: ""
-tags: []

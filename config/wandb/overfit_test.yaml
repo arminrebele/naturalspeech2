@@ -1,9 +1,9 @@
-log: True
-project: "naturalspeech2"
+defaults:
+  - base
+  - _self_
+
 group: "overfit-test"
 run_name: "overfit_test"
 # Override on the CLI to give the run initial context, e.g.
 #   wandb.notes='"first 2k run with latent normalization"' wandb.tags='[latent-norm,2k-iter]'
 # `scratch/annotate_wandb_runs.py` enriches these post-hoc with findings + implications.
-notes: ""
-tags: []

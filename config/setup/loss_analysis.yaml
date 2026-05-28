@@ -1,22 +1,24 @@
-# @package _global_
-
 defaults:
-  - override /wandb: loss_analysis
+  - base
+  - _self_
 
-setup:
-  device: "cuda"
-  init_from: "scratch"
-  save_checkpoint: False   # No need to checkpoint
-  eval_interval: 10000     # By disabling checkpoints, we skip the eval loop anyway
-  log_interval: 10
-  eval_iters: 0
-  max_iters: 10000           # Receive stable averages
-  gradient_accumulation_steps: 5
-  warmup_iters: 1100       # ~11% fractional match to the main run's ISR warmup
-  lr_decay_iters: ${setup.max_iters}
-  overfit_single_batch: False
-  loss_analysis_run: True  # Activates the loss tracking and suggestion summary
-  gradient_analysis_run: False
+# Overrides on top of setup/base.yaml — only the deltas live here.
 
-training:
-  lr_schedule: "isr"   # match main run; cosine's min_lr tail over-settles the balance readout
+max_iters: 10000
+warmup_iters: 1100               # ~11% fractional match to the main run's ISR warmup
+lr_decay_iters: ${setup.max_iters}
+
+loss_analysis_run: True
+
+log_interval: 10
+eval_interval: 10000             # >= max_iters → in-loop eval never fires
+checkpoint_interval: 0
+
+eval_iters: 0
+audio_tables: []
+
+best_safetensors: False
+final_safetensors: False         # loss_analysis has its own end-of-run summary; no inference artifact needed
+
+log_subdir: "research"
+log_name: "loss_analysis"
