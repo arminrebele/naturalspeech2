@@ -27,7 +27,7 @@ def _default_output_path() -> Path:
 def main():
     parser = argparse.ArgumentParser(description="Generate audio from a NaturalSpeech2 checkpoint.")
     parser.add_argument("--checkpoint", type=Path, required=True,
-                        help="Path to a .safetensors checkpoint (e.g. checkpoints/ckpt_best.safetensors).")
+                        help="Path to a .safetensors checkpoint (e.g. checkpoints/ema_best.safetensors).")
     parser.add_argument("--prompt", type=Path, required=True,
                         help="Reference voice wav file (any sample rate; auto-resampled).")
     parser.add_argument("--text", type=str, required=True,

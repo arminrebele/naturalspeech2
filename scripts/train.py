@@ -454,9 +454,9 @@ def run_eval_block(
             ):
                 best_dev_loss = losses['dev']['total_loss']
                 logger.info(f"Saving new best model to {CHECKPOINTS_DIR}")
-                best_path = CHECKPOINTS_DIR / 'ckpt_best.safetensors'
-                best_tmp_path = CHECKPOINTS_DIR / 'ckpt_best.tmp.safetensors'
-                best_bak_path = CHECKPOINTS_DIR / 'ckpt_best_bak.safetensors'
+                best_path = CHECKPOINTS_DIR / 'ema_best.safetensors'
+                best_tmp_path = CHECKPOINTS_DIR / 'ema_best.tmp.safetensors'
+                best_bak_path = CHECKPOINTS_DIR / 'ema_best_bak.safetensors'
                 _save_safetensors(deps.unoptimized_model, best_tmp_path)
                 if best_path.exists():
                     best_path.replace(best_bak_path)
@@ -1062,7 +1062,7 @@ def train(cfg: DictConfig):
     )
 
     if cfg.setup.final_safetensors:
-        final_path = CHECKPOINTS_DIR / 'ckpt_final.safetensors'
+        final_path = CHECKPOINTS_DIR / 'ema_final.safetensors'
         with ema.swap_in(unoptimized_model) if ema is not None else nullcontext():
             _save_safetensors(unoptimized_model, final_path)
         logger.info(f"Saved final EMA weights for offline inference to {final_path}")
