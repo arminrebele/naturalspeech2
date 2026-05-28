@@ -500,11 +500,10 @@ class NaturalSpeech2Model(nn.Module):
     
 
 class LossWrapper(torch.nn.Module):
-    def __init__(self, loss_weights: dict, loss_warmup_steps: dict, loss_start_iters: dict):
+    def __init__(self, loss_weights: dict, loss_warmup_steps: dict):
         super().__init__()
         self.loss_weights = self._flatten_config(loss_weights, "group_weight")
         self.loss_warmup_steps = self._flatten_config(loss_warmup_steps, "group_warmup")
-        self.loss_start_iters = self._flatten_config(loss_start_iters, "group_start")
         self.current_weights = {}
         self._update_weights(0)  # Initialize weights for step 0
 
@@ -524,13 +523,6 @@ class LossWrapper(torch.nn.Module):
 
     def _update_weights(self, step: int):
         for key, target_weight in self.loss_weights.items():
-            # Hard gate: weight forced to 0 until AlignerNet (or whichever term)
-            # has trained long enough that its loss commits to non-noise signal.
-            # Raw loss is still computed and logged downstream — only the
-            # contribution to the total loss / gradient is masked.
-            if step < self.loss_start_iters[key]:
-                self.current_weights[key] = 0.0
-                continue
             warmup_steps = self.loss_warmup_steps[key]
             if warmup_steps > 0:
                 progress = min(1.0, step / warmup_steps)

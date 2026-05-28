@@ -127,26 +127,3 @@ loss_warmup_steps:
     data_loss: 0
     score_loss: 0
     ce_rvq_loss: 0
-
-# Hard-gate of loss weights: weight is forced to 0 until `step >= start_iter`,
-# then the existing warmup logic takes over (no warmup for bin_loss → hard 0→1
-# step at activation). Absolute iter count, NOT a fraction of total iters —
-# the right value depends on the training setup's trajectory (LR, batch size,
-# data), not on run length. bin_loss is the only term that needs this: it's
-# BCE between soft attention and hard Viterbi paths; activating before
-# AlignerNet has learned non-noise scores commits to prior-dominated Viterbi
-# decodes and wastes gradient pulling soft attention toward that prior peak.
-# Convention from RAD-TTS (Shih et al. ICML 2022) `binarization_start_iter=6000`
-# at 30k total iters (absolute count, 20% framing is post-hoc).
-loss_start_iters:
-  duration_predictor_loss: 0
-  pitch_predictor_loss: 0
-  aligner_loss:
-    group_start: 0
-    forward_sum_loss: 0
-    bin_loss: 60000
-  diffusion_loss:
-    group_start: 0
-    data_loss: 0
-    score_loss: 0
-    ce_rvq_loss: 0

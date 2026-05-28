@@ -73,15 +73,3 @@ model:
   # 90% of the shadow's mass on iter 814-1990 (post-rampup, more-converged weights).
   ema:
     halflife_kimg: 5.0
-  # Activate bin_loss at iter 400 (absolute, NOT a fraction of total iters).
-  # On the 5-batch overfit task, AlignerNet has moved past prior-dominated
-  # scores by then — before that point, bin_loss commits to Viterbi paths
-  # decoded from the beta-binomial prior's diagonal peak rather than from
-  # learned phoneme-frame features, wasting gradient pulling soft attention
-  # toward the prior peak while forward_sum_loss tries to move it elsewhere.
-  # Same value applies for any total iter count >400: staging timing is a
-  # property of AlignerNet's training trajectory (LR × updates seen), not of
-  # run length.
-  loss_start_iters:
-    aligner_loss:
-      bin_loss: 400
