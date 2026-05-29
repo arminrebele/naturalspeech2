@@ -21,7 +21,7 @@ import torch
 import torchaudio.functional as taF
 from einops import rearrange
 from omegaconf import DictConfig
-from safetensors.torch import load_model
+from safetensors.torch import load_file
 
 from naturalspeech2.config.schema import model_cfg_from_omegaconf
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
@@ -164,7 +164,7 @@ def load_inference_model(
     (`config/config.yaml` with all `defaults:` groups resolved via Hydra).
 
     The best-only safetensors checkpoint stores EMA-averaged weights as its
-    primary state_dict, so `load_model` picks them up transparently.
+    primary state_dict, so the loader picks them up transparently.
 
     Attaches a phonemizing `PhonemeTokenizer` at `model._inference_tokenizer`
     so downstream `generate_audio()` calls don't need it threaded through.
@@ -191,7 +191,13 @@ def load_inference_model(
         token_vocabulary_size=token_vocabulary_size,
         sampling_rate=sampling_rate,
     )
-    load_model(model, str(checkpoint_path))
+    # safetensors.torch.load_model runs _remove_duplicate_names over the model's
+    # state_dict, which errors on buffers whose storage isn't covered by a single
+    # name (torchaudio's spectrogram `window`, encodec's LSTM `_flat_weights`).
+    # load_file + plain load_state_dict copies by name and is indifferent to
+    # storage sharing — the load-side counterpart of the _save_safetensors
+    # clone-on-save workaround in scripts/train.py.
+    model.load_state_dict(load_file(str(checkpoint_path)))
     model.to(device)
     model.eval()
 
