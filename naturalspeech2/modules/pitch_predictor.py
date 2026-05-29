@@ -33,20 +33,22 @@ class PitchPredictor(nn.Module):
         self.attn_out_dropout = nn.Dropout(attn_out_dropout)
         self.final_norm = RMSNorm(hidden_dim)
         self.to_pitch = Conv1D(hidden_dim, 1, 1)
+        self.to_voicing = Conv1D(hidden_dim, 1, 1)  # binary voiced/unvoiced logit per frame
 
         self._init_weights()
 
     def _init_weights(self) -> None:
         # Standard N(0, 0.02) base, then Fixup-style zero-init of every residual-output
         # projection (convs[i] feeds the conv residual; attns[i].to_out feeds the cross-attn
-        # residual) and the final prediction head (to_pitch). All 40 residual writes share
-        # the same stream — every block is identity-at-init.
+        # residual) and the final prediction heads (to_pitch, to_voicing). All 40 residual
+        # writes share the same stream — every block is identity-at-init.
         standard_init(self)
         for conv in self.convs:
             nn.init.zeros_(conv.conv1d.weight)
         for attn in self.attns:
             nn.init.zeros_(attn.to_out.weight)
         nn.init.zeros_(self.to_pitch.conv1d.weight)
+        nn.init.zeros_(self.to_voicing.conv1d.weight)
 
     def forward(
             self,
@@ -78,6 +80,7 @@ class PitchPredictor(nn.Module):
             x = x * mask
 
         x = self.final_norm(x)
-        x = self.to_pitch(x, expanded_phoneme_encodings_mask)  # [B, F, 1]
-        x = rearrange(x * expanded_phoneme_encodings_mask.to(x.dtype), 'b f 1 -> b f')  # [B, F]
-        return x
+        m = expanded_phoneme_encodings_mask.to(x.dtype)
+        log_pitch = rearrange(self.to_pitch(x, expanded_phoneme_encodings_mask) * m, 'b f 1 -> b f')        # [B, F]
+        voicing_logit = rearrange(self.to_voicing(x, expanded_phoneme_encodings_mask) * m, 'b f 1 -> b f')  # [B, F]
+        return log_pitch, voicing_logit

@@ -105,6 +105,7 @@ ema:
 loss_weights:
   duration_predictor_loss: 1.0
   pitch_predictor_loss: 1.0
+  pitch_voicing_loss: 1.0
   aligner_loss:
     group_weight: 1.0
     forward_sum_loss: 1.0
@@ -118,6 +119,7 @@ loss_weights:
 loss_warmup_steps:
   duration_predictor_loss: 1000
   pitch_predictor_loss: 1000
+  pitch_voicing_loss: 0
   aligner_loss:
     group_warmup: 0
     forward_sum_loss: 0

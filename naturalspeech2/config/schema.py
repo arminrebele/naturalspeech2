@@ -121,6 +121,7 @@ class DiffusionLossWeights:
 class LossWeights:
     duration_predictor_loss: float = 1.0
     pitch_predictor_loss: float = 1.0
+    pitch_voicing_loss: float = 1.0
     aligner_loss: AlignerLossWeights = field(default_factory=AlignerLossWeights)
     diffusion_loss: DiffusionLossWeights = field(default_factory=DiffusionLossWeights)
 
@@ -144,6 +145,7 @@ class DiffusionLossWarmups:
 class LossWarmups:
     duration_predictor_loss: int = 1000
     pitch_predictor_loss: int = 1000
+    pitch_voicing_loss: int = 0
     aligner_loss: AlignerLossWarmups = field(default_factory=AlignerLossWarmups)
     diffusion_loss: DiffusionLossWarmups = field(default_factory=DiffusionLossWarmups)
 

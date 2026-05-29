@@ -283,7 +283,7 @@ class NaturalSpeech2Model(nn.Module):
             prompt_encodings_mask,
         )
 
-        predicted_log_pitch = self.pitch_predictor(         # [B, F]
+        predicted_log_pitch, predicted_voicing_logit = self.pitch_predictor(   # [B, F], [B, F]
             expanded_phoneme_encodings,
             frame_mask_expanded,
             prompt_encodings,
@@ -345,6 +345,16 @@ class NaturalSpeech2Model(nn.Module):
         )  # [B, F]
         pitch_predictor_loss = (pitch_loss_per_frame * pitch_loss_mask).sum()
 
+        # Voiced/unvoiced BCE over ALL valid frames (not voiced-only). The pitch predictor
+        # is trained voiced-only on the F0 *value*, so at inference it emits ~speaker-mean
+        # F0 on unvoiced frames; this head lets generate() gate those to 0, matching the
+        # GT-pitch condition (pitch=0 on unvoiced) the diffusion was trained on. Without it
+        # ~half the inference condition frames are OOD → noise.
+        voicing_bce_per_frame = F.binary_cross_entropy_with_logits(
+            predicted_voicing_logit, voiced_mask, reduction='none',
+        )  # [B, F]
+        pitch_voicing_loss = (voicing_bce_per_frame * frame_mask_flat).sum()
+
         diffusion_losses = self.diffusion_model(
             target_latents,           # [B, Ft, latent_dim]   in normalized space
             target_latents_mask,      # [B, Ft, 1]
@@ -361,6 +371,7 @@ class NaturalSpeech2Model(nn.Module):
             "diffusion_loss": diffusion_losses,
             "duration_predictor_loss": duration_predictor_loss,
             "pitch_predictor_loss": pitch_predictor_loss,
+            "pitch_voicing_loss": pitch_voicing_loss,
             "aligner_loss":{
                 "forward_sum_loss": forward_sum_loss,
                 "bin_loss": bin_loss,
@@ -388,7 +399,19 @@ class NaturalSpeech2Model(nn.Module):
         phoneme_tokens_lengths: torch.Tensor,    # [B]
 
         sampling_steps: int | None = None,       # override the model's configured default for this call
+
+        durations: torch.Tensor | None = None,   # [B, P] teacher-forced GT durations — skips the duration predictor
+        pitch: torch.Tensor | None = None,        # [B, F'] teacher-forced GT pitch in Hz — skips the pitch predictor
     ):
+        # Teacher-forcing contract: predicted pitch lives on the frame grid set by the
+        # durations (F' = Σ durations), so a caller may supply pitch only when also
+        # supplying durations — otherwise the given pitch can't match the predicted F'.
+        if pitch is not None and durations is None:
+            raise ValueError(
+                "generate(pitch=...) requires durations=... — pitch is defined on the "
+                "duration-determined frame grid, so it can't match a predicted F'."
+            )
+
         # 1. Build speech prompt from reference audio.
         reference_latents, reference_latents_lengths, _ = self.encodec.get_latents(  # [B, Fp, D], [B]
             reference_audio,
@@ -412,48 +435,56 @@ class NaturalSpeech2Model(nn.Module):
             phoneme_tokens_lengths,
         )
 
-        # 3. Predict durations, expand phonemes to frames.
-        predicted_log_durations = self.duration_predictor(                        # [B, P]
-            phoneme_encodings,
-            phoneme_tokens_mask,
-            prompt_encodings,
-            prompt_encodings_mask,
-        )
-        # Inverse of training's torch.log1p: expm1 -> round -> clamp valid phonemes to >=1 frame -> mask padding to 0.
-        # min=1 (not 0) prevents an untrained / early-checkpoint model from collapsing valid phonemes
-        # to zero frames, which would produce max_frames=0 and crash the downstream pitch/diffusion/decode path.
-        phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').long()
-        predicted_durations = torch.expm1(predicted_log_durations).round().long().clamp(min=1)
-        predicted_durations = predicted_durations * phoneme_mask_flat             # [B, P]
+        # 3. Durations: predicted, unless teacher-forced GT durations are supplied
+        #    (diagnostic / controllable generation — skips the duration predictor).
+        if durations is None:
+            predicted_log_durations = self.duration_predictor(                    # [B, P]
+                phoneme_encodings,
+                phoneme_tokens_mask,
+                prompt_encodings,
+                prompt_encodings_mask,
+            )
+            # Inverse of training's torch.log1p: expm1 -> round -> clamp valid phonemes to >=1 frame -> mask padding to 0.
+            # min=1 (not 0) prevents an untrained / early-checkpoint model from collapsing valid phonemes
+            # to zero frames, which would produce max_frames=0 and crash the downstream pitch/diffusion/decode path.
+            phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').long()
+            durations = torch.expm1(predicted_log_durations).round().long().clamp(min=1)
+            durations = durations * phoneme_mask_flat                             # [B, P]
+        else:
+            durations = durations.long()
 
         # max_frames as Python int forces one CPU<->GPU sync — acceptable inside generate()
         # (not inside forward()). Required because _expand_phoneme_encodings needs a
         # Python int for torch.arange.
-        frame_lengths = predicted_durations.sum(dim=1)                            # [B]
+        frame_lengths = durations.sum(dim=1)                                      # [B]
         max_frames = int(frame_lengths.max().item())
 
         (expanded_phoneme_encodings,                                              # [B, F', D]
          frame_mask,                                                              # [B, F', 1]
          frame_lengths) = self._expand_phoneme_encodings(                         # [B]
             phoneme_encodings,
-            predicted_durations,
+            durations,
             max_frames=max_frames,
         )
 
-        # 4. Predict pitch, build condition.
-        predicted_log_pitch = self.pitch_predictor(                               # [B, F']
-            expanded_phoneme_encodings,
-            frame_mask,
-            prompt_encodings,
-            prompt_encodings_mask,
-        )
-        # Inverse of training's torch.log(pitch.clamp(min=1e-5)). Unvoiced frames
-        # produce very low predicted log-pitch, so exp(.) recovers ~0 Hz naturally.
-        predicted_pitch = torch.exp(predicted_log_pitch)                          # [B, F']
+        # 4. Pitch: predicted, unless teacher-forced GT pitch ([B, F'] in Hz) is supplied.
+        if pitch is None:
+            predicted_log_pitch, predicted_voicing_logit = self.pitch_predictor(  # [B, F'], [B, F']
+                expanded_phoneme_encodings,
+                frame_mask,
+                prompt_encodings,
+                prompt_encodings_mask,
+            )
+            # Gate by predicted voicing: unvoiced frames → 0 Hz, matching the GT-pitch
+            # condition the diffusion was trained on (pitch=0 on unvoiced). The pitch
+            # predictor is trained voiced-only on the F0 value, so on unvoiced frames it
+            # emits ~speaker-mean F0; feeding that to ~half the clip is OOD → noise.
+            voiced = (torch.sigmoid(predicted_voicing_logit) > 0.5).to(predicted_log_pitch.dtype)
+            pitch = torch.exp(predicted_log_pitch) * voiced                       # [B, F']
 
         condition = self._generate_condition(                                     # [B, F', D]
             expanded_phoneme_encodings,
-            predicted_pitch,
+            pitch,
             frame_mask,
         )
 

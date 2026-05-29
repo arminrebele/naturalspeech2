@@ -40,6 +40,7 @@ def compute_denominators(micro_batches: list[dict], cfg: DictConfig) -> dict:
     denominators = {
         "duration_predictor_loss": 0,
         "pitch_predictor_loss": 0,
+        "pitch_voicing_loss": 0,
         "forward_sum_loss": 0,
         "bin_loss": 0,
         "data_loss": 0,
@@ -63,6 +64,7 @@ def compute_denominators(micro_batches: list[dict], cfg: DictConfig) -> dict:
         
         denominators["forward_sum_loss"] += total_frames
         denominators["bin_loss"] += total_frames
+        denominators["pitch_voicing_loss"] += total_frames   # BCE over all valid frames
         
         max_allowed_prompt = (frame_lengths - min_target_frames).clamp(min=1)
         prompt_latents_lengths = torch.minimum(max_allowed_prompt, torch.full_like(frame_lengths, prompt_frames))
