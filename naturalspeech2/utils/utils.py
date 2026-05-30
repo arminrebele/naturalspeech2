@@ -101,8 +101,6 @@ def generate_dummy_batch(
     audio = torch.randn(batch_size, audio_samples, device=device)
     audio = audio.masked_fill(~audio_mask_2d, 0.0)
 
-    audio_mask = rearrange(audio_mask_2d, 'b t -> b t 1')
-
     # Phoneme lengths are NOT strictly bounded by previous buckets (fast vs slow speakers)
     # So we maintain a generous variance down to half the bucket's max length
     phoneme_tokens_lengths = torch.randint(max(1, phoneme_samples // 2), phoneme_samples + 1, (batch_size,), device=device)
@@ -126,7 +124,6 @@ def generate_dummy_batch(
 
     return {
         "audio": audio,
-        "audio_mask": audio_mask,
         "audio_lengths": audio_lengths,
         "phoneme_tokens": phoneme_tokens,
         "phoneme_tokens_mask": phoneme_tokens_mask,

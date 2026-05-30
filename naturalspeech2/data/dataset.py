@@ -612,8 +612,6 @@ class BucketedCollateFn:
         for i, t in enumerate(audio_tensors):
             audio_padded[i, :t.shape[0]] = t
 
-        audio_mask = create_mask_from_lengths(audio_lengths, target_audio_len) # [B, T, 1]
-        
         pitch_padded = torch.zeros((B, target_pitch_len), dtype=pitch_tensors[0].dtype)
         for i, t in enumerate(pitch_tensors):
             pitch_padded[i, :t.shape[0]] = t
@@ -631,7 +629,6 @@ class BucketedCollateFn:
 
         return {
             "audio": audio_padded,                      # [B, static_T]
-            "audio_mask": audio_mask,                   # [B, static_T, 1]
             "audio_lengths": audio_lengths,             # [B]
 
             "pitch": pitch_padded,                      # [B, static_F]

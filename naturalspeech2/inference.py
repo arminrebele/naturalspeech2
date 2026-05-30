@@ -306,7 +306,6 @@ def compute_inference_data_loss(
     with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
         _, diff_inputs = model(
             audio=b["audio"],
-            audio_mask=b["audio_mask"],
             audio_lengths=b["audio_lengths"],
             phoneme_tokens=b["phoneme_tokens"],
             phoneme_tokens_mask=b["phoneme_tokens_mask"],

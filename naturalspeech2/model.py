@@ -202,7 +202,6 @@ class NaturalSpeech2Model(nn.Module):
     def forward(
         self,
         audio: torch.Tensor,                  # [B, T]    | float
-        audio_mask: torch.Tensor,             # [B, T, 1] | True/False
         audio_lengths: torch.Tensor,          # [B]       | int
 
         phoneme_tokens: torch.Tensor,         # [B, P]    | int
