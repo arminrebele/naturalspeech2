@@ -7,9 +7,9 @@ shuffle: True
 resample_on_the_fly: True
 drop_last: True             # Warning: False can cause graph recompiles for incomplete batches
 bucket_mapping:
-  - { audio_length: 32000,  phoneme_length: 100, batch_size: 32}
-  - { audio_length: 80000,  phoneme_length: 200, batch_size: 16}
-  - { audio_length: 160000, phoneme_length: 350, batch_size: 8 }
-  - { audio_length: 240000, phoneme_length: 500, batch_size: 6 }
-  - { audio_length: 384000, phoneme_length: 650, batch_size: 4 }
-  - { audio_length: 720000, phoneme_length: 900, batch_size: 2 }
+  - { audio_length: 281600, phoneme_length: 260, batch_size: 91 }   # 11.7s · 880 fr · batch×fr ≈ 80.1k
+  - { audio_length: 320000, phoneme_length: 290, batch_size: 80 }   # 13.3s · 1000 fr · batch×fr ≈ 80.0k
+  - { audio_length: 358400, phoneme_length: 340, batch_size: 72 }   # 14.9s · 1120 fr · batch×fr ≈ 80.6k
+  - { audio_length: 396800, phoneme_length: 380, batch_size: 64 }   # 16.5s · 1240 fr · batch×fr ≈ 79.4k
+  - { audio_length: 437760, phoneme_length: 400, batch_size: 58 }   # 18.2s · 1368 fr · batch×fr ≈ 79.3k
+  - { audio_length: 481280, phoneme_length: 440, batch_size: 53 }   # 20.1s · 1504 fr · batch×fr ≈ 79.7k
