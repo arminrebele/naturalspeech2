@@ -248,7 +248,7 @@ class NaturalSpeech2Model(nn.Module):
 
         (expanded_phoneme_encodings,                                    # expanded_phoneme_encodings: [B, F, D]
          frame_mask_expanded,                                           # frame_mask_expanded: [B, F, 1]
-         frame_lengths_expanded) = self._expand_phoneme_encodings(      # frame_lengths_expanded: [B]
+         _) = self._expand_phoneme_encodings(                           # frame_lengths (3rd return) unused here; generate() consumes it
             phoneme_encodings,
             durations,
             max_frames=audio_encodings.shape[1],
@@ -274,7 +274,6 @@ class NaturalSpeech2Model(nn.Module):
             prompt_latents_lengths
         )
         prompt_encodings_mask = prompt_latents_mask         # [B, Fp, 1]
-        prompt_encodings_lengths = prompt_latents_lengths   # [B]
 
         predicted_log_durations = self.duration_predictor(  # [B, P]
             phoneme_encodings,
@@ -517,8 +516,8 @@ class NaturalSpeech2Model(nn.Module):
         
         # Create optim groups. Tensors that are 2D or higher (Matmuls + Embeddings) decay.
         # 1D tensors (Biases and LayerNorms) do not decay.
-        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
-        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        decay_params = [p for _, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for _, p in param_dict.items() if p.dim() < 2]
         
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay},

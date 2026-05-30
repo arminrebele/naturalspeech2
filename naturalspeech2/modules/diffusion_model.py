@@ -400,7 +400,6 @@ class DiffusionModel(nn.Module):
         codebook_sq_norms = codebooks.pow(2).sum(dim=-1)                    # [Q, K]
 
         flat_mask = rearrange(target_latents_mask, 'b ft 1 -> (b ft)').float()
-        num_valid = target_latents_mask.sum().float().clamp(min=1.0)
 
         running_cum = torch.zeros_like(z0_hat)                              # [B, Ft, latent_dim]   Σᵢ<ⱼ eᵢ
         total_ce = z0_hat.new_zeros(())

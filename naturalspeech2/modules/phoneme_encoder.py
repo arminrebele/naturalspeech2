@@ -1,8 +1,5 @@
 import torch
 from torch import nn
-import torch.nn.functional as F
-
-from einops import rearrange
 
 from naturalspeech2.modules.layers import TransformerEncoderLayer, RMSNorm
 from naturalspeech2.utils.initialization import standard_init
