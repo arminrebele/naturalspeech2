@@ -1,5 +1,4 @@
 import os
-import re
 import random
 import logging
 from pathlib import Path
@@ -37,10 +36,7 @@ def stress_test(cfg: DictConfig):
 
     vocab_path = cfg.dataset.token_vocabulary_path
     if vocab_path is None:
-        clean_split = cfg.dataset.train_split.replace("%", "pct")
-        clean_split = re.sub(r'[^a-zA-Z0-9]', '_', clean_split)
-        clean_split = re.sub(r'_+', '_', clean_split).strip('_')
-        vocab_path = DATA_DIR / cfg.dataset.name / clean_split / "token_vocabulary.json"
+        vocab_path = DATA_DIR / cfg.dataset.name / "token_vocabulary.json"
         
     tokenizer = PhonemeTokenizer(token_vocabulary_path=str(vocab_path), with_backend=False)
     vocab_size = tokenizer.token_vocabulary_size
@@ -57,7 +53,6 @@ def stress_test(cfg: DictConfig):
     ).to(device)
 
     logger.info("Compiling model (This will cache multiple graphs during the loop)...")
-    unoptimized_model = model
     model = torch.compile(model)
     optimizer = model.configure_optimizers(
         cfg.training.weight_decay, 
@@ -87,18 +82,6 @@ def stress_test(cfg: DictConfig):
         )
         
         try:
-            if i == 0:
-                logger.info("\n--- Pre-flight Graph Break Analysis ---")
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    explanation = torch._dynamo.explain(unoptimized_model, **batch)
-                logger.info(f"Graph Breaks caused by code: {explanation.graph_break_count} (Expected: 1 for the Aligner)")
-                if explanation.graph_break_count != 1:
-                    logger.warning("⚠️ UNEXPECTED NUMBER OF GRAPH BREAKS DETECTED!")
-                elif explanation.graph_break_count > 0:
-                    for reason in explanation.break_reasons:
-                        logger.info(f"  - {reason}")
-                logger.info("---------------------------------------\n")
-
             denominators = compute_denominators([batch], cfg)
 
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
