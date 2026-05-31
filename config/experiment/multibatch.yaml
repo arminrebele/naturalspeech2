@@ -1,0 +1,39 @@
+# @package _global_
+#
+# Multi-batch generalization probe — python scripts/train.py +experiment=multibatch
+#
+# Trains on the FULL dev split and, every eval, generates FREE-RUNNING audio on the
+# held-out TEST split (fixed_test_refs, never trained on) beside the trained-on dev
+# clips (fixed_dev_refs). The held-out clips becoming intelligible is the signal
+# that the model learns the phoneme/pitch conditioning rather than memorizing — the
+# test the single-batch overfit run structurally could not give. Both tables use a
+# dedicated seeded RNG, so the same clips appear every run for clean cross-run A/B.
+#
+# Uses model/base (dropout ON, which helps generalization) — NOT the overfit_test
+# model with dropout zeroed. grad_accum inherits base (= 1).
+#
+# TWO KNOBS to tune by watching the held-out audio:
+#   setup.max_iters — how long to train (extend if held-out is still improving; cut
+#                     if it has plateaued or started overfitting dev).
+#   train size      — currently all of dev (~3807 clips). A smaller subset ladder
+#                     ("how little data generalizes?") would need a sampler change.
+
+training:
+  lr_schedule: "cosine"          # short run — ISR's 32k warmup doesn't fit
+
+dataset:
+  train_split: "dev"             # train on dev; test is the held-out eval set
+
+setup:
+  max_iters: 20000
+  warmup_iters: 500              # lr_decay_iters inherits base (= ${setup.max_iters} = 20000 here)
+  log_interval: 25               # finer than base's 100 — watch the early generalization dynamics closely
+  eval_interval: 1000            # each eval generates 12 clips (6 dev + 6 test) — keep modest
+  audio_tables: [fixed_dev_refs, fixed_test_refs]   # trained-on + held-out, both stable across runs
+  inference_data_loss_sweep: []  # overfit-only / teacher-forced; blind to conditioning, unused here
+  log_subdir: "research"
+  log_name: "multibatch"
+
+wandb:
+  group: "generalization"
+  run_name: "multibatch_dev"

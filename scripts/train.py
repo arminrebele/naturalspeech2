@@ -3,7 +3,6 @@ import time
 import math
 import random
 import logging
-import itertools
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -120,22 +119,19 @@ def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, ev
     train_sampler.set_epoch(random.randint(0, 10000))
     train_sampler.set_start_batch_idx(0)
 
-    # We evaluate 'dev' first. If it hits the end of the combined dataset
-    # before eval_iters, we restrict 'train' to that exact same number of steps.
-    target_iters = eval_iters
-
-    for split in ['dev', 'train']:
-        if split == 'dev':
-            # Chain both iterators so they act as one continuous dataloader
-            loader_iter = itertools.chain(dev_loader, test_loader)
-        else:
-            loader_iter = iter(train_loader)
+    # Evaluate each split on its OWN data — no chaining. dev/test have only a few
+    # dozen batches each, so they run a full pass (StopIteration breaks the loop);
+    # train pulls up to eval_iters of a random subset. Losses are per-unit means
+    # (denominator-normalized), so they are comparable across splits regardless of
+    # how many batches each had.
+    for split, loader in [('train', train_loader), ('dev', dev_loader), ('test', test_loader)]:
+        loader_iter = iter(loader)
             
         eval_total_loss_sum = torch.zeros((), device=device)
         eval_log_dict_sums = {}
         actual_eval_iters = 0
 
-        for _ in range(target_iters):
+        for _ in range(eval_iters):
             eval_lookahead_queue = []
             try:
                 for _ in range(grad_accum_steps):
@@ -173,9 +169,9 @@ def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, ev
                 
             actual_eval_iters += 1
             
-        if split == 'dev':
-            target_iters = actual_eval_iters
-            
+        if actual_eval_iters == 0:
+            continue   # split had fewer than grad_accum_steps batches — skip it
+
         divisor = actual_eval_iters
         out[split] = {
             'total_loss': (eval_total_loss_sum / divisor).item(),
@@ -253,6 +249,7 @@ class EvalDeps:
     cfg: DictConfig
     dev_dataset: Any                   # DatasetWrapper — typed Any to avoid forward-decl noise
     table_2_refs: list
+    test_refs: list
     custom_prompts: list
     overfit_ref_batch: Optional[dict]  # cached at iter 0 when overfit_batch is in audio_tables
 
@@ -295,11 +292,38 @@ def render_random_dev_table(deps: EvalDeps) -> tuple[str, list, list]:
     )
 
 
-def render_fixed_dev_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
-    """Generate audio on the 6 fixed dev references created at startup."""
+def build_fixed_refs(dataset, n_refs, prompt_samples_len, sampling_rate, rng):
+    """Pick a fixed, reproducible set of >=prompt-length reference clips for the eval
+    audio tables. Uses a dedicated seeded RNG (random.Random) so the selection is
+    identical across runs regardless of any other global-random usage — that
+    stability is the whole point (cross-run A/B on the exact same audio). Builds
+    wandb.Audio objects, so call only when wandb is active."""
+    indices = list(range(len(dataset)))
+    rng.shuffle(indices)
+    refs = []
+    for idx in indices:
+        if len(refs) == n_refs:
+            break
+        if dataset.dataset[idx]["audio_length"] < prompt_samples_len:
+            continue
+        sample = dataset[idx]
+        audio_np = sample["audio"].numpy()
+        start_idx = rng.randint(0, sample["audio_length"] - prompt_samples_len)
+        prompt_audio_np = audio_np[start_idx : start_idx + prompt_samples_len]
+        refs.append({
+            "original_audio": wandb.Audio(audio_np, sample_rate=sampling_rate),
+            "prompt_audio": wandb.Audio(prompt_audio_np, sample_rate=sampling_rate),
+            "prompt_tensor": torch.from_numpy(prompt_audio_np),
+            "text": sample["text"],
+        })
+    return refs
+
+
+def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str) -> tuple[str, list, list]:
+    """Generate audio on a fixed set of references (shared by the dev + test tables)."""
     sr = deps.sampling_rate
     rows = []
-    for ref in deps.table_2_refs:
+    for ref in refs:
         gen_audio_np, length = generate_audio(deps.unoptimized_model, ref["prompt_tensor"], target_text=ref["text"])
         rows.append([
             deps.iter_num,
@@ -310,10 +334,20 @@ def render_fixed_dev_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
             wandb.Audio(gen_audio_np[:length], sample_rate=sr),
         ])
     return (
-        "Evaluation: Original vs. Generated",
+        title,
         ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt", "Original Audio", "Speech-Prompt", "Generated Audio"],
         rows,
     )
+
+
+def render_fixed_dev_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
+    """Generate audio on the fixed dev references (trained-on when training on dev)."""
+    return _render_fixed_refs_table(deps, deps.table_2_refs, "Eval Audio: dev (trained-on)")
+
+
+def render_fixed_test_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
+    """Generate audio on the fixed held-out test references (never trained on)."""
+    return _render_fixed_refs_table(deps, deps.test_refs, "Eval Audio: test (held-out)")
 
 
 def render_overfit_batch_table(deps: EvalDeps) -> tuple[str, list, list]:
@@ -357,6 +391,7 @@ AUDIO_TABLES = {
     "overfit_batch": render_overfit_batch_table,
     "random_dev": render_random_dev_table,
     "fixed_dev_refs": render_fixed_dev_refs_table,
+    "fixed_test_refs": render_fixed_test_refs_table,
 }
 
 
@@ -419,14 +454,15 @@ def run_eval_block(
                     loss_wrapper, deps.cfg.setup.eval_iters,
                     deps.cfg.setup.gradient_accumulation_steps, deps.device, deps.cfg,
                 )
-                logger.info(f"Step {deps.iter_num}: train loss {losses['train']['total_loss']:.4f}, "
-                            f"dev loss {losses['dev']['total_loss']:.4f}")
-                eval_payload["Evaluation: Metrics/Train-Loss"] = losses['train']['total_loss']
-                eval_payload["Evaluation: Metrics/Dev-Loss"] = losses['dev']['total_loss']
-                for k, v in losses['train']['logged_losses'].items():
-                    eval_payload[f"{get_loss_section(k, 'Evaluation', 'Train')}/{k}"] = v
-                for k, v in losses['dev']['logged_losses'].items():
-                    eval_payload[f"{get_loss_section(k, 'Evaluation', 'Dev')}/{k}"] = v
+                logged = ", ".join(f"{s}={losses[s]['total_loss']:.4f}"
+                                   for s in ('train', 'dev', 'test') if s in losses)
+                logger.info(f"Step {deps.iter_num}: eval losses  {logged}")
+                for split_name, section in [('train', 'Train'), ('dev', 'Dev'), ('test', 'Test')]:
+                    if split_name not in losses:
+                        continue
+                    eval_payload[f"Evaluation: Metrics/{section}-Loss"] = losses[split_name]['total_loss']
+                    for k, v in losses[split_name]['logged_losses'].items():
+                        eval_payload[f"{get_loss_section(k, 'Evaluation', section)}/{k}"] = v
 
             if deps.cfg.setup.inference_data_loss_sweep and deps.overfit_ref_batch is not None:
                 # Training data_loss is a one-step prediction error from a known noisy z_t;
@@ -460,6 +496,7 @@ def run_eval_block(
             if (
                 deps.cfg.setup.best_safetensors
                 and losses is not None
+                and 'dev' in losses
                 and losses['dev']['total_loss'] < best_dev_loss
             ):
                 best_dev_loss = losses['dev']['total_loss']
@@ -534,7 +571,7 @@ def train(cfg: DictConfig):
     logger.info("Initializing DataLoaders...")
     train_loader, train_dataset = create_dataloader(cfg, cfg.dataset.train_split, cfg.dataset.token_vocabulary_path)
     dev_loader, dev_dataset = create_dataloader(cfg, cfg.dataset.dev_split, train_dataset.token_vocabulary_path)
-    test_loader, _ = create_dataloader(cfg, cfg.dataset.test_split, train_dataset.token_vocabulary_path)
+    test_loader, test_dataset = create_dataloader(cfg, cfg.dataset.test_split, train_dataset.token_vocabulary_path)
 
     # Shared tokenizer with espeak backend: feeds vocab_size to model construction
     # AND is attached as model._inference_tokenizer below so the eval block's
@@ -676,6 +713,7 @@ def train(cfg: DictConfig):
     # Declared outside the wandb.log gate so render_fixed_dev_refs_table can
     # iterate it safely on `wandb.log: False` debug runs (empty list → no rows).
     table_2_refs = []
+    test_refs = []
     if cfg.wandb.log:
         wandb.init(
             project=cfg.wandb.project,
@@ -691,30 +729,12 @@ def train(cfg: DictConfig):
         num_static_refs = 6
         prompt_samples_len = int(cfg.model.prompt_seconds * sampling_rate)
 
-        valid_indices = []
-        all_indices = list(range(len(dev_dataset)))
-        random.shuffle(all_indices)
-
-        for idx in all_indices:
-            if len(valid_indices) == num_static_refs:
-                break
-            if dev_dataset.dataset[idx]["audio_length"] >= prompt_samples_len:
-                valid_indices.append(idx)
-
-        for idx in valid_indices:
-            sample = dev_dataset[idx]
-            audio_np = sample["audio"].numpy()
-
-            max_start = sample["audio_length"] - prompt_samples_len
-            start_idx = random.randint(0, max_start)
-            prompt_audio_np = audio_np[start_idx : start_idx + prompt_samples_len]
-
-            table_2_refs.append({
-                "original_audio": wandb.Audio(audio_np, sample_rate=sampling_rate),
-                "prompt_audio": wandb.Audio(prompt_audio_np, sample_rate=sampling_rate),
-                "prompt_tensor": torch.from_numpy(prompt_audio_np),
-                "text": sample["text"],
-            })
+        # Dedicated seeded RNGs so the eval reference clips are identical across runs
+        # and decoupled from any other global-random usage — that stability is the
+        # point of these tables (cross-run A/B on the same audio). When training on
+        # dev: dev refs = trained-on, test refs = held-out.
+        table_2_refs = build_fixed_refs(dev_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed))
+        test_refs = build_fixed_refs(test_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed + 1))
 
     batch_generator = get_infinite_batches(
         train_loader, 
@@ -790,6 +810,7 @@ def train(cfg: DictConfig):
                 cfg=cfg,
                 dev_dataset=dev_dataset,
                 table_2_refs=table_2_refs,
+                test_refs=test_refs,
                 custom_prompts=custom_prompts,
                 overfit_ref_batch=overfit_ref_batch,
             )
@@ -1073,6 +1094,7 @@ def train(cfg: DictConfig):
         cfg=cfg,
         dev_dataset=dev_dataset,
         table_2_refs=table_2_refs,
+        test_refs=test_refs,
         custom_prompts=custom_prompts,
         overfit_ref_batch=overfit_ref_batch,
     )
