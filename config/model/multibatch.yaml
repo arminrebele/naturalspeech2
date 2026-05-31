@@ -2,37 +2,20 @@ defaults:
   - base
   - _self_
 
-# Uniform 0.1 dropout for the multi-batch generalization probe. base.yaml carries
-# the paper's full-scale regularization (conv-path 0.5 on the variance predictors,
-# 0.2 on encoders/diffusion), calibrated for the paper's 44k hours of speech. This
-# probe trains on ~3807 dev clips — 3+ orders of magnitude less data — where that
-# much dropout starves an already-underfitting model (the first multibatch_dev run
-# plateaued the aligner and left the V/UV head near chance). A uniform 0.1 keeps
-# mild regularization so the held-out generalization signal stays honest, without
-# the crippling 0.5. Drop to 0.0 if a follow-up needs to isolate fitting from
-# regularization. EMA halflife (50) and loss warmups inherit base — unlike
-# overfit_test, this run is long enough for both to behave as intended.
-phoneme_encoder:
-  conv_dropout: 0.1
-  attn_weights_dropout: 0.1
-  attn_out_dropout: 0.1
-aligner:
-  dropout: 0.1
-speech_prompt_encoder:
-  conv_dropout: 0.1
-  attn_weights_dropout: 0.1
-  attn_out_dropout: 0.1
+# Small-data generalization probe (~3807 dev clips vs the paper's 44k h). base.yaml is now
+# literature-grounded for large data (softmax-map dropout 0.0 everywhere, encoder conv/out
+# 0.1, denoiser fully dry) — already most of what a small-data probe wants, so we override
+# only two things:
+#   - variance-predictor conv_dropout 0.5 → 0.1: the paper's 0.5 over-regularizes an
+#     underfitting predictor on this little data.
+#   - WaveNet gate dropout 0.0 → 0.1: one DDPM-style per-resblock denoiser site for honest
+#     held-out regularization, without the softmax-map / per-block attention dropouts that
+#     would compound through the 40-block FiLM conditioning path.
+# Set these to 0.0 to isolate fitting from regularization. EMA halflife (50) + loss warmups
+# inherit base — long enough here, unlike overfit_test.
 duration_predictor:
   conv_dropout: 0.1
-  attn_weights_dropout: 0.1
-  attn_out_dropout: 0.1
 pitch_predictor:
   conv_dropout: 0.1
-  attn_weights_dropout: 0.1
-  attn_out_dropout: 0.1
 diffusion_model:
-  attn_weights_dropout: 0.1
-  attn_out_dropout: 0.1
-  wavenet_attn_weights_dropout: 0.1
-  wavenet_attn_out_dropout: 0.1
   wavenet_gate_dropout: 0.1
