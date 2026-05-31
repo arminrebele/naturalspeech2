@@ -55,7 +55,6 @@ class PhonemeEncoder(nn.Module):
             self,
             phoneme_tokens: torch.Tensor,           # [B, P]
             phoneme_tokens_mask: torch.Tensor,      # [B, P, 1]
-            phoneme_tokens_lengths: torch.Tensor,   # [B]
     ):
         phoneme_tokens_emb = self.token_embedding(phoneme_tokens) # [B, P, hidden_dim]
 

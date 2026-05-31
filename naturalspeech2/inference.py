@@ -133,8 +133,8 @@ def _phonemize_to_tokens(
     text: str,
     tokenizer: PhonemeTokenizer,
     device: str | torch.device = "cuda",
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """text → ([1, P] long tokens on device, [1, P, 1] bool mask, [1] int length).
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """text → ([1, P] long tokens on device, [1, P, 1] bool mask).
 
     `tokenizer(str)` runs espeak then maps phonemes → IDs in one call (see
     `PhonemeTokenizer.__call__`).
@@ -144,8 +144,7 @@ def _phonemize_to_tokens(
     tokens = rearrange(tokens, "p -> 1 p")
     P = tokens.shape[-1]
     mask = torch.ones((1, P, 1), dtype=torch.bool, device=device)
-    lengths = torch.tensor([P], dtype=torch.long, device=device)
-    return tokens, mask, lengths
+    return tokens, mask
 
 
 # ----------------------------------------------------------------------------
@@ -254,7 +253,7 @@ def generate_audio(
         device=device,
         prompt_seconds_warning_threshold=prompt_seconds,
     )
-    tokens, tokens_mask, tokens_lengths = _phonemize_to_tokens(
+    tokens, tokens_mask = _phonemize_to_tokens(
         target_text, tokenizer, device=device
     )
 
@@ -264,7 +263,6 @@ def generate_audio(
             reference_audio_lengths=ref_lengths,
             phoneme_tokens=tokens,
             phoneme_tokens_mask=tokens_mask,
-            phoneme_tokens_lengths=tokens_lengths,
             sampling_steps=sampling_steps,
         )
 

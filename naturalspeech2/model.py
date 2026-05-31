@@ -233,7 +233,6 @@ class NaturalSpeech2Model(nn.Module):
         phoneme_encodings = self.phoneme_encoder(           # [B, P, D]
             phoneme_tokens,
             phoneme_tokens_mask,
-            phoneme_tokens_lengths,
         )
 
         durations, path_indices, posterior_label_logprobs, posterior_label_logits = self.aligner(
@@ -270,7 +269,6 @@ class NaturalSpeech2Model(nn.Module):
         prompt_encodings = self.speech_prompt_encoder(      # [B, Fp, D]
             prompt_latents,
             prompt_latents_mask,
-            prompt_latents_lengths
         )
         prompt_encodings_mask = prompt_latents_mask         # [B, Fp, 1]
 
@@ -394,7 +392,6 @@ class NaturalSpeech2Model(nn.Module):
 
         phoneme_tokens: torch.Tensor,            # [B, P]        | text to synthesize, phonemized + tokenized
         phoneme_tokens_mask: torch.Tensor,       # [B, P, 1]     | True/False
-        phoneme_tokens_lengths: torch.Tensor,    # [B]
 
         sampling_steps: int | None = None,       # override the model's configured default for this call
 
@@ -422,7 +419,6 @@ class NaturalSpeech2Model(nn.Module):
         prompt_encodings = self.speech_prompt_encoder(                            # [B, Fp, D]
             reference_latents,
             prompt_latents_mask,
-            reference_latents_lengths,
         )
         prompt_encodings_mask = prompt_latents_mask
 
@@ -430,7 +426,6 @@ class NaturalSpeech2Model(nn.Module):
         phoneme_encodings = self.phoneme_encoder(                                 # [B, P, D]
             phoneme_tokens,
             phoneme_tokens_mask,
-            phoneme_tokens_lengths,
         )
 
         # 3. Durations: predicted, unless teacher-forced GT durations are supplied

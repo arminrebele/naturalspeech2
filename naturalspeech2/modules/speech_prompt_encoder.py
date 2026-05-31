@@ -55,7 +55,6 @@ class SpeechPromptEncoder(nn.Module):
             self,
             prompt_latents: torch.Tensor,         # [B, F, latent_dim]
             prompt_latents_mask: torch.Tensor,    # [B, F, 1] bool
-            prompt_latents_lengths: torch.Tensor,
     ):
         x = self.input_projection(prompt_latents, prompt_latents_mask)  # [B, F, hidden_dim]
 
