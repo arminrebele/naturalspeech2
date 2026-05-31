@@ -9,14 +9,21 @@
 # test the single-batch overfit run structurally could not give. Both tables use a
 # dedicated seeded RNG, so the same clips appear every run for clean cross-run A/B.
 #
-# Uses model/base (dropout ON, which helps generalization) — NOT the overfit_test
-# model with dropout zeroed. grad_accum inherits base (= 1).
+# Uses model/multibatch (uniform 0.1 dropout). base.yaml carries the paper's
+# full-scale regularization (conv-path 0.5 on the variance predictors, 0.2 on
+# encoders/diffusion) calibrated for 44k hours; on this ~3807-clip probe that
+# starves an already-underfitting model, so model/multibatch drops it to a uniform
+# mild 0.1 — enough to keep the held-out signal honest, not enough to cripple
+# fitting. grad_accum inherits base (= 1).
 #
 # TWO KNOBS to tune by watching the held-out audio:
 #   setup.max_iters — how long to train (extend if held-out is still improving; cut
 #                     if it has plateaued or started overfitting dev).
 #   train size      — currently all of dev (~3807 clips). A smaller subset ladder
 #                     ("how little data generalizes?") would need a sampler change.
+
+defaults:
+  - override /model: multibatch
 
 training:
   lr_schedule: "cosine"          # short run — ISR's 32k warmup doesn't fit

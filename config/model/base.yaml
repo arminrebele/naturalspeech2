@@ -53,24 +53,30 @@ speech_prompt_encoder:
   attn_out_dropout: 0.2
 
 # Duration Predictor
+# conv_dropout 0.5 = the paper's value (§4.2), which traces to FastSpeech2's
+# conv-path variance-predictor dropout. The prompt cross-attention is NS2's own
+# addition with no dropout specified in the paper, so it uses the standard 0.1
+# (Vaswani 2017) — 0.5 on an attention softmax map has no source and half-destroys
+# the prompt conditioning every step. Do not "restore" the attn dropouts to 0.5.
 duration_predictor:
   conv1d_layers: 30
   conv1d_kernel_size: 3
   attention_layers: 10
   attention_heads: 8
   conv_dropout: 0.5
-  attn_weights_dropout: 0.5
-  attn_out_dropout: 0.5
+  attn_weights_dropout: 0.1
+  attn_out_dropout: 0.1
 
-# Pitch Predictor
+# Pitch Predictor — same dropout rationale as the duration predictor above
+# (conv-path 0.5 paper-faithful; NS2-added cross-attention at the standard 0.1).
 pitch_predictor:
   conv1d_layers: 30
   conv1d_kernel_size: 5
   attention_layers: 10
   attention_heads: 8
   conv_dropout: 0.5
-  attn_weights_dropout: 0.5
-  attn_out_dropout: 0.5
+  attn_weights_dropout: 0.1
+  attn_out_dropout: 0.1
 
 # Diffusion Model
 diffusion_model:
