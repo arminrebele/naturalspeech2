@@ -36,7 +36,7 @@ class PhonemeEncoderConfig:
 @dataclass
 class AlignerConfig:
     attn_channels: int = 80
-    temperature: float = 0.0005
+    temperature: float = 5.0
     prior_w: float = 1.0
     dropout: float = 0.1
 

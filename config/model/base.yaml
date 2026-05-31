@@ -36,9 +36,14 @@ phoneme_encoder:
   attn_out_dropout: 0.2
 
 # Aligner
+# temperature is the cosine-attention scale: features are L2-normalized before the
+# squared-L2, so dist ∈ [0,4] and score = −temperature·dist ∈ [−2·temperature, 0].
+# 5.0 ⇒ effective scale ~10 on cosine (cf. CLIP's learned ~14). The old 0.0005 was an
+# NVIDIA constant tuned to their un-normalized feature magnitude; under our N(0,0.02)
+# init it collapsed the alignment softmax to ~uniform. See aligner.py AlignerNet.forward.
 aligner:
   attn_channels: 80
-  temperature: 0.0005
+  temperature: 5.0
   prior_w: 1.0
   dropout: 0.1
 

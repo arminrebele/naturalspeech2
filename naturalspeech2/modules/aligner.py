@@ -14,7 +14,7 @@ class Aligner(nn.Module):
         audio_dim: int = 80,
         hidden_dim: int = 512,
         attn_channels: int = 80,
-        temperature: float = 0.0005,
+        temperature: float = 5.0,
         prior_w: float = 1.0,
         dropout: float = 0.1,
     ):
@@ -103,7 +103,7 @@ class AlignerNet(nn.Module):
         audio_dim: int = 80,
         hidden_dim: int = 512,
         attn_channels: int = 80,
-        temperature: float = 0.0005,
+        temperature: float = 5.0,
         dropout: float = 0.1,
     ):
         super().__init__()
@@ -170,19 +170,28 @@ class AlignerNet(nn.Module):
             self.phoneme_norm, self.phoneme_conv1, self.phoneme_conv2, self.phoneme_proj,
         )  # [B, P, attn_channels]
 
-        # Decision 2 / Decision 6: squared-L2 via GEMM in FP32 even under BF16 autocast.
-        # `temperature * dist_sq` lands learned scores in roughly [-1, 0] for moderately
-        # separated features — small enough that BF16 quantization noise (~0.01) is too
-        # coarse for the downstream log_softmax + log_prior arithmetic. The .float()
-        # casts alone are not enough: torch.bmm is an autocast op and would still run
-        # in BF16 inside the training autocast region, so we explicitly disable autocast.
+        # L2-normalize features → cosine-similarity attention: dist_sq = 2·(1 − cos) ∈ [0, 4],
+        # so learned_scores = −temperature·dist_sq ∈ [−2·temperature, 0] — a range INDEPENDENT
+        # of feature magnitude. Without this, softmax sharpness was hostage to the raw feature
+        # norm: our N(0, 0.02) init yields ‖feat‖ ~0.16/channel → ‖Δfeat‖² ~4 → at the old
+        # temperature 0.0005 the scores spanned only ~0.002 → softmax ≈ uniform → the alignment
+        # never sharpened on data the model could not memorize (single-batch overfit grew the
+        # weights large enough to escape this; multi-speaker could not). temperature now sets the
+        # cosine scale directly (2·temperature on cos; ~10 here, cf. CLIP's learned ~14). It also
+        # scales the gradient reaching the features, so the old 0.0005 starved them of alignment
+        # signal — another reason the features stayed tiny.
+        #
+        # FP32 GEMM (autocast disabled): torch.bmm is an autocast op, so .float() alone wouldn't
+        # keep the cross-term FP32 inside the training autocast region. The precision margin is
+        # large now that scores are O(1), but it's free insurance for the temperature-scaled
+        # log_softmax + log_prior arithmetic downstream.
         with torch.autocast(device_type=audio_features.device.type, enabled=False):
-            a = audio_features.float()
-            p = phoneme_features.float()
-            a_sq = a.square().sum(dim=-1, keepdim=True)                      # [B, F, 1]
-            p_sq = rearrange(p.square().sum(dim=-1), 'b p -> b 1 p')         # [B, 1, P]
-            cross = torch.bmm(a, rearrange(p, 'b p c -> b c p'))             # [B, F, P]
-            dist_sq = (a_sq + p_sq - 2.0 * cross).clamp_min(0.0)
+            a = torch.nn.functional.normalize(audio_features.float(), dim=-1)   # unit ‖·‖ over channels
+            p = torch.nn.functional.normalize(phoneme_features.float(), dim=-1)
+            a_sq = a.square().sum(dim=-1, keepdim=True)                      # [B, F, 1] ≈ 1
+            p_sq = rearrange(p.square().sum(dim=-1), 'b p -> b 1 p')         # [B, 1, P] ≈ 1
+            cross = torch.bmm(a, rearrange(p, 'b p c -> b c p'))             # [B, F, P] = cos sim
+            dist_sq = (a_sq + p_sq - 2.0 * cross).clamp_min(0.0)             # = 2·(1 − cos) ∈ [0, 4]
             learned_scores = -self.temperature * dist_sq                     # [B, F, P] FP32
         return learned_scores
 
