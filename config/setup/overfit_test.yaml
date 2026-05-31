@@ -6,8 +6,7 @@ defaults:
 
 max_iters: 2000
 warmup_iters: 0
-lr_decay_iters: ${setup.max_iters}   # cosine tracks max_iters so CLI bumps don't
-                                      # leave LR flat at min_lr for trailing iters
+# lr_decay_iters now inherits base (= ${setup.max_iters})
 
 overfit_single_batch: True
 

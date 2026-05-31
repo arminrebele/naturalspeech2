@@ -8,7 +8,7 @@ gradient_accumulation_steps: 1
 
 max_iters: 300000
 warmup_iters: 32000
-lr_decay_iters: 300000
+lr_decay_iters: ${setup.max_iters}   # cosine decay horizon — tracks max_iters so experiment/CLI bumps stay correct; ISR ignores it
 
 # Mode flags — branch training mechanics, not the eval/log/save surface
 overfit_single_batch: False
