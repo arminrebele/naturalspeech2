@@ -68,11 +68,6 @@ class EMA:
                     p.data.copy_(self._stored[name])
             self._stored = None
 
-    def copy_to(self, model: nn.Module) -> None:
-        for name, p in model.named_parameters():
-            if name in self.shadow:
-                p.data.copy_(self.shadow[name].to(p.dtype))
-
     def state_dict(self) -> dict:
         return {"shadow": self.shadow, "halflife_kimg": self.halflife_kimg}
 
