@@ -14,6 +14,12 @@ lr_decay_iters: ${setup.max_iters}   # cosine decay horizon — tracks max_iters
 overfit_single_batch: False
 loss_analysis_run: False
 gradient_analysis_run: False
+dropout_trial_run: False
+
+# dropout_trial only (inert otherwise): eval just the converged tail, and where
+# to dump the per-eval held-out losses the orchestrator reads back.
+dropout_eval_start_frac: 0.8
+dropout_trial_out: "research/dropout_trial_evals.jsonl"
 
 # Frequencies (orthogonal)
 log_interval: 100

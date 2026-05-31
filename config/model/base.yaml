@@ -138,6 +138,27 @@ loss_weights:
     score_loss: 1.0
     ce_rvq_loss: 0.1
 
+# Loss Balance Targets — desired contribution *share* of each loss leaf. Read
+# ONLY by the loss-analysis run (`+experiment=loss_analysis`), which prints
+# suggested loss_weights from these targets and the measured raw magnitudes;
+# never read during training. Flat leaves and each group's `group_target` are on
+# one comparable top-level scale; a group's sub-targets split within the group.
+# Suggested weights are anchored so data_loss's weight stays 1.0 (preserving the
+# diffusion gradient scale, so the paper LR transfers). Set per balancing intent.
+loss_balance_targets:
+  duration_predictor_loss: 1.0
+  pitch_predictor_loss: 1.0
+  pitch_voicing_loss: 1.0
+  aligner_loss:
+    group_target: 1.0
+    forward_sum_loss: 1.0
+    bin_loss: 1.0
+  diffusion_loss:
+    group_target: 1.0
+    data_loss: 1.0
+    score_loss: 1.0
+    ce_rvq_loss: 1.0
+
 # Warmup ramps a loss weight 0.1×→1.0× over N steps (0 = full weight from step 0). The paper
 # uses no loss warmup; we keep exactly one. duration_predictor_loss warms over 1000 steps
 # because its target is the aligner's Viterbi durations — noisy until the aligner (full

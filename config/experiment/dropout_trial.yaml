@@ -1,0 +1,17 @@
+# @package _global_
+#
+# Hydra "experiment" pattern: additive overrides for a single dropout-screening
+# trial. Launched by the dropout-tuning orchestrator (one subprocess per config),
+# or manually, e.g.:
+#   python scripts/train.py +experiment=dropout_trial model.phoneme_encoder.attn_weights_dropout=0.1
+#
+# Runs on the real train split (inherited from dataset/mls_eng.yaml), like
+# loss_analysis — the generalization signal must reflect production data. Per-term
+# dev+test held-out losses over the last 20% are dumped to setup.dropout_trial_out
+# for the orchestrator's paired z-test. Model dropout rates are set per-trial via
+# CLI; everything else (loss_weights, warmups, ISR schedule) inherits base so the
+# trial mirrors the main run, so /model is intentionally not overridden here.
+
+defaults:
+  - override /setup: dropout_trial
+  - override /wandb: dropout_trial

@@ -1,0 +1,28 @@
+defaults:
+  - base
+  - _self_
+
+# Overrides on top of setup/base.yaml — only the deltas live here. A single
+# dropout-screening trial: real train split, ISR schedule inherited from base
+# (mirrors the main run). The decision metric is the per-term dev+test held-out
+# loss over the last 20%, dumped to setup.dropout_trial_out (the orchestrator
+# overrides that path + wandb.group/run_name per trial).
+
+max_iters: 30000
+warmup_iters: 3300               # ~11% fractional match to the main run's ISR warmup
+lr_decay_iters: ${setup.max_iters}
+
+dropout_trial_run: True
+
+# Eval only the converged tail (setup.dropout_eval_start_frac of the run) at a
+# fine cadence; dev+test held-out is the decision signal (paired vs the baseline).
+eval_interval: 50
+eval_iters: 200                  # >= dev/test batch counts → full held-out passes
+
+audio_tables: []                 # no audio generation during screening
+checkpoint_interval: 0           # no crash-recovery checkpoints for short trials
+best_safetensors: False
+final_safetensors: False         # screening trials produce no inference artifact
+
+log_subdir: "research"
+log_name: "dropout_trial"

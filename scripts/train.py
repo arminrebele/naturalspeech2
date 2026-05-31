@@ -1,4 +1,5 @@
 import os
+import json
 import time
 import math
 import random
@@ -106,25 +107,35 @@ def get_infinite_batches(loader, start_epoch=0, start_batch_idx=0, overfit_singl
         sampler.set_start_batch_idx(0)
 
 @torch.no_grad()
-def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, eval_iters, grad_accum_steps, device, cfg):
+def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, eval_iters, grad_accum_steps, device, cfg, eval_train: bool = True):
     out = {}
     model.eval()
-    
-    # Store main loop's train sampler state
-    train_sampler = train_loader.batch_sampler
-    main_train_epoch = train_sampler.epoch
-    main_train_batch_idx = train_sampler.start_batch_idx
 
-    # Override for eval to pull a random shuffled subset starting from 0
-    train_sampler.set_epoch(random.randint(0, 10000))
-    train_sampler.set_start_batch_idx(0)
+    # The train split is the only one whose sampler we perturb (random subset).
+    # Dropout-trial eval skips train entirely — dev+test held-out is the decision
+    # signal — so the save/perturb/restore is guarded behind eval_train.
+    if eval_train:
+        # Store main loop's train sampler state
+        train_sampler = train_loader.batch_sampler
+        main_train_epoch = train_sampler.epoch
+        main_train_batch_idx = train_sampler.start_batch_idx
 
-    # Evaluate each split on its OWN data — no chaining. dev/test have only a few
-    # dozen batches each, so they run a full pass (StopIteration breaks the loop);
-    # train pulls up to eval_iters of a random subset. Losses are per-unit means
-    # (denominator-normalized), so they are comparable across splits regardless of
-    # how many batches each had.
-    for split, loader in [('train', train_loader), ('dev', dev_loader), ('test', test_loader)]:
+        # Override for eval to pull a random shuffled subset starting from 0
+        train_sampler.set_epoch(random.randint(0, 10000))
+        train_sampler.set_start_batch_idx(0)
+        splits = [('train', train_loader), ('dev', dev_loader), ('test', test_loader)]
+    else:
+        splits = [('dev', dev_loader), ('test', test_loader)]
+
+    # Evaluate each split on its OWN data — no chaining (the dev+test itertools
+    # chain is temporarily removed while the dev split is in use as a training
+    # split elsewhere; once the normal eval loop re-chains them, dropout-trial can
+    # read one combined held-out number instead of dev+test separately). dev/test
+    # have only a few dozen batches each, so they run a full pass (StopIteration
+    # breaks the loop); train pulls up to eval_iters of a random subset. Losses are
+    # per-unit means (denominator-normalized), comparable across splits regardless
+    # of how many batches each had.
+    for split, loader in splits:
         loader_iter = iter(loader)
             
         eval_total_loss_sum = torch.zeros((), device=device)
@@ -178,9 +189,10 @@ def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, ev
             'logged_losses': {key: (val / divisor).item() for key, val in eval_log_dict_sums.items()},
         }
         
-    # Restore main loop's train sampler state
-    train_sampler.set_epoch(main_train_epoch)
-    train_sampler.set_start_batch_idx(main_train_batch_idx)
+    # Restore main loop's train sampler state (only perturbed when eval_train)
+    if eval_train:
+        train_sampler.set_epoch(main_train_epoch)
+        train_sampler.set_start_batch_idx(main_train_batch_idx)
 
     model.train()
     return out
@@ -424,6 +436,87 @@ def _collect_dropout_keys(cfg_model) -> dict:
     return out
 
 
+def compute_suggested_loss_weights(
+    magnitudes: dict[str, float],
+    targets: dict,
+    anchor: str = "data_loss",
+) -> dict:
+    """Suggest loss_weights that make each leaf's weighted contribution match a
+    target contribution share, from the raw per-leaf magnitudes a loss-analysis
+    run measured.
+
+    `targets` mirrors loss_weights: flat leaves carry a scalar target; groups
+    (aligner_loss, diffusion_loss) carry a `group_target` plus per-sub targets. A
+    leaf's desired contribution share is
+        flat:    c = target
+        grouped: c = group_target * sub_target / sum(sub_targets in group)
+    and its effective weight is W = c / magnitude. Every weight is then scaled so
+    the anchor leaf's effective weight is exactly 1.0, pinning the anchor's
+    gradient scale (data_loss -> the diffusion path) so the paper LR transfers.
+
+    Two-level decomposition matching how LossWrapper applies weights: for a group,
+    sub_weight = sub_target / magnitude (the within-group split) and group_weight
+    carries the group's share times the global anchor scale. Returns a nested dict
+    shaped like loss_weights, ready to paste into config/model/*.yaml.
+    """
+    suggested: dict = {}
+    eff_unscaled: dict[str, float] = {}   # leaf -> pre-anchor effective weight
+
+    for key, value in targets.items():
+        if isinstance(value, dict):
+            sub_targets = {k: v for k, v in value.items() if k != "group_target"}
+            group_share = value["group_target"] / sum(sub_targets.values())
+            suggested[key] = {"group_weight": group_share}   # anchor scale folded in below
+            for sub_key, sub_target in sub_targets.items():
+                sub_weight = sub_target / magnitudes[sub_key]
+                suggested[key][sub_key] = sub_weight
+                eff_unscaled[sub_key] = group_share * sub_weight
+        else:
+            weight = value / magnitudes[key]
+            suggested[key] = weight
+            eff_unscaled[key] = weight
+
+    assert anchor in eff_unscaled, (
+        f"anchor '{anchor}' is not a loss leaf; have {sorted(eff_unscaled)}"
+    )
+    alpha = 1.0 / eff_unscaled[anchor]
+
+    for key, value in suggested.items():
+        if isinstance(value, dict):
+            value["group_weight"] *= alpha
+        else:
+            suggested[key] = value * alpha
+
+    return suggested
+
+
+def _should_run_eval(iter_num: int, cfg) -> bool:
+    """Eval-trigger schedule. Normal runs eval every eval_interval throughout.
+    Dropout trials eval only the converged tail — from dropout_eval_start_frac of
+    the run onward — at the (fine) eval_interval cadence: the decision metric only
+    needs the tail, and skipping the early run removes most eval overhead."""
+    if iter_num <= 0:
+        return False
+    if cfg.setup.dropout_trial_run and iter_num < int(cfg.setup.dropout_eval_start_frac * cfg.setup.max_iters):
+        return False
+    return iter_num % cfg.setup.eval_interval == 0
+
+
+def _append_dropout_trial_eval(out_path, step: int, losses: dict) -> None:
+    """Append one eval point as a JSON line for the dropout-trial orchestrator:
+    the step plus the per-term (+ total) dev and test held-out losses. dev and
+    test are written separately — the eval block doesn't chain them yet (the dev
+    split is in use as a training split elsewhere); the aggregator combines them.
+    Once the normal eval loop re-chains dev+test, this can emit one held-out set."""
+    record = {"step": step}
+    for split in ("dev", "test"):
+        if split in losses:
+            record[f"{split}_total"] = losses[split]["total_loss"]
+            record[split] = losses[split]["logged_losses"]
+    with open(out_path, "a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
 def run_eval_block(
     deps: EvalDeps,
     train_loader,
@@ -453,6 +546,7 @@ def run_eval_block(
                     deps.compiled_model, train_loader, dev_loader, test_loader,
                     loss_wrapper, deps.cfg.setup.eval_iters,
                     deps.cfg.setup.gradient_accumulation_steps, deps.device, deps.cfg,
+                    eval_train=not deps.cfg.setup.dropout_trial_run,
                 )
                 logged = ", ".join(f"{s}={losses[s]['total_loss']:.4f}"
                                    for s in ('train', 'dev', 'test') if s in losses)
@@ -510,6 +604,9 @@ def run_eval_block(
                 best_tmp_path.replace(best_path)
     finally:
         deps.unoptimized_model.train()
+
+    if deps.cfg.setup.dropout_trial_run and losses is not None:
+        _append_dropout_trial_eval(PROJECT_ROOT / deps.cfg.setup.dropout_trial_out, deps.iter_num, losses)
 
     if deps.cfg.wandb.log and eval_payload:
         wandb.log(eval_payload, step=deps.iter_num)
@@ -757,6 +854,12 @@ def train(cfg: DictConfig):
         loss_analysis_start_iter = int(cfg.setup.max_iters * 0.8)   # Last 20% of steps for loss analysis to ensure stable logged values
         loss_analysis_accumulators = {}
         loss_analysis_steps_counted = 0
+
+    if cfg.setup.dropout_trial_run:
+        # Fresh per-eval held-out dump — truncate any stale data at this path from a prior run.
+        dropout_trial_out_path = PROJECT_ROOT / cfg.setup.dropout_trial_out
+        dropout_trial_out_path.parent.mkdir(parents=True, exist_ok=True)
+        dropout_trial_out_path.write_text("")
         
     if cfg.setup.gradient_analysis_run:
         grad_analysis_start_iter = int(cfg.setup.max_iters * 0.8)   # Last 20% of steps for gradient analysis to ensure stable logged values
@@ -800,7 +903,7 @@ def train(cfg: DictConfig):
         # -----------------------------
         # Evaluation
         # -----------------------------
-        if iter_num > 0 and iter_num % cfg.setup.eval_interval == 0:
+        if _should_run_eval(iter_num, cfg):
             eval_deps = EvalDeps(
                 iter_num=iter_num,
                 unoptimized_model=unoptimized_model,
@@ -1060,6 +1163,23 @@ def train(cfg: DictConfig):
         for k, v in loss_analysis_accumulators.items():
             avg = v / loss_analysis_steps_counted
             logger.info(f"  {k}: {avg:.4f}")
+        logger.info("===========================================")
+
+        # Suggested loss_weights to hit the configured target contribution shares
+        # (model.loss_balance_targets), anchored so data_loss's weight stays 1.0.
+        targets = OmegaConf.to_container(cfg.model.loss_balance_targets, resolve=True)
+        magnitudes = {k: v / loss_analysis_steps_counted for k, v in loss_analysis_accumulators.items()}
+        suggested = compute_suggested_loss_weights(magnitudes, targets, anchor="data_loss")
+        logger.info("Suggested loss_weights (anchor: data_loss = 1.0) — paste into config/model:")
+        for key, val in suggested.items():
+            if isinstance(val, dict):
+                logger.info(f"  {key}:")
+                logger.info(f"    group_weight: {val['group_weight']:.4f}")
+                for sub_key, sub_val in val.items():
+                    if sub_key != "group_weight":
+                        logger.info(f"    {sub_key}: {sub_val:.4f}")
+            else:
+                logger.info(f"  {key}: {val:.4f}")
         logger.info("===========================================")
 
     # -----------------------------
