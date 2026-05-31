@@ -8,9 +8,10 @@
 # will see. Cosine's min_lr tail would over-settle the magnitudes.
 #
 # Uses the train split (inherits from dataset/mls_eng.yaml). The MLS dev split
-# is too small — at grad_accum_steps=5 and ~3807 dev rows, the loop runs out
-# of data well before max_iters=10000 (commit fa68d66 reverted the dev
-# experiment after hitting this).
+# is too small — only ~3807 rows, so a 10000-iter run cycles it many times over
+# (the loader re-epochs), making the magnitude readout reflect memorized repeats
+# rather than the balance the production train run sees (commit fa68d66 reverted
+# the dev experiment after hitting this).
 
 defaults:
   - override /model: loss_analysis
