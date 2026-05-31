@@ -139,7 +139,6 @@ class NaturalSpeech2Model(nn.Module):
         rand = torch.rand(B, device=device)                                                         # [B]
         max_starts = audio_latents_lengths - prompt_latents_lengths                                 # [B] | maximum starting index for the speech prompt to ensure it fits within the audio latents
         prompt_starts = (rand * (max_starts + 1).float()).floor().long()                            # [B] | frame index where the prompt starts
-        prompt_ends = prompt_starts + prompt_latents_lengths                                        # [B] | frame index where the prompt ends (exclusive)
 
         # Extract prompt latents. Buffer width is a Python-int constant — bucket-stable for torch.compile.
         max_prompt_len = min(prompt_frames, F)
@@ -176,12 +175,8 @@ class NaturalSpeech2Model(nn.Module):
         return (
             prompt_latents,               # [B, Fp, D]
             prompt_latents_mask,          # [B, Fp, 1]
-            prompt_latents_lengths,       # [B]
             target_latents,               # [B, Ft, D]
             target_latents_mask,          # [B, Ft, 1]
-            target_latents_lengths,       # [B]
-            prompt_starts,                # [B]
-            prompt_ends,                  # [B]
             target_idx,                   # [B, Ft]
             target_codebook_indices,      # [B, Ft, Q]
         )
@@ -254,9 +249,8 @@ class NaturalSpeech2Model(nn.Module):
         
         audio_latents, audio_latents_lengths, codebook_indices = self.encodec.get_latents(audio, audio_lengths) # [B, F, latent_dim], [B], [B, F, Q]
 
-        (prompt_latents, prompt_latents_mask, prompt_latents_lengths,                   # prompt_latents: [B, Fp, latent_dim]   prompt_latents_mask: [B, Fp, 1]   prompt_latents_lengths: [B]
-         target_latents, target_latents_mask, target_latents_lengths,                   # target_latents: [B, Ft, latent_dim]   target_latents_mask: [B, Ft, 1]   target_latents_lengths: [B]
-         prompt_starts, prompt_ends,                                                    # prompt_starts: [B]                    prompt_ends: [B]
+        (prompt_latents, prompt_latents_mask,                                           # prompt_latents: [B, Fp, latent_dim]   prompt_latents_mask: [B, Fp, 1]
+         target_latents, target_latents_mask,                                           # target_latents: [B, Ft, latent_dim]   target_latents_mask: [B, Ft, 1]
          target_idx,                                                                    # target_idx: [B, Ft]                   frame indices of the target in the full F axis
          target_codebook_indices) = self._generate_prompts_and_targets(                 # target_codebook_indices: [B, Ft, Q]   per-quantizer GT codebook indices at target frames
             audio_latents,
