@@ -726,7 +726,7 @@ def train(cfg: DictConfig):
             resume="allow" if resume_wandb_id else None
         )
 
-        num_static_refs = 6
+        num_static_refs = cfg.setup.num_audio_refs
         prompt_samples_len = int(cfg.model.prompt_seconds * sampling_rate)
 
         # Dedicated seeded RNGs so the eval reference clips are identical across runs
