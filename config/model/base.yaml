@@ -40,13 +40,19 @@ phoneme_encoder:
 
 # Aligner
 # temperature is the cosine-attention scale: features are L2-normalized before the
-# squared-L2, so dist ∈ [0,4] and score = −temperature·dist ∈ [−2·temperature, 0].
-# 5.0 ⇒ effective scale ~10 on cosine (cf. CLIP's learned ~14). The old 0.0005 was an
-# NVIDIA constant tuned to their un-normalized feature magnitude; under our N(0,0.02)
-# init it collapsed the alignment softmax to ~uniform. See aligner.py AlignerNet.forward.
+# squared-L2, so dist ∈ [0,4] and the per-frame softmax logit is 2·temperature·cos —
+# the effective cosine scale is 2·temperature. At effective ~10 (temperature 5) the
+# alignment softmax cannot sharpen on multi-speaker data: reaching even p=0.5 on the
+# correct phoneme would require a ~0.5 cosine gap against every competitor, so bin_loss
+# floors near ln2 (~half the attention mass off the Viterbi path). temperature 12
+# (effective 24) reaches p≈0.9 at a realistic learned cosine gap of ~0.15–0.25 over the
+# prior's competitor band — the sharpening regime — and stays below CLIP's range (its
+# learned cosine scale converges to ~14–20, clamped at 100). The old 0.0005 was an NVIDIA
+# constant for un-normalized features; under our N(0,0.02) init it collapsed the softmax
+# to ~uniform. See aligner.py AlignerNet.forward.
 aligner:
   attn_channels: 80
-  temperature: 5.0
+  temperature: 12.0
   prior_w: 1.0
   dropout: 0.1
 
@@ -161,9 +167,11 @@ loss_balance_targets:
 
 # Warmup ramps a loss weight 0.1×→1.0× over N steps (0 = full weight from step 0). The paper
 # uses no loss warmup; we keep exactly one. duration_predictor_loss warms over 1000 steps
-# because its target is the aligner's Viterbi durations — noisy until the aligner (full
-# weight from step 0) settles (~1k steps). pitch/pitch_voicing target stable GT F0/voicing →
-# no warmup. The aligner is full from step 0 (everything downstream depends on it). The
+# because its target is the aligner's Viterbi durations, which move fastest during the
+# aligner's steep early descent (first ~1–2k steps); the ramp keeps the predictor from
+# chasing a rapidly-shifting target before the durations stabilize. pitch/pitch_voicing
+# target stable GT F0/voicing → no warmup. The aligner is full from step 0 (everything
+# downstream depends on it). The
 # diffusion loss is the primary objective and is NOT warmed — warming it would down-weight
 # the conditioning-independent denoising too, and neither the paper nor the diffusion
 # literature warms the main loss.
