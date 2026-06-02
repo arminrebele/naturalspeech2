@@ -141,6 +141,8 @@ class DatasetWrapper(Dataset):
         num_proc_pitch: int = 4,
         num_proc_phonemize: int = 24,
         num_proc_tokenize: int = 4,
+        max_train_clips: Optional[int] = None,
+        subset_seed: int = 42,
     ):
         super().__init__()
         self.dataset_source = dataset_source
@@ -160,6 +162,8 @@ class DatasetWrapper(Dataset):
         self.num_proc_pitch = num_proc_pitch
         self.num_proc_phonemize = num_proc_phonemize
         self.num_proc_tokenize = num_proc_tokenize
+        self.max_train_clips = max_train_clips
+        self.subset_seed = subset_seed
         
         self.dataset_dir = DATA_DIR / self.dataset_name
         # Safely convert the split name into a valid directory name
@@ -169,7 +173,10 @@ class DatasetWrapper(Dataset):
 
         # Ensure OTF and Pre-resampled configs cache to distinct directories to prevent cross-contamination
         suffix = "otf" if self.resample_on_the_fly else "pre"
-        self.processed_dir = self.dataset_dir / clean_split / f"processed_{suffix}"
+        # A subset (max_train_clips) caches to its own dir (e.g. processed_otf_n100000)
+        # so different sizes don't collide or serve a stale-size cache.
+        subset_tag = f"_n{self.max_train_clips}" if self.max_train_clips is not None else ""
+        self.processed_dir = self.dataset_dir / clean_split / f"processed_{suffix}{subset_tag}"
         self.resampled_dir = self.dataset_dir / clean_split / "resampled"
         self.cache_dir = self.dataset_dir / clean_split / "cache"
         # Vocabulary is a dataset-level artifact (phoneme inventory is a property
@@ -195,6 +202,8 @@ class DatasetWrapper(Dataset):
             "max_phoneme_length": self.max_phoneme_length,
             "sampling_rate": self.sampling_rate,
             "resample_on_the_fly": self.resample_on_the_fly,
+            "max_train_clips": self.max_train_clips,
+            "subset_seed": self.subset_seed if self.max_train_clips is not None else None,
         }
 
         # Pre-assign the appropriate get_audio function to avoid if/else overhead in __getitem__
@@ -266,6 +275,18 @@ class DatasetWrapper(Dataset):
             # Add index before filtering to keep track of original rows
             dataset = dataset.add_column("original_index", range(len(dataset)))
             dataset.cleanup_cache_files()
+
+            # Cap the split to N clips BEFORE the expensive F0 / phonemize / tokenize
+            # maps, so only N clips are ever pitch-extracted (not the full split — the
+            # difference between ~1 h and ~5 days on MLS-train). Seeded shuffle →
+            # reproducible, speaker-diverse sample across the whole corpus. Set only
+            # for the training split (held-out dev/test stay full).
+            if self.max_train_clips is not None and len(dataset) > self.max_train_clips:
+                dataset = dataset.shuffle(seed=self.subset_seed).select(range(self.max_train_clips))
+                logger.info(
+                    f"Subset '{self.split}' to {self.max_train_clips} clips "
+                    f"(seeded shuffle, seed={self.subset_seed}) before preprocessing."
+                )
             
             if self.filter_column and self.filter_substring:
                 dataset = dataset.filter(

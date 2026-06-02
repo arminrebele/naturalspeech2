@@ -3,6 +3,7 @@ import json
 import time
 import math
 import random
+import itertools
 import logging
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -115,6 +116,18 @@ def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, ev
     # The train split is the only one whose sampler we perturb (random subset).
     # Dropout-trial eval skips train entirely — dev+test held-out is the decision
     # signal — so the save/perturb/restore is guarded behind eval_train.
+    # dev and test are both held out from the train split, are speaker-disjoint
+    # from each other, and have no separate reporting role (the paper reports only
+    # on the external VCTK / LibriSpeech test-clean sets). So they are evaluated
+    # TOGETHER as one ~32 h validation pool under the 'dev' key, chained via
+    # itertools.chain. They stay separate ONLY when dev IS the training split (the
+    # train-on-dev probe), where chaining trained-on dev with held-out test would
+    # be meaningless.
+    if cfg.dataset.train_split != cfg.dataset.dev_split:
+        held_out_splits = [('dev', itertools.chain(dev_loader, test_loader))]
+    else:
+        held_out_splits = [('dev', dev_loader), ('test', test_loader)]
+
     if eval_train:
         # Store main loop's train sampler state
         train_sampler = train_loader.batch_sampler
@@ -124,18 +137,14 @@ def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, ev
         # Override for eval to pull a random shuffled subset starting from 0
         train_sampler.set_epoch(random.randint(0, 10000))
         train_sampler.set_start_batch_idx(0)
-        splits = [('train', train_loader), ('dev', dev_loader), ('test', test_loader)]
+        splits = [('train', train_loader)] + held_out_splits
     else:
-        splits = [('dev', dev_loader), ('test', test_loader)]
+        splits = held_out_splits
 
-    # Evaluate each split on its OWN data — no chaining (the dev+test itertools
-    # chain is temporarily removed while the dev split is in use as a training
-    # split elsewhere; once the normal eval loop re-chains them, dropout-trial can
-    # read one combined held-out number instead of dev+test separately). dev/test
-    # have only a few dozen batches each, so they run a full pass (StopIteration
-    # breaks the loop); train pulls up to eval_iters of a random subset. Losses are
-    # per-unit means (denominator-normalized), comparable across splits regardless
-    # of how many batches each had.
+    # Each split runs a full pass over its held-out data (StopIteration breaks the
+    # loop); train pulls up to eval_iters of a random subset. Losses are per-unit
+    # means (denominator-normalized), comparable across splits regardless of how
+    # many batches each had.
     for split, loader in splits:
         loader_iter = iter(loader)
             
@@ -229,7 +238,12 @@ def create_dataloader(cfg, split: str, token_vocabulary_path: str = None):
         num_proc_pitch=cfg.dataloader.num_proc_pitch,
         num_proc_phonemize=cfg.dataloader.num_proc_phonemize,
         num_proc_tokenize=cfg.dataloader.num_proc_tokenize,
+        # Cap ONLY the training split, applied BEFORE preprocessing inside
+        # DatasetWrapper so just N clips are pitch-extracted (not the full split).
+        max_train_clips=cfg.dataset.max_train_clips if split == cfg.dataset.train_split else None,
+        subset_seed=cfg.seed,
     )
+
     sampler = DynamicBucketedBatchSampler(
         dataset,
         bucket_mapping=bucket_mapping,
@@ -392,6 +406,19 @@ def render_fixed_test_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
     return _render_fixed_refs_table(deps, deps.test_refs, "Eval Audio: test (held-out)", "test")
 
 
+def render_fixed_val_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
+    """Generate audio on the combined dev+test held-out VALIDATION references.
+
+    dev and test together are the validation set (both speaker-disjoint from train
+    and from each other; the paper reports only on external VCTK / LibriSpeech), so
+    they share one table and one combined val-WER. Reported under the 'dev' key to
+    match the chained 'dev' validation loss in estimate_loss."""
+    return _render_fixed_refs_table(
+        deps, deps.table_2_refs + deps.test_refs,
+        "Eval Audio: dev+test (held-out validation)", "dev",
+    )
+
+
 def render_overfit_batch_table(deps: EvalDeps) -> tuple[str, list, list]:
     """Generate audio on the cached overfit batch; deterministic first prompt_seconds slice as the prompt."""
     batch = deps.overfit_ref_batch
@@ -434,6 +461,7 @@ AUDIO_TABLES = {
     "random_dev": render_random_dev_table,
     "fixed_dev_refs": render_fixed_dev_refs_table,
     "fixed_test_refs": render_fixed_test_refs_table,
+    "fixed_val_refs": render_fixed_val_refs_table,
 }
 
 
@@ -534,10 +562,9 @@ def _should_run_eval(iter_num: int, cfg) -> bool:
 
 def _append_dropout_trial_eval(out_path, step: int, losses: dict) -> None:
     """Append one eval point as a JSON line for the dropout-trial orchestrator:
-    the step plus the per-term (+ total) dev and test held-out losses. dev and
-    test are written separately — the eval block doesn't chain them yet (the dev
-    split is in use as a training split elsewhere); the aggregator combines them.
-    Once the normal eval loop re-chains dev+test, this can emit one held-out set."""
+    the step plus the per-term (+ total) held-out loss(es). When training on the
+    train split, dev+test are chained into one 'dev' held-out record; only when dev
+    is itself the training split do dev and test appear as separate records."""
     record = {"step": step}
     for split in ("dev", "test"):
         if split in losses:
