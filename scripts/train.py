@@ -5,7 +5,7 @@ import math
 import random
 import logging
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Optional
 from dotenv import load_dotenv
 
@@ -24,6 +24,7 @@ from safetensors.torch import save_file
 from naturalspeech2.config.schema import model_cfg_from_omegaconf
 from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, DynamicBucketedBatchSampler
 from naturalspeech2.inference import compute_inference_data_loss, generate_audio
+from naturalspeech2.eval import compute_wer
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper, GradientAnalyzer
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.paths import CHECKPOINTS_DIR, PROJECT_ROOT
@@ -264,6 +265,7 @@ class EvalDeps:
     test_refs: list
     custom_prompts: list
     overfit_ref_batch: Optional[dict]  # cached at iter 0 when overfit_batch is in audio_tables
+    metrics_out: dict = field(default_factory=dict)  # per-eval scalar metrics (WER, …) → merged into eval_payload
 
 
 def render_random_dev_table(deps: EvalDeps) -> tuple[str, list, list]:
@@ -326,40 +328,68 @@ def build_fixed_refs(dataset, n_refs, prompt_samples_len, sampling_rate, rng):
             "original_audio": wandb.Audio(audio_np, sample_rate=sampling_rate),
             "prompt_audio": wandb.Audio(prompt_audio_np, sample_rate=sampling_rate),
             "prompt_tensor": torch.from_numpy(prompt_audio_np),
+            "original_np": audio_np,   # raw full clip → ASR GT-floor (WER of the ASR on real audio)
             "text": sample["text"],
         })
     return refs
 
 
-def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str) -> tuple[str, list, list]:
-    """Generate audio on a fixed set of references (shared by the dev + test tables)."""
+def _mean_skip_nan(xs: list) -> float:
+    """Mean over non-NaN values (NaN != NaN); NaN if all dropped/empty. A WER is NaN on
+    a degenerate clip, so it falls out of the per-split aggregate instead of skewing it."""
+    vals = [x for x in xs if x == x]
+    return sum(vals) / len(vals) if vals else float("nan")
+
+
+def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str) -> tuple[str, list, list]:
+    """Generate audio on a fixed set of references (shared by the dev + test tables).
+
+    When "wer" is in cfg.setup.eval_metrics, transcribe each generated clip (HuBERT-CTC)
+    and log per-clip WER as a table column plus per-split means into deps.metrics_out:
+    the synth WER and the GT-floor WER (ASR on the original audio), so the gap
+    (synth − floor) is the honest intelligibility signal.
+    """
     sr = deps.sampling_rate
-    rows = []
+    do_wer = "wer" in deps.cfg.setup.eval_metrics
+    columns = ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt",
+               "Original Audio", "Speech-Prompt", "Generated Audio"]
+    if do_wer:
+        columns.append("WER")
+
+    rows, synth_wers, gt_wers = [], [], []
     for ref in refs:
         gen_audio_np, length = generate_audio(deps.unoptimized_model, ref["prompt_tensor"], target_text=ref["text"])
-        rows.append([
+        gen = gen_audio_np[:length]
+        row = [
             deps.iter_num,
             deps.cfg.model.prompt_seconds,
             ref["text"],
             ref["original_audio"],
             ref["prompt_audio"],
-            wandb.Audio(gen_audio_np[:length], sample_rate=sr),
-        ])
-    return (
-        title,
-        ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt", "Original Audio", "Speech-Prompt", "Generated Audio"],
-        rows,
-    )
+            wandb.Audio(gen, sample_rate=sr),
+        ]
+        if do_wer:
+            w = compute_wer(gen, ref["text"], src_sr=sr)
+            synth_wers.append(w)
+            gt_wers.append(compute_wer(ref["original_np"], ref["text"], src_sr=sr))
+            row.append(w)
+        rows.append(row)
+
+    if do_wer:
+        deps.metrics_out[f"Evaluation: Metrics/{split}-WER"] = _mean_skip_nan(synth_wers)
+        deps.metrics_out[f"Evaluation: Metrics/{split}-WER-gt"] = _mean_skip_nan(gt_wers)
+
+    return (title, columns, rows)
 
 
 def render_fixed_dev_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
     """Generate audio on the fixed dev references (trained-on when training on dev)."""
-    return _render_fixed_refs_table(deps, deps.table_2_refs, "Eval Audio: dev (trained-on)")
+    return _render_fixed_refs_table(deps, deps.table_2_refs, "Eval Audio: dev (trained-on)", "dev")
 
 
 def render_fixed_test_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
     """Generate audio on the fixed held-out test references (never trained on)."""
-    return _render_fixed_refs_table(deps, deps.test_refs, "Eval Audio: test (held-out)")
+    return _render_fixed_refs_table(deps, deps.test_refs, "Eval Audio: test (held-out)", "test")
 
 
 def render_overfit_batch_table(deps: EvalDeps) -> tuple[str, list, list]:
@@ -607,6 +637,8 @@ def run_eval_block(
 
     if deps.cfg.setup.dropout_trial_run and losses is not None:
         _append_dropout_trial_eval(PROJECT_ROOT / deps.cfg.setup.dropout_trial_out, deps.iter_num, losses)
+
+    eval_payload.update(deps.metrics_out)
 
     if deps.cfg.wandb.log and eval_payload:
         wandb.log(eval_payload, step=deps.iter_num)

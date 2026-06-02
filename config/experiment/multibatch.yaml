@@ -38,6 +38,8 @@ setup:
   eval_interval: 1000            # each eval generates 4 clips (2 dev + 2 test) — keep modest
   audio_tables: [fixed_dev_refs, fixed_test_refs]   # trained-on + held-out, both stable across runs
   inference_data_loss_sweep: []  # overfit-only / teacher-forced; blind to conditioning, unused here
+  # num_audio_refs (10) + eval_metrics (["wer"]) inherited from setup/base — WER is standard now,
+  # here it lands on BOTH dev (trained-on) and held-out test.
   log_subdir: "research"
   log_name: "multibatch"
 

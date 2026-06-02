@@ -29,8 +29,9 @@ checkpoint_interval: 5000    # crash-recovery ckpt.pt every 5000 iters
 # Eval block contents
 eval_iters: 200
 audio_tables: [random_dev, fixed_dev_refs]
-num_audio_refs: 2               # clips per fixed-ref table (fixed_dev_refs / fixed_test_refs); random_dev + overfit_batch are fixed at 2
+num_audio_refs: 10              # clips per fixed-ref table (fixed_dev_refs / fixed_test_refs) — ALSO the WER sample size, so keep >=10 for a stable per-eval mean; random_dev + overfit_batch are fixed at 2
 inference_data_loss_sweep: []   # empty by default; overfit_test enables for solver diagnostics
+eval_metrics: ["wer"]           # objective metrics on fixed dev/test refs. WER = HuBERT-CTC (no LM), runs on the idle 2nd GPU. Inert for modes with no fixed-ref table (overfit_test/loss_analysis/gradient_analysis → never loads the ASR).
 
 # Save policy
 best_safetensors: True
