@@ -39,7 +39,20 @@ This project is designed to run seamlessly inside a Docker container. We provide
 
 ### 1. Build and Start the Environment
 
-Ensure you have Docker and the NVIDIA Container Toolkit installed. You'll also need to create a `docker-compose.override.yml` to pass machine-specific settings like your huggingface/hub cache and the shared memory size for PyTorch Dataloader workers.
+Ensure you have Docker and the NVIDIA Container Toolkit installed. You'll also need to create a `docker-compose.override.yml` (gitignored, host-specific) to supply the settings the committed [`docker-compose.yml`](docker-compose.yml) deliberately leaves out — at minimum a **shared-memory size** for the PyTorch DataLoader and a **huggingface cache** mount:
+
+```yaml
+services:
+  ns2:
+    # PyTorch DataLoader ships batches worker→main through /dev/shm. Docker's 64 MB
+    # default is far too small for our ~100 MB audio batches → "Bus error (core dumped)".
+    shm_size: "8gb"
+    volumes:
+      # Persist HF dataset/model downloads across containers (avoids re-fetching MLS).
+      - ${HOME}/.cache/huggingface:/root/.cache/huggingface
+```
+
+> **Note:** This is the minimal override. [§3](#3-dataset-and-custom-mounts) below extends the *same* file with `MERGERFS_DISKS` if your dataset spans multiple disks.
 
 Since [`entrypoint.sh`](entrypoint.sh) defaults to dropping you into a bash shell, you can build the image and start an interactive session immediately with:
 
@@ -69,8 +82,8 @@ Running the [training script](scripts/train.py) will automatically initiate our 
 
 Following the paper [1], we use the english subset of [**Multilingual LibriSpeech (MLS)**](https://huggingface.co/datasets/parler-tts/mls_eng) [7] as our training dataset, which the [Preprocessing-Pipeline](naturalspeech2/data/dataset.py) will load per default. 
 
-> **Note:** This will download **705 GB** of Parquet files, which will translate to an additional **~800 GB** worth of Arrow files after deserializing. During preprocessing, the peak disk usage is **~2x** the dataset in arrow format. 
-Additionally, if you choose to use `resample_on_the_fly=False` (e.g. if your CPU-node can't handle resampling during dataloading fast enough), the pre-resampled FLAC files will require an additional **~3.8 TB** of disk space.
+> **Note:** This downloads **705 GB** of Parquet (cached in your mounted `~/.cache/huggingface`), deserializing to **~800 GB** of Arrow. The Parquet cache persists *alongside* the Arrow, and during preprocessing the intermediate `.map` outputs transiently double the Arrow before the old shards are reclaimed — so the **peak is ≈ 705 GB Parquet + ~2× 800 GB Arrow ≈ 2.3 TB**, settling back to ~800 GB processed + 705 GB Parquet cache afterwards.
+> Additionally, `resample_on_the_fly=False` (e.g. if your CPU node can't resample fast enough during loading) writes pre-resampled FLAC for another **~3.8 TB**.
 
 For fast development iteration, the `+experiment=overfit_test`, `+experiment=loss_analysis`, and `+experiment=gradient_analysis` configs override the train split to MLS' small `dev` split, so they don't trigger preprocessing of the full ~800 GB train data. The default no-arg invocation (the `full_run` composition) uses the train split as usual.
 
@@ -207,13 +220,32 @@ For all Hyperparameters that are explicitly stated in the original paper [1], we
 
 For a detailed breakdown, see **this table**.
 
-## Training Hardware
+## Hardware: Reference, Assumptions, and Minimum Baseline
 
-The reference models in this repository were trained on the following system configuration:
+The reference models were trained on the configuration below — but it is our *default*, not a hard requirement. The code targets **any single CUDA-capable NVIDIA GPU**; the per-spec notes that follow say what each default actually buys and how to scale it down.
 
-* **GPU:** NVIDIA RTX PRO 6000 Blackwell Workstation-Edition (96 GB VRAM)
-* **CPU:** 32 Cores
-* **RAM:** 252 GB 
+* **GPU:** NVIDIA RTX PRO 6000 Blackwell Workstation-Edition (96 GB VRAM) — main training card.
+* **GPU (optional 2nd):** NVIDIA RTX 4090 (24 GB) — *idle* card for the eval-block WER ASR, kept off the training card's VRAM budget.
+* **CPU:** 32 cores.
+* **RAM:** 252 GB.
+* **Disk:** ≈800 GB Arrow for MLS-train (~2× peak during preprocessing; +3.8 TB if `resample_on_the_fly=False`) — see [§3](#3-dataset-and-custom-mounts).
+
+### What our defaults assume
+
+- **GPU / 96 GB VRAM** — encoded *only* in the per-bucket batch sizes in [`config/dataloader/base.yaml`](config/dataloader/base.yaml) (`bucket_mapping`, ~80k audio-frames per batch); nothing else hard-codes VRAM. On a smaller card, re-derive them with the [§4](#4-benchmarking-and-hardware-optimization) benchmarks (`find_optimal_buckets.py` → `find_max_batch_sizes.py`, which measures peak VRAM empirically with a 10 % margin → `stress_test_fragmentation.py`). The sampler hard-fails if a bucket OOMs at batch size 1, so an over-budget config surfaces immediately rather than mid-run.
+- **Second GPU (optional)** — used in exactly one place, the eval-block WER ASR in [`naturalspeech2/eval/metrics.py`](naturalspeech2/eval/metrics.py): it selects `cuda:1` only if a second GPU is present, else `cuda:0`, else CPU. Never asserted, never required.
+- **CPU / 32 cores** — sets the data-pipeline parallelism in [`config/dataloader/base.yaml`](config/dataloader/base.yaml), across two phases. *Training-time:* `num_workers` (loader processes) — tune for your machine with the dataloader benchmark ([§4](#4-benchmarking-and-hardware-optimization)). *One-time preprocessing:* `num_proc_phonemize`/`num_proc_tokenize` are cheap (text / token lists, safe to set high), while `num_proc_pitch` is the heavy one — each worker decodes full audio and runs pyworld F0, so it drives both the preprocessing RAM peak and wall-clock. Lower any of them on fewer cores; it costs speed, not correctness.
+- **RAM / 252 GB** — mostly **OS page-cache headroom, not a hard allocation**. The processed dataset is memory-mapped (`load_from_disk` in [`naturalspeech2/data/dataset.py`](naturalspeech2/data/dataset.py)), so spare RAM transparently caches hot shards to keep the loader fed, but that cache is reclaimable. The resident working set is far smaller and has two regimes: training-time DataLoader buffers (`num_workers × prefetch × ~100 MB/batch`, a few GB), and the heavier one-time preprocessing peak — HF batched `.map` holds ~1000 decoded-audio rows per worker, so it scales with `num_proc_pitch` (the audio-decoding stage), **not** `num_workers`. Lower `num_proc_pitch` if preprocessing OOMs.
+- **Shared memory (`shm_size`)** — a genuine hard requirement, *not* headroom: the DataLoader ships batches worker→main through `/dev/shm`, and Docker's 64 MB default triggers `Bus error`. Set it to a few GB in your override ([§1](#1-build-and-start-the-environment)).
+
+### Minimum to run the full pipeline (training, preprocessing, and inference)
+
+- **GPU** — one CUDA-capable NVIDIA GPU. Below 96 GB, re-run the [§4](#4-benchmarking-and-hardware-optimization) benchmarks first: the committed batch sizes assume 96 GB and will otherwise OOM.
+- **CPU** — any multi-core CPU (lower `num_workers` / `num_proc_*`). Full MLS-train preprocessing is a **multi-day, one-time** CPU job (pyworld-F0-bound, ~linear in `num_proc_pitch`); set `dataset.max_train_clips=N` for a seeded, speaker-diverse subset that cuts this to ~an hour if you don't need the full corpus.
+- **RAM** — no hard floor we've measured. Training steady-state is single-digit GB of loader buffers plus reclaimable page-cache; the binding moment is the one-time preprocessing peak, which scales with `num_proc_pitch` (lower it if you OOM) — see the RAM note above. Add a few-GB `shm_size` on top. More RAM only buys dataset page-cache (fewer disk reads), never correctness.
+- **Disk** — the binding constraint for the full MLS run; see [§3](#3-dataset-and-custom-mounts). The `dev`-split diagnostic modes (`+experiment=overfit_test|loss_analysis|gradient_analysis`) need only a tiny fraction and are the fastest end-to-end check of a fresh setup.
+
+> **Inference** ([§ Generating Audio](#generating-audio)) is far lighter than training — a single GPU, one clip at a time, no DataLoader workers — so neither `shm_size` nor large RAM is a concern.
 
 ---
 
