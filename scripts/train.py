@@ -669,6 +669,10 @@ def train(cfg: DictConfig):
     # Instantiate Model
     if cfg.setup.init_from == 'scratch':
         logger.info("Initializing a new model from scratch...")
+        # Fresh run → drop the daemon's persistent best-tracking from a prior run in this dir, so the
+        # ema_best gate restarts from inf (matches the in-process best_dev_loss=1e9 reset). Stale weight
+        # files are left untouched (never read on scratch; overwritten as the run progresses).
+        (CHECKPOINTS_DIR / "eval_state.json").unlink(missing_ok=True)
         model_cfg = model_cfg_from_omegaconf(cfg.model)
         model = NaturalSpeech2Model(
             model_cfg,
