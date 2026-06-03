@@ -286,6 +286,11 @@ def run_decoupled_eval(
     eval_iters = cfg.setup.eval_iters
     gas = cfg.setup.gradient_accumulation_steps
 
+    # Set warmup-ramped weights (e.g. duration_predictor over 1000 steps) to this snapshot's step →
+    # weighted losses + EMA-dev best-pick match the trainer. The daemon's LossWrapper is a fresh
+    # instance (frozen at step 0) and estimate_loss calls it without a step.
+    loss_wrapper._update_weights(snapshot_step)
+
     # --- 1. live losses (overfitting signal, comparable to the per-step train curve) ---
     if eval_iters > 0:
         _load_trainable(model, live_trainable)
