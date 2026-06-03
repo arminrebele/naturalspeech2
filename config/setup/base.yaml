@@ -37,9 +37,9 @@ metric_device: auto             # WER ASR device. auto → cuda:1 if ≥2 GPUs e
 # all diagnostic modes fall back to today's in-process synchronous eval.
 eval_daemon:
   enabled: true
-  compile: false                # eager by default (robust); opt-in torch.compile for faster eval forwards
+  compile: true                 # torch.compile the daemon's eval forward (the in-process eval forward was already compiled); set false to debug the daemon in eager mode
   snapshot_dir: null            # null → /dev/shm/ns2_eval/<wandb-run-or-pid>; RAM-backed weight handoff
-  num_workers: 4                # dataloader workers for the daemon's own dev/test/train loaders (modest — shares the 32-core host)
+  num_workers: 4                # dataloader workers for EACH of the daemon's own dev/test/train loaders (independent of dataloader.num_workers so the main run isn't slowed)
   poll_interval_s: 2.0          # marker poll cadence when idle
 
 # Save policy

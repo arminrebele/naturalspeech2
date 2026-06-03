@@ -76,6 +76,16 @@ python scripts/train.py training.learning_rate=1e-4 +experiment=overfit_test
 
 Running the [training script](scripts/train.py) will automatically initiate our [Preprocessing-Pipeline](naturalspeech2/data/dataset.py) and prepare the dataset, before the Train-Loop starts. 
 
+**Evaluation (decoupled eval daemon).** Every `setup.eval_interval` steps the model is evaluated — held-out loss over the dev+test pool, audio generation on fixed reference clips, and objective WER. With a **second GPU**, this whole eval block is off-loaded to a persistent subprocess pinned to **GPU 1**: the trainer (GPU 0) only does a fast weight-snapshot copy and keeps stepping, so training **never pauses** for evaluation, generation, or WER. The subprocess is fully isolated — if it crashes it cannot take down training, and the trainer respawns it. It reports held-out loss on **both the live and the EMA weights** (best-checkpoint selection stays on EMA dev loss) and owns the `ema_best.safetensors` write; results stream back to the trainer and are logged to W&B against a dedicated `eval/snapshot_step` x-axis. On a **single-GPU** host — or with `setup.eval_daemon.enabled=false` — evaluation transparently falls back to the original **in-process** path (runs synchronously on the training card between steps, exactly as before). Diagnostic modes (`overfit_test`, `loss_analysis`, `gradient_analysis`, dropout trials) always evaluate in-process.
+
+| `config/setup/base.yaml` key | Default | Purpose |
+|---|---|---|
+| `eval_daemon.enabled` | `true` | Use the daemon when a 2nd GPU is present; `false` → always in-process. |
+| `eval_daemon.compile` | `true` | `torch.compile` the daemon's eval forward (the in-process forward was already compiled). |
+| `eval_daemon.num_workers` | `4` | Dataloader workers per daemon loader — independent of `dataloader.num_workers`, so the main run isn't slowed. |
+| `eval_daemon.snapshot_dir` | `null` | RAM-backed weight-handoff dir; `null` → `/dev/shm/ns2_eval/<run>`. |
+| `metric_device` | `auto` | WER ASR device: `auto` → idle 2nd GPU if present, else CPU (never silently the training card; override e.g. `cuda:0`). |
+
 ---
 
 ### 3. Dataset and Custom Mounts
@@ -225,7 +235,7 @@ For a detailed breakdown, see **this table**.
 The reference models were trained on the configuration below — but it is our *default*, not a hard requirement. The code targets **any single CUDA-capable NVIDIA GPU**; the per-spec notes that follow say what each default actually buys and how to scale it down.
 
 * **GPU:** NVIDIA RTX PRO 6000 Blackwell Workstation-Edition (96 GB VRAM) — main training card.
-* **GPU (optional 2nd):** NVIDIA RTX 4090 (24 GB) — *idle* card for the eval-block WER ASR, kept off the training card's VRAM budget.
+* **GPU (optional 2nd):** NVIDIA RTX 4090 (24 GB) — *idle* card that runs the decoupled eval daemon (held-out loss, generation, WER), kept off the training card's VRAM budget so training never pauses for eval.
 * **CPU:** 32 cores.
 * **RAM:** 252 GB.
 * **Disk:** ≈800 GB Arrow for MLS-train (~2× peak during preprocessing; +3.8 TB if `resample_on_the_fly=False`) — see [§3](#3-dataset-and-custom-mounts).
@@ -233,7 +243,7 @@ The reference models were trained on the configuration below — but it is our *
 ### What our defaults assume
 
 - **GPU / 96 GB VRAM** — encoded *only* in the per-bucket batch sizes in [`config/dataloader/base.yaml`](config/dataloader/base.yaml) (`bucket_mapping`, ~80k audio-frames per batch); nothing else hard-codes VRAM. On a smaller card, re-derive them with the [§4](#4-benchmarking-and-hardware-optimization) benchmarks (`find_optimal_buckets.py` → `find_max_batch_sizes.py`, which measures peak VRAM empirically with a 10 % margin → `stress_test_fragmentation.py`). The sampler hard-fails if a bucket OOMs at batch size 1, so an over-budget config surfaces immediately rather than mid-run.
-- **Second GPU (optional)** — used in exactly one place, the eval-block WER ASR in [`naturalspeech2/eval/metrics.py`](naturalspeech2/eval/metrics.py): it selects `cuda:1` only if a second GPU is present, else `cuda:0`, else CPU. Never asserted, never required.
+- **Second GPU (optional)** — when present, runs the **decoupled eval daemon** ([`scripts/eval_daemon.py`](scripts/eval_daemon.py)) so the eval block never blocks training (see [§2](#2-running-the-training)). Auto-detected (`device_count() > 1`); absent → eval runs in-process on the training card, exactly as before. Never asserted, never required. The WER ASR device follows `setup.metric_device` (`auto` → idle 2nd GPU else CPU).
 - **CPU / 32 cores** — sets the data-pipeline parallelism in [`config/dataloader/base.yaml`](config/dataloader/base.yaml), across two phases. *Training-time:* `num_workers` (loader processes) — tune for your machine with the dataloader benchmark ([§4](#4-benchmarking-and-hardware-optimization)). *One-time preprocessing:* `num_proc_phonemize`/`num_proc_tokenize` are cheap (text / token lists, safe to set high), while `num_proc_pitch` is the heavy one — each worker decodes full audio and runs pyworld F0, so it drives both the preprocessing RAM peak and wall-clock. Lower any of them on fewer cores; it costs speed, not correctness.
 - **RAM / 252 GB** — mostly **OS page-cache headroom, not a hard allocation**. The processed dataset is memory-mapped (`load_from_disk` in [`naturalspeech2/data/dataset.py`](naturalspeech2/data/dataset.py)), so spare RAM transparently caches hot shards to keep the loader fed, but that cache is reclaimable. The resident working set is far smaller and has two regimes: training-time DataLoader buffers (`num_workers × prefetch × ~100 MB/batch`, a few GB), and the heavier one-time preprocessing peak — HF batched `.map` holds ~1000 decoded-audio rows per worker, so it scales with `num_proc_pitch` (the audio-decoding stage), **not** `num_workers`. Lower `num_proc_pitch` if preprocessing OOMs.
 - **Shared memory (`shm_size`)** — a genuine hard requirement, *not* headroom: the DataLoader ships batches worker→main through `/dev/shm`, and Docker's 64 MB default triggers `Bus error`. Set it to a few GB in your override ([§1](#1-build-and-start-the-environment)).
