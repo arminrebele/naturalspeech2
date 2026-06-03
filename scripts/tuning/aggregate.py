@@ -1,33 +1,27 @@
 #!/usr/bin/env python3
 """Aggregate dropout-trial JSONL dumps into keep/reject verdicts.
 
-Each trial writes per-eval held-out losses (see scripts/train.py
-`_append_dropout_trial_eval`): one JSON line per eval step holding the per-term
-dev and test losses. A site's effect is judged by a PAIRED effect size against
+Each trial writes per-eval held-out losses (train.py `_append_dropout_trial_eval`): one JSON
+line per eval step with per-term dev/test losses. A site's effect is a PAIRED effect size vs
 the rolling baseline run:
 
     at each shared eval step:  delta = treatment_metric - baseline_metric
     z = mean(delta) / std(delta)     over the converged-tail window
 
-Pairing cancels the common downward trend AND common-mode batch difficulty, so
-std(delta) is the genuine differential noise rather than the trend (each eval is
-a full deterministic held-out pass, so within-run spread is almost entirely the
-trend — using it directly would make the test nearly blind). It is an effect size
-(NOT divided by sqrt(n)): consecutive deltas are autocorrelated and there is one
-run per config, so this is a clear-separation heuristic, not a calibrated p-value.
+Pairing cancels the common downward trend AND common-mode batch difficulty → std(delta) is
+genuine differential noise (each eval is a full deterministic pass, so within-run spread is
+almost all trend; using it directly would make the test near-blind). Effect size, NOT /sqrt(n):
+deltas are autocorrelated and there's one run per config → clear-separation heuristic, not a p-value.
 
-Convention: delta > 0 means the treatment is WORSE (higher held-out loss).
+Convention: delta > 0 means treatment is WORSE (higher held-out loss).
 
-Decision (underfitting prior → burden of proof is on KEEPING dropout):
-    KEEP a site only if z <= keep_threshold (-2): a clear held-out benefit.
-    Otherwise REJECT.
-    Backbone modules additionally flag any consumer term that regresses
-    (guard z >= guard_threshold, +2) even when the primary improves — the
-    teacher-forced diffusion metric is blind to predictor degradation that only
-    bites at inference, so a regressed consumer is surfaced for a manual call.
+Decision (underfitting prior → burden of proof on KEEPING dropout):
+    KEEP iff z <= keep_threshold (-2): clear held-out benefit. Else REJECT.
+    Backbone modules also flag any consumer term that regresses (guard z >= +2) even if the
+    primary improves — teacher-forced diffusion is blind to predictor degradation that only
+    bites at inference, so it's surfaced for a manual call.
 
-The per-module metric (`primary`) and the backbone consumer `guard` terms live in
-MODULES below; the orchestrator (run_dropout_screen.py) imports them too.
+Per-module `primary` metric and backbone `guard` terms live in MODULES; run_dropout_screen.py imports them.
 """
 import argparse
 import json
@@ -36,16 +30,12 @@ from pathlib import Path
 from statistics import fmean, pstdev
 
 
-# Per-module decision metric. `sites` are the model-config dropout dot-paths to
-# screen; `primary` terms are summed into the headline metric; `guard` terms are
-# each checked individually for a regression (backbones only).
-#
-#   heads (DP/PP/ALN)  -> own loss term(s); they are teacher-forced out of the
-#                         diffusion path, so the diffusion loss can't see them.
-#   DIFF               -> the dedicated diffusion group (data+score+ce_rvq).
-#   backbones (SPE/PE) -> diffusion group as headline + a consumer guard on the
-#                         predictor/aligner terms they feed (teacher forcing hides
-#                         the inference-time cost of regressing those).
+# Per-module decision metric. `sites` = model-config dropout dot-paths to screen; `primary`
+# terms summed into the headline; `guard` terms checked individually for regression (backbones).
+#   heads (DP/PP/ALN)  → own loss term(s) (teacher-forced out of the diffusion path).
+#   DIFF               → diffusion group (data+score+ce_rvq).
+#   backbones (SPE/PE) → diffusion group headline + consumer guard on the predictor/aligner
+#                        terms they feed (teacher forcing hides the inference-time regression cost).
 MODULES = {
     "duration_predictor": {
         "sites": [
@@ -116,10 +106,8 @@ GUARD_THRESHOLD = 2.0
 
 def load_series(jsonl_path, terms) -> dict:
     """{step: combined_metric}, combined = sum over `terms` of (dev+test)/2.
-
-    dev and test are averaged into one held-out number. The combination is linear
-    and identical for every run, so it cancels in the paired difference — the
-    average-vs-count-weighted choice is second order for the z."""
+    dev+test averaged into one held-out number; linear and identical per run → cancels in the
+    paired difference (average-vs-count-weighted choice is second order for z)."""
     series = {}
     with open(jsonl_path) as f:
         for line in f:

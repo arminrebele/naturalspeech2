@@ -1,9 +1,8 @@
 """Compute per-channel Encodec latent statistics for diffusion-target normalization.
 
-Runs once before first training: walks a preprocessed HF dataset, encodes N clips
-through `EncodecWrapper.get_latents` (with normalization disabled, i.e. raw output),
-computes per-channel mean and std, saves to a `.pt` file that `EncodecWrapper`
-loads at construction time and registers as persistent buffers.
+Runs once before first training: walks a preprocessed HF dataset, encodes N clips through
+EncodecWrapper.get_latents (normalization disabled → raw), computes per-channel mean/std,
+saves a .pt that EncodecWrapper loads at construction as persistent buffers.
 
 Example:
     # in container
@@ -56,7 +55,7 @@ def main() -> None:
     ds = load_from_disk(str(dataset_path))
     print(f"  rows available: {len(ds)}")
 
-    # Bootstrap mode: pass latent_stats_path=None so the encoder returns raw latents.
+    # Bootstrap: latent_stats_path=None → encoder returns raw latents.
     print("Loading EncodecWrapper (bootstrap — no normalization)...")
     encoder = EncodecWrapper(bandwidth=args.bandwidth, latent_stats_path=None).to(args.device)
     encoder.eval()

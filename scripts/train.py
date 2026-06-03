@@ -100,7 +100,7 @@ def get_infinite_batches(loader, start_epoch=0, start_batch_idx=0, overfit_singl
 
     while True:
         for batch_idx, batch in enumerate(loader, start=sampler.start_batch_idx):
-            # Yield CPU batches to buffer into the lookahead queue
+            # CPU batches → lookahead queue
             yield batch, epoch, batch_idx
 
         # Epoch finished
@@ -113,16 +113,12 @@ def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, ev
     out = {}
     model.eval()
 
-    # The train split is the only one whose sampler we perturb (random subset).
-    # Dropout-trial eval skips train entirely — dev+test held-out is the decision
-    # signal — so the save/perturb/restore is guarded behind eval_train.
-    # dev and test are both held out from the train split, are speaker-disjoint
-    # from each other, and have no separate reporting role (the paper reports only
-    # on the external VCTK / LibriSpeech test-clean sets). So they are evaluated
-    # TOGETHER as one ~32 h validation pool under the 'dev' key, chained via
-    # itertools.chain. They stay separate ONLY when dev IS the training split (the
-    # train-on-dev probe), where chaining trained-on dev with held-out test would
-    # be meaningless.
+    # Only the train split's sampler is perturbed (random subset); guarded behind eval_train
+    # (dropout-trial eval skips train — dev+test held-out is the decision signal).
+    # dev and test are both held out from train and speaker-disjoint, with no separate reporting
+    # role (paper reports only on external VCTK / LibriSpeech), so they're evaluated TOGETHER as
+    # one ~32 h validation pool under 'dev' (chained). Separate ONLY when dev IS the train split,
+    # where chaining trained-on dev with held-out test would be meaningless.
     if cfg.dataset.train_split != cfg.dataset.dev_split:
         held_out_splits = [('dev', itertools.chain(dev_loader, test_loader))]
     else:
@@ -134,17 +130,15 @@ def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, ev
         main_train_epoch = train_sampler.epoch
         main_train_batch_idx = train_sampler.start_batch_idx
 
-        # Override for eval to pull a random shuffled subset starting from 0
+        # Eval: random shuffled subset from 0
         train_sampler.set_epoch(random.randint(0, 10000))
         train_sampler.set_start_batch_idx(0)
         splits = [('train', train_loader)] + held_out_splits
     else:
         splits = held_out_splits
 
-    # Each split runs a full pass over its held-out data (StopIteration breaks the
-    # loop); train pulls up to eval_iters of a random subset. Losses are per-unit
-    # means (denominator-normalized), comparable across splits regardless of how
-    # many batches each had.
+    # Each held-out split runs a full pass (StopIteration breaks); train pulls up to eval_iters
+    # of a random subset. Losses are denominator-normalized means → comparable across splits.
     for split, loader in splits:
         loader_iter = iter(loader)
             
@@ -159,7 +153,7 @@ def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, ev
                     eval_lookahead_queue.append(next(loader_iter))
                     
             except StopIteration:
-                break # Drop incomplete logical batch and terminate this split's evaluation
+                break # drop incomplete logical batch, end this split
 
             eval_denominators = compute_denominators(eval_lookahead_queue, cfg)
             
@@ -167,9 +161,7 @@ def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, ev
             eval_accum_logged_losses = {}
 
             for batch in eval_lookahead_queue:
-                # Skip non-tensor fields (`text: list[str]` from the collate)
-                # and exclude them from the model() call since forward()
-                # has an explicit kwarg list.
+                # Skip non-tensor fields (text: list[str]) — forward() has an explicit kwarg list.
                 tensor_batch = {
                     k: v.to(device, non_blocking=True)
                     for k, v in batch.items()
@@ -238,8 +230,7 @@ def create_dataloader(cfg, split: str, token_vocabulary_path: str = None):
         num_proc_pitch=cfg.dataloader.num_proc_pitch,
         num_proc_phonemize=cfg.dataloader.num_proc_phonemize,
         num_proc_tokenize=cfg.dataloader.num_proc_tokenize,
-        # Cap ONLY the training split, applied BEFORE preprocessing inside
-        # DatasetWrapper so just N clips are pitch-extracted (not the full split).
+        # Cap ONLY the train split, applied pre-preprocessing in DatasetWrapper (only N clips pitch-extracted).
         max_train_clips=cfg.dataset.max_train_clips if split == cfg.dataset.train_split else None,
         subset_seed=cfg.seed,
     )
@@ -263,11 +254,8 @@ def create_dataloader(cfg, split: str, token_vocabulary_path: str = None):
 
 @dataclass
 class EvalDeps:
-    """Bag of dependencies for run_eval_block and the audio table render functions.
-
-    Built once per eval firing; the heavy objects (model, dataset, refs) outlive
-    individual eval calls and are passed by reference.
-    """
+    """Dependencies for run_eval_block + audio-table renderers. Built once per eval firing;
+    heavy objects (model, dataset, refs) passed by reference."""
     iter_num: int
     unoptimized_model: nn.Module       # for generate_audio + compute_inference_data_loss
     compiled_model: nn.Module          # for estimate_loss
@@ -321,11 +309,9 @@ def render_random_dev_table(deps: EvalDeps) -> tuple[str, list, list]:
 
 
 def build_fixed_refs(dataset, n_refs, prompt_samples_len, sampling_rate, rng):
-    """Pick a fixed, reproducible set of >=prompt-length reference clips for the eval
-    audio tables. Uses a dedicated seeded RNG (random.Random) so the selection is
-    identical across runs regardless of any other global-random usage — that
-    stability is the whole point (cross-run A/B on the exact same audio). Builds
-    wandb.Audio objects, so call only when wandb is active."""
+    """Pick a fixed, reproducible set of ≥prompt-length reference clips for the eval audio tables.
+    Dedicated seeded RNG (random.Random) → selection identical across runs (cross-run A/B on the
+    same audio). Builds wandb.Audio objects → call only when wandb is active."""
     indices = list(range(len(dataset)))
     rng.shuffle(indices)
     refs = []
@@ -349,19 +335,17 @@ def build_fixed_refs(dataset, n_refs, prompt_samples_len, sampling_rate, rng):
 
 
 def _mean_skip_nan(xs: list) -> float:
-    """Mean over non-NaN values (NaN != NaN); NaN if all dropped/empty. A WER is NaN on
-    a degenerate clip, so it falls out of the per-split aggregate instead of skewing it."""
+    """Mean over non-NaN values (NaN if all dropped). A degenerate clip's WER is NaN →
+    falls out of the aggregate instead of skewing it."""
     vals = [x for x in xs if x == x]
     return sum(vals) / len(vals) if vals else float("nan")
 
 
 def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str) -> tuple[str, list, list]:
-    """Generate audio on a fixed set of references (shared by the dev + test tables).
+    """Generate audio on a fixed reference set (shared by dev + test tables).
 
-    When "wer" is in cfg.setup.eval_metrics, transcribe each generated clip (HuBERT-CTC)
-    and log per-clip WER as a table column plus per-split means into deps.metrics_out:
-    the synth WER and the GT-floor WER (ASR on the original audio), so the gap
-    (synth − floor) is the honest intelligibility signal.
+    If "wer" in cfg.setup.eval_metrics: transcribe each clip (HuBERT-CTC), log per-clip WER
+    column + per-split means (synth WER and GT-floor WER) → gap (synth − floor) = honest signal.
     """
     sr = deps.sampling_rate
     do_wer = "wer" in deps.cfg.setup.eval_metrics
@@ -409,10 +393,9 @@ def render_fixed_test_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
 def render_fixed_val_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
     """Generate audio on the combined dev+test held-out VALIDATION references.
 
-    dev and test together are the validation set (both speaker-disjoint from train
-    and from each other; the paper reports only on external VCTK / LibriSpeech), so
-    they share one table and one combined val-WER. Reported under the 'dev' key to
-    match the chained 'dev' validation loss in estimate_loss."""
+    dev+test together = validation set (speaker-disjoint from train and each other; paper reports
+    only on external VCTK / LibriSpeech), so one table + one combined val-WER under 'dev' (matches
+    the chained 'dev' loss in estimate_loss)."""
     return _render_fixed_refs_table(
         deps, deps.table_2_refs + deps.test_refs,
         "Eval Audio: dev+test (held-out validation)", "dev",
@@ -468,11 +451,9 @@ AUDIO_TABLES = {
 def _save_safetensors(model: nn.Module, path) -> None:
     """Save model state_dict to safetensors, cloning each tensor to fresh storage.
 
-    `safetensors.torch.save_model` errors on nn.LSTM `weight_ih_l0` because the
-    LSTM's internal `_flat_weights` aliases the named parameter — the dedup pass
-    inside save_model picks a single name that doesn't cover the full storage
-    and bails. Cloning each tensor before writing sidesteps that path.
-    Encodec's LSTM in the frozen encoder is the concrete trigger here.
+    save_model errors on nn.LSTM weight_ih_l0: _flat_weights aliases the named param, so the dedup
+    pass picks a name not covering full storage and bails. Cloning sidesteps it. (Trigger: Encodec's
+    frozen-encoder LSTM.)
     """
     state_dict = {k: v.detach().clone().contiguous() for k, v in model.state_dict().items()}
     save_file(state_dict, str(path))
@@ -499,23 +480,18 @@ def compute_suggested_loss_weights(
     targets: dict,
     anchor: str = "data_loss",
 ) -> dict:
-    """Suggest loss_weights that make each leaf's weighted contribution match a
-    target contribution share, from the raw per-leaf magnitudes a loss-analysis
-    run measured.
+    """Suggest loss_weights so each leaf's weighted contribution matches a target share,
+    given the raw per-leaf magnitudes a loss-analysis run measured.
 
-    `targets` mirrors loss_weights: flat leaves carry a scalar target; groups
-    (aligner_loss, diffusion_loss) carry a `group_target` plus per-sub targets. A
-    leaf's desired contribution share is
+    targets mirrors loss_weights: flat leaves carry a scalar; groups carry group_target + per-sub
+    targets. Desired share:
         flat:    c = target
         grouped: c = group_target * sub_target / sum(sub_targets in group)
-    and its effective weight is W = c / magnitude. Every weight is then scaled so
-    the anchor leaf's effective weight is exactly 1.0, pinning the anchor's
-    gradient scale (data_loss -> the diffusion path) so the paper LR transfers.
+    Effective weight W = c / magnitude. All weights scaled so the anchor leaf's W = 1.0, pinning
+    the anchor's gradient scale (data_loss → diffusion path) so the paper LR transfers.
 
-    Two-level decomposition matching how LossWrapper applies weights: for a group,
-    sub_weight = sub_target / magnitude (the within-group split) and group_weight
-    carries the group's share times the global anchor scale. Returns a nested dict
-    shaped like loss_weights, ready to paste into config/model/*.yaml.
+    Two-level like LossWrapper: sub_weight = sub_target / magnitude; group_weight = group share ×
+    anchor scale. Returns a nested dict shaped like loss_weights, ready to paste into config/model.
     """
     suggested: dict = {}
     eff_unscaled: dict[str, float] = {}   # leaf -> pre-anchor effective weight
@@ -549,10 +525,9 @@ def compute_suggested_loss_weights(
 
 
 def _should_run_eval(iter_num: int, cfg) -> bool:
-    """Eval-trigger schedule. Normal runs eval every eval_interval throughout.
-    Dropout trials eval only the converged tail — from dropout_eval_start_frac of
-    the run onward — at the (fine) eval_interval cadence: the decision metric only
-    needs the tail, and skipping the early run removes most eval overhead."""
+    """Eval-trigger schedule. Normal: every eval_interval. Dropout trials: only the converged
+    tail (from dropout_eval_start_frac onward) at eval_interval — the decision metric needs only
+    the tail, skipping the early run removes most eval overhead."""
     if iter_num <= 0:
         return False
     if cfg.setup.dropout_trial_run and iter_num < int(cfg.setup.dropout_eval_start_frac * cfg.setup.max_iters):
@@ -561,10 +536,9 @@ def _should_run_eval(iter_num: int, cfg) -> bool:
 
 
 def _append_dropout_trial_eval(out_path, step: int, losses: dict) -> None:
-    """Append one eval point as a JSON line for the dropout-trial orchestrator:
-    the step plus the per-term (+ total) held-out loss(es). When training on the
-    train split, dev+test are chained into one 'dev' held-out record; only when dev
-    is itself the training split do dev and test appear as separate records."""
+    """Append one eval point as a JSON line for the dropout-trial orchestrator: step +
+    per-term (+total) held-out loss(es). Training on train → dev+test chained as one 'dev'
+    record; only when dev IS the train split do dev and test appear separately."""
     record = {"step": step}
     for split in ("dev", "test"):
         if split in losses:
@@ -584,11 +558,10 @@ def run_eval_block(
     best_dev_loss: float,
     incremental_audio_tables: dict,
 ) -> float:
-    """Single eval pass under EMA-swapped weights. Returns possibly-updated best_dev_loss.
+    """Single eval pass under EMA-swapped weights → possibly-updated best_dev_loss.
 
-    Toggles unoptimized_model.eval() at entry and unoptimized_model.train() in a
-    finally clause on exit. Caller must NOT wrap this call in ema.swap_in — the
-    bracket is managed internally; EMA.swap_in is non-reentrant.
+    eval() at entry, train() in a finally on exit. Caller must NOT wrap this in ema.swap_in —
+    managed internally (EMA.swap_in is non-reentrant).
     """
     eval_start_time = time.perf_counter()
     logger.info("Running evaluation block...")
@@ -616,10 +589,9 @@ def run_eval_block(
                         eval_payload[f"{get_loss_section(k, 'Evaluation', section)}/{k}"] = v
 
             if deps.cfg.setup.inference_data_loss_sweep and deps.overfit_ref_batch is not None:
-                # Training data_loss is a one-step prediction error from a known noisy z_t;
-                # inference chains N ODE steps from t=1 to t≈0, each using the network's prediction.
-                # Sweep step counts to distinguish solver-discretization error (monotonic drop to
-                # ~training data_loss) from a weights-side gap (flat across step counts).
+                # Training data_loss = one-step error from a known noisy z_t; inference chains N ODE
+                # steps from t=1 to t≈0. Sweep step counts to separate solver-discretization error
+                # (drops to ~training data_loss) from a weights-side gap (flat across step counts).
                 logger.info("Computing inference_data_loss diagnostic...")
                 sweep = tuple(deps.cfg.setup.inference_data_loss_sweep)
                 sweep_losses = compute_inference_data_loss(
@@ -633,9 +605,8 @@ def run_eval_block(
                 logger.info("Generating audio samples for evaluation...")
                 for table_name in deps.cfg.setup.audio_tables:
                     wandb_key, columns, rows = AUDIO_TABLES[table_name](deps)
-                    # INCREMENTAL so each eval's rows accumulate into one table
-                    # (compare audio across iters); a fresh table per eval would
-                    # make the panel show only the latest step's audio.
+                    # INCREMENTAL → rows accumulate into one table (compare audio across iters);
+                    # a fresh table per eval would show only the latest step.
                     table = incremental_audio_tables.get(wandb_key)
                     if table is None:
                         table = wandb.Table(columns=columns, log_mode="INCREMENTAL")
@@ -683,13 +654,10 @@ def train(cfg: DictConfig):
     device = cfg.setup.device
     device_type = 'cuda'
 
-    # Seed torch + Python random so model init, diffusion t/ε sampling, prompt
-    # windows, eval-block prompt picks, and DataLoader worker RNG state are
-    # reproducible across runs. cuDNN-level determinism is NOT enforced (would
-    # cost ~5–10% perf and force slower compiled kernels) — sufficient for
-    # fair A/B comparisons. The bucketed sampler uses np.random.default_rng
-    # with its own hardcoded seed so the 5 overfit batches stay fixed
-    # regardless of cfg.seed.
+    # Seed torch + Python random → reproducible model init, diffusion t/ε, prompt windows,
+    # eval prompt picks, DataLoader worker RNG. cuDNN determinism NOT enforced (~5–10% perf
+    # cost) — fine for A/B. Bucketed sampler has its own hardcoded np.random seed, so the 5
+    # overfit batches stay fixed regardless of cfg.seed.
     torch.manual_seed(cfg.seed)
     random.seed(cfg.seed)
 
@@ -707,8 +675,7 @@ def train(cfg: DictConfig):
             "input. Set inference_data_loss_sweep: [] if you don't want the sweep."
         )
     if cfg.setup.overfit_single_batch:
-        # Catches the case where model/base.yaml adds a new dropout key and the
-        # per-experiment model/overfit_test.yaml forgets to override it.
+        # Catches model/base.yaml adding a dropout key that overfit_test.yaml forgot to override.
         nonzero_dropouts = {k: v for k, v in _collect_dropout_keys(cfg.model).items() if v != 0.0}
         assert not nonzero_dropouts, (
             f"overfit_single_batch=True but these dropout keys are non-zero in cfg.model: "
@@ -718,9 +685,8 @@ def train(cfg: DictConfig):
     log_dir = PROJECT_ROOT / cfg.setup.log_subdir
     log_name = f"{cfg.setup.log_name}.log"
     log_dir.mkdir(parents=True, exist_ok=True)
-    # Ensure the safetensors + ckpt.pt save targets exist before any write.
-    # CHECKPOINTS_DIR (= models/checkpoints) may be absent on fresh containers
-    # that have models/ from encodec setup but no checkpoints subdir yet.
+    # Ensure save targets exist before any write. CHECKPOINTS_DIR may be absent on fresh
+    # containers (models/ from encodec setup, no checkpoints subdir yet).
     CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
     setup_file_logger(logger, log_dir / log_name)
     
@@ -729,16 +695,15 @@ def train(cfg: DictConfig):
     dev_loader, dev_dataset = create_dataloader(cfg, cfg.dataset.dev_split, train_dataset.token_vocabulary_path)
     test_loader, test_dataset = create_dataloader(cfg, cfg.dataset.test_split, train_dataset.token_vocabulary_path)
 
-    # Shared tokenizer with espeak backend: feeds vocab_size to model construction
-    # AND is attached as model._inference_tokenizer below so the eval block's
-    # generate_audio() calls hide phoneme plumbing.
+    # Shared tokenizer (espeak backend): feeds vocab_size to model construction AND attached
+    # as model._inference_tokenizer so eval-block generate_audio() hides phoneme plumbing.
     inference_tokenizer = PhonemeTokenizer(
         token_vocabulary_path=train_dataset.token_vocabulary_path, with_backend=True,
     )
     token_vocabulary_size = inference_tokenizer.token_vocabulary_size
 
     # Eval block's static text prompts. generate_audio re-phonemizes per call
-    # (~50ms × 4 prompts × eval intervals — negligible per inference.md §4.2).
+    # (~50 ms × 4 prompts × eval intervals — negligible).
     custom_prompts = [
         "Hello, world! This is a test.", # Short (~3s)
         "The quick brown fox jumps over the lazy dog, while the sun sets.", # Medium (~6s)
@@ -763,8 +728,7 @@ def train(cfg: DictConfig):
     best_dev_loss = 1e9
     start_epoch = 0
     start_batch_idx = 0
-    # Persistent INCREMENTAL wandb.Tables, keyed by table name, so eval audio
-    # accumulates across eval firings instead of each eval overwriting the last.
+    # Persistent INCREMENTAL wandb.Tables (keyed by name) → eval audio accumulates across firings.
     incremental_audio_tables: dict = {}
 
     # Instantiate Model
@@ -780,8 +744,7 @@ def train(cfg: DictConfig):
         ckpt_path = CHECKPOINTS_DIR / 'ckpt.pt'
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
 
-        # Rebuild from the cfg the checkpoint was trained with so the
-        # architecture matches exactly even if base.yaml has since changed.
+        # Rebuild from the checkpoint's own cfg → architecture matches even if base.yaml drifted.
         ckpt_cfg = model_cfg_from_omegaconf(checkpoint['model_cfg'])
         model = NaturalSpeech2Model(
             ckpt_cfg,
@@ -796,8 +759,7 @@ def train(cfg: DictConfig):
         best_dev_loss = checkpoint['best_dev_loss']
         start_epoch = checkpoint['epoch']
 
-        # Subsequent checkpoints must save the cfg the model was actually built with,
-        # not the (possibly drifted) Hydra cfg captured above on resume.
+        # Save the cfg the model was built with, not the (possibly drifted) Hydra cfg.
         model_cfg_dict = checkpoint['model_cfg']
         start_batch_idx = checkpoint['batch_idx'] # Already points to the next batch due to pre-fetch
 
@@ -805,9 +767,8 @@ def train(cfg: DictConfig):
 
     model.to(device)
 
-    # Attach inference helpers for the eval block's generate_audio() calls.
-    # These are non-Parameter/Buffer attributes — don't pollute state_dict, don't
-    # affect torch.compile, don't affect forward(). generate_audio() reads them.
+    # Attach inference helpers for eval-block generate_audio(). Plain attributes (not
+    # Parameter/Buffer) → don't touch state_dict, torch.compile, or forward().
     model._inference_tokenizer = inference_tokenizer
     model._inference_sampling_rate = sampling_rate
 
@@ -866,8 +827,8 @@ def train(cfg: DictConfig):
     unoptimized_model = model
     model = torch.compile(model)
 
-    # Declared outside the wandb.log gate so render_fixed_dev_refs_table can
-    # iterate it safely on `wandb.log: False` debug runs (empty list → no rows).
+    # Outside the wandb.log gate so render_fixed_dev_refs_table iterates safely on
+    # wandb.log=False debug runs (empty list → no rows).
     table_2_refs = []
     test_refs = []
     if cfg.wandb.log:
@@ -885,10 +846,8 @@ def train(cfg: DictConfig):
         num_static_refs = cfg.setup.num_audio_refs
         prompt_samples_len = int(cfg.model.prompt_seconds * sampling_rate)
 
-        # Dedicated seeded RNGs so the eval reference clips are identical across runs
-        # and decoupled from any other global-random usage — that stability is the
-        # point of these tables (cross-run A/B on the same audio). When training on
-        # dev: dev refs = trained-on, test refs = held-out.
+        # Dedicated seeded RNGs → eval reference clips identical across runs, decoupled from other
+        # global-random usage (cross-run A/B). Training on dev: dev refs = trained-on, test = held-out.
         table_2_refs = build_fixed_refs(dev_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed))
         test_refs = build_fixed_refs(test_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed + 1))
 
@@ -910,18 +869,18 @@ def train(cfg: DictConfig):
     logger.info(f"  - Relative Fluctuation (CV): {cv_logical:.1%}. Target: < 10% for good stability.")
 
     if cfg.setup.loss_analysis_run:
-        loss_analysis_start_iter = int(cfg.setup.max_iters * 0.8)   # Last 20% of steps for loss analysis to ensure stable logged values
+        loss_analysis_start_iter = int(cfg.setup.max_iters * 0.8)   # last 20% of steps (stable logged values)
         loss_analysis_accumulators = {}
         loss_analysis_steps_counted = 0
 
     if cfg.setup.dropout_trial_run:
-        # Fresh per-eval held-out dump — truncate any stale data at this path from a prior run.
+        # Truncate any stale dump from a prior run.
         dropout_trial_out_path = PROJECT_ROOT / cfg.setup.dropout_trial_out
         dropout_trial_out_path.parent.mkdir(parents=True, exist_ok=True)
         dropout_trial_out_path.write_text("")
         
     if cfg.setup.gradient_analysis_run:
-        grad_analysis_start_iter = int(cfg.setup.max_iters * 0.8)   # Last 20% of steps for gradient analysis to ensure stable logged values
+        grad_analysis_start_iter = int(cfg.setup.max_iters * 0.8)   # last 20% of steps (stable logged values)
         grad_norm_accumulators = {}
         cos_sim_accumulators = {}
         grad_analysis_steps_counted = 0
@@ -930,10 +889,8 @@ def train(cfg: DictConfig):
     last_log_time = time.perf_counter()
     last_log_iter = start_iter - 1
 
-    # Filled on the first loop iter when the overfit_batch table is active.
-    # Overfit cycling (get_infinite_batches) yields the same 5 Python objects
-    # forever, so caching `lookahead_queue[0]` once gives every subsequent eval
-    # firing a stable reference batch.
+    # Filled on the first loop iter when overfit_batch table is active. Overfit cycling yields
+    # the same 5 objects forever, so caching lookahead_queue[0] once gives a stable ref batch.
     overfit_ref_batch = None
 
     for iter_num in range(start_iter, cfg.setup.max_iters):
@@ -954,8 +911,7 @@ def train(cfg: DictConfig):
         global_denominators = compute_denominators(lookahead_queue, cfg)
         examples_this_step = sum(b["audio"].shape[0] for b in lookahead_queue)
 
-        # Cache the overfit batch once: overfit cycling guarantees lookahead_queue[0]
-        # is the same Python object every iter, so a single capture suffices.
+        # Cache overfit batch once — cycling guarantees lookahead_queue[0] is the same object each iter.
         if overfit_ref_batch is None and "overfit_batch" in cfg.setup.audio_tables:
             overfit_ref_batch = lookahead_queue[0]
 
@@ -997,7 +953,7 @@ def train(cfg: DictConfig):
         if analyzer:
             logger.info(f"Performing gradient analysis for step {iter_num} (this takes extra time)...")
                 
-            # Capture RNG states for mathematical fairness during analysis passes
+            # Capture RNG states for fair per-term analysis passes
             cpu_rng_state = torch.get_rng_state()
             gpu_rng_state = torch.cuda.get_rng_state(device)
                 
@@ -1007,7 +963,7 @@ def train(cfg: DictConfig):
             loss_idx = 0
             
             while True:
-                # Restore RNG state for perfect replication of the forward pass per loss term
+                # Restore RNG → identical forward per loss term
                 torch.set_rng_state(cpu_rng_state)
                 torch.cuda.set_rng_state(gpu_rng_state, device=device)
                 
@@ -1023,10 +979,10 @@ def train(cfg: DictConfig):
                         loss_term = weighted_tensors[loss_keys[loss_idx]]
                     loss_term.backward()
                     
-                    # Prevent High-Water Mark VRAM spikes: immediately free unused graphs
+                    # Free graphs immediately → avoid VRAM high-water spikes
                     del b_gpu, loss_dict, _loss, _logged_losses, weighted_tensors, loss_term
                 
-                # Extract the standard .grad attributes to CPU
+                # .grad → CPU
                 analyzer.extract_gradients(unoptimized_model, loss_keys[loss_idx])
                 optimizer.zero_grad(set_to_none=True)
                 
@@ -1034,8 +990,7 @@ def train(cfg: DictConfig):
                 if loss_idx >= len(loss_keys):
                     break
                 
-            # 3. Standard update pass over the exact same data
-            # Restore RNG state one last time so the actual training step aligns with the analysis
+            # 3. Standard update pass over the same data; restore RNG so the real step aligns with analysis
             torch.set_rng_state(cpu_rng_state)
             torch.cuda.set_rng_state(gpu_rng_state, device=device)
             
@@ -1062,7 +1017,7 @@ def train(cfg: DictConfig):
                     
                 loss.backward()
                 
-                # GPU-side accumulation of detached scalars purely for logging
+                # accumulate detached scalars for logging
                 accum_loss += loss.detach()
                 for k, v in logged_losses.items():
                     accum_logged_losses[k] = accum_logged_losses.get(k, 0.0) + v
@@ -1122,19 +1077,18 @@ def train(cfg: DictConfig):
                     "Train: Metrics/Learning Rate": lr,
                     "Train: Metrics/Gradient Norm": grad_norm.item(),
                 }
-                # Log individual balanced loss components as well — .item() here
-                # (inside log_interval) so we don't sync the GPU every step.
+                # Balanced loss components; .item() inside log_interval → no per-step GPU sync.
                 for k, v in accum_logged_losses.items():
                     log_payload[f"{get_loss_section(k, 'Train')}/{k}"] = v.item()
 
-                # Each raw term's share of the summed raw magnitudes — flat once the balance stabilizes 
-                # (run-length signal in loss_analysis; drift signal in the main run).
+                # Each raw term's share of summed raw magnitudes — flat once balance stabilizes
+                # (drift signal in the main run).
                 raw_terms = {k: v for k, v in accum_logged_losses.items() if not k.endswith("_weighted")}
                 raw_total = sum(raw_terms.values())
                 for k, v in raw_terms.items():
                     log_payload[f"Train: Loss Composition (Raw Fraction)/{k}"] = (v / raw_total).item()
 
-                # Perform expensive gradient analysis only when logging
+                # Gradient analysis only when logging (expensive)
                 if analyzer is not None:
                     grad_norms, cos_sims = analyzer.compute_metrics()
                     for k, v in grad_norms.items():
@@ -1158,9 +1112,8 @@ def train(cfg: DictConfig):
                     )
                     log_payload["EMA/effective_halflife_kimg"] = min(cur_kimg, ema.halflife_kimg)
                     log_payload["EMA/cur_kimg"] = cur_kimg
-                    # RMS drift between live and shadow weights — grows during
-                    # training then plateaus once the shadow centers on the
-                    # SGD oscillation around the loss minimum.
+                    # RMS drift between live and shadow weights — grows, then plateaus as the
+                    # shadow centers on the SGD oscillation around the loss minimum.
                     with torch.no_grad():
                         drift_sq = torch.zeros((), device=device)
                         n_drift = 0
@@ -1172,7 +1125,7 @@ def train(cfg: DictConfig):
 
                 wandb.log(log_payload, step=iter_num)
 
-            # Accumulate unweighted raw losses exclusively for the analysis table
+            # Accumulate raw unweighted losses for the analysis table
             if cfg.setup.loss_analysis_run and iter_num >= loss_analysis_start_iter:
                 loss_analysis_steps_counted += 1
                 for k, v in accum_logged_losses.items():
@@ -1224,8 +1177,7 @@ def train(cfg: DictConfig):
             logger.info(f"  {k}: {avg:.4f}")
         logger.info("===========================================")
 
-        # Suggested loss_weights to hit the configured target contribution shares
-        # (model.loss_balance_targets), anchored so data_loss's weight stays 1.0.
+        # Suggested loss_weights to hit configured target shares (loss_balance_targets), anchored data_loss=1.0.
         targets = OmegaConf.to_container(cfg.model.loss_balance_targets, resolve=True)
         magnitudes = {k: v / loss_analysis_steps_counted for k, v in loss_analysis_accumulators.items()}
         suggested = compute_suggested_loss_weights(magnitudes, targets, anchor="data_loss")
@@ -1261,9 +1213,8 @@ def train(cfg: DictConfig):
     # -----------------------------
     # Final eval pass + inference-iterable safetensors save
     # -----------------------------
-    # The eval block runs once more at iter_num=max_iters under EMA shadow
-    # weights, then a separate ema.swap_in bracket writes the final safetensors
-    # (EMA.swap_in is non-reentrant, so the two cannot be nested).
+    # Final eval at iter_num=max_iters under EMA shadow weights; then a separate ema.swap_in
+    # writes the final safetensors (swap_in is non-reentrant → can't nest the two).
     final_eval_deps = EvalDeps(
         iter_num=cfg.setup.max_iters,
         unoptimized_model=unoptimized_model,
@@ -1292,7 +1243,7 @@ def train(cfg: DictConfig):
 
 
 if __name__ == "__main__":
-    # Enable PyTorch Memory Expansion to heavily mitigate fragmentation
+    # Memory expansion → mitigate fragmentation
     if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     train()

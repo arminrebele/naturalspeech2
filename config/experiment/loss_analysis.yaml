@@ -1,17 +1,12 @@
 # @package _global_
 #
-# Hydra "experiment" pattern: additive overrides on top of config.yaml's defaults.
+# Hydra experiment pattern: additive overrides on config.yaml's defaults.
 #   python scripts/train.py +experiment=loss_analysis
 #
-# LR schedule stays at base.yaml's ISR — matches the main run so the
-# unweighted-loss balance readout reflects the schedule the production model
-# will see. Cosine's min_lr tail would over-settle the magnitudes.
-#
-# Uses the train split (inherits from dataset/mls_eng.yaml). The MLS dev split
-# is too small — only ~3807 rows, so a 10000-iter run cycles it many times over
-# (the loader re-epochs), making the magnitude readout reflect memorized repeats
-# rather than the balance the production train run sees (commit fa68d66 reverted
-# the dev experiment after hitting this).
+# LR stays at base.yaml's ISR — matches the main run so the unweighted-loss balance readout
+# reflects the production schedule (cosine's min_lr tail would over-settle magnitudes).
+# Train split (MLS dev is too small at ~3807 rows → a 10000-iter run re-epochs it many times,
+# making the readout reflect memorized repeats, not the production balance).
 
 defaults:
   - override /model: loss_analysis

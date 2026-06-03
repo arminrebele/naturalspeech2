@@ -54,9 +54,7 @@ class TransformerEncoderLayer(nn.Module):
         return x
 
 class RMSNorm(nn.Module):
-    """
-    x_norm = x / sqrt(mean(x^2) + eps) * gamma
-    """
+    """x_norm = x / sqrt(mean(x^2) + eps) * gamma"""
     def __init__(
             self,
             hidden_dim: int,
@@ -71,43 +69,25 @@ class RMSNorm(nn.Module):
             x       # [B, T, D]
     ):
         dtype = x.dtype
-        x_f = x.float() # upcast to float32 for stable mean(x^2) calculation
+        x_f = x.float() # upcast to fp32 for stable mean(x^2)
         rms_recip = torch.rsqrt(x_f.pow(2).mean(dim=-1, keepdim=True) + self.eps)
         return (x_f * rms_recip).to(dtype) * self.weight
 
 
 """
 ##### RoPE #####
-m: Token position (index 0, 1, 2, ...)
-d: Head-embedding dimension (must be even)
-i: Pair index (0, 1, 2, ..., d/2-1)
+m: token position (0, 1, 2, ...)   d: head dim (even)   i: pair index (0 .. d/2-1)
 
-theta_i = 10000^( -2i/d )    #base frequency for pair i
-alpha = m * theta_i          #angle for token position m and pair i
+theta_i = 10000^(-2i/d)    # base frequency for pair i
+alpha   = m * theta_i      # rotation angle for position m, pair i
 
 (x, y) = (x_m_i, y_m_i)
+x' = x*cos(alpha) - y*sin(alpha)
+y' = x*sin(alpha) + y*cos(alpha)
 
-x' = x * cos(alpha) - y * sin(alpha)
-y' = x * sin(alpha) + y * cos(alpha)
-
-=> (x', y')
-
-Example:
-dim_head = 64 => 32 pairs of (x, y)
-max_seq_len = 2048
-[2048 x 32]
-
-- calculate theta_i for i in [0, 31]
-- calculate alpha = m * theta_i for m in [0, 2047]
-=> [2048 x 32] matrix with alpha values
-- calculate cos(alpha) and sin(alpha) matrices
-=> [2048 x 32] matrices for cos and sin => [2048 x 64]
-Therefore we can precompute the cos and sin matrices for a given max_seq_len and dim_head.
-During inference for a given input sequence length, slice the precomputed cos and sin matrices,
-and use them to calculate the rotated (x', y') values.
-
-Implementation follows Andrej Karpathy's nanoChat approach, applying RoPE on contiguous halves (sliced)
-rather than interleaved pairs, to avoid the rotate_half shuffle overhead.
+Precompute cos/sin as [max_seq_len, d/2] (e.g. head_dim=64 → 32 pairs); at runtime slice
+to seq_len and rotate. Follows Karpathy's nanoChat: RoPE on contiguous halves (sliced),
+not interleaved pairs → avoids rotate_half shuffle.
 """
 
 class RotaryEmbedding(nn.Module):
@@ -199,12 +179,11 @@ class MultiHeadSelfAttention(nn.Module):
         k = rearrange(k, 'b t (h d) -> b h t d', h=self.num_heads)
         v = rearrange(v, 'b t (h d) -> b h t d', h=self.num_heads)
 
-        cos, sin = self.rotary_embedding(x.shape[1]) # # [1, T, 1, head_dim/2]
+        cos, sin = self.rotary_embedding(x.shape[1]) # each [1, 1, T, head_dim/2]
         q = apply_rotary_embeddings(q, cos, sin) # [B, num_heads, T, head_dim]
         k = apply_rotary_embeddings(k, cos, sin) # [B, num_heads, T, head_dim]
 
-        # scaled_dot_product_attention adds attn_mask to the scores
-        # 0. 0 for valid tokens, -inf for padding
+        # SDPA adds attn_mask to scores: 0 for valid tokens, -inf for padding
         attn_mask = rearrange(mask, 'b t 1 -> b 1 1 t')
         attn_mask = torch.where(attn_mask, 0.0, float('-inf'))
 
@@ -296,7 +275,7 @@ class Conv1D(nn.Module):
     ):
         x = x * mask.to(x.dtype)
         # empty_strided + copy_ forces channels-first materialization; .contiguous() after
-        # permute is silently elided by Inductor's clone-elimination pass on PyTorch 2.9.1.
+        # permute is silently elided by Inductor's clone-elimination (PyTorch 2.9.1).
         x_view = x.permute(0, 2, 1)
         B, D, T = x_view.shape
         x = torch.empty_strided((B, D, T), (D * T, T, 1), dtype=x.dtype, device=x.device)

@@ -37,10 +37,9 @@ class PitchPredictor(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        # Standard N(0, 0.02) base, then Fixup-style zero-init of every residual-output
-        # projection (convs[i] feeds the conv residual; attns[i].to_out feeds the cross-attn
-        # residual) and the final prediction heads (to_pitch, to_voicing). All 40 residual
-        # writes share the same stream — every block is identity-at-init.
+        # N(0,0.02) base + Fixup zero-init of every residual-output projection (convs feed
+        # conv residual, attns.to_out feed cross-attn residual) and the heads (to_pitch,
+        # to_voicing) → all 40 residual writes share one stream, every block identity-at-init.
         standard_init(self)
         for conv in self.convs:
             nn.init.zeros_(conv.conv1d.weight)

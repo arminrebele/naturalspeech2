@@ -69,7 +69,7 @@ def stress_test(cfg: DictConfig):
     logger.info(f"\nStarting {num_iterations} iterations of forced shape fragmentation...")
     
     for i in tqdm(range(num_iterations)):
-        # Randomly select a shape to force maximum dynamic memory allocation jumping
+        # Random shape → force max dynamic-allocation jumping
         bucket = random.choice(enhanced_buckets)
         
         batch = generate_dummy_batch(
@@ -129,7 +129,7 @@ def stress_test(cfg: DictConfig):
     logger.info("==========================================\n")
 
 if __name__ == "__main__":
-    # Enable PyTorch Memory Expansion to heavily mitigate fragmentation
+    # Memory expansion → mitigate fragmentation
     if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     stress_test()

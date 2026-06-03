@@ -10,6 +10,6 @@ services:
             - driver: nvidia
               capabilities: [gpu]
               count: all
-    # This keeps the container's bash shell alive if started in the background
+    # Keep the bash shell alive when started in background
     tty: true
     stdin_open: true

@@ -4,7 +4,7 @@ set -e
 # Create the data directory where paths.py expects it
 mkdir -p /workspace/data
 
-# Check if MERGERFS_DISKS is provided via environment variable
+# Merge data disks if MERGERFS_DISKS is set
 if [ -n "$MERGERFS_DISKS" ]; then
     echo "Merging $MERGERFS_DISKS into /workspace/data..."
     mergerfs -o category.create=mfs,allow_other "$MERGERFS_DISKS" /workspace/data
@@ -12,22 +12,15 @@ else
     echo "Warning: MERGERFS_DISKS not set. Skipping mergerfs."
 fi
 
-# Build the monotonic_align Cython extension when needed.
-# The .so cannot live in the Docker image because the bind-mount (./:/workspace)
-# overlays the source tree at runtime; the .so persists in the host filesystem.
-#
-# Two complementary checks (rebuild if EITHER triggers):
-#   1. Import test — catches missing .so, broken ABI, missing OpenMP linkage.
-#   2. Mtime check — catches stale .so (source/build script newer than artifact).
-#      The import test alone passes for a same-ABI stale .so, e.g. one built
-#      before a `num_threads=b` change in core.pyx — a silent perf regression.
+# Build the monotonic_align Cython extension when needed. The .so can't live in the image —
+# the bind-mount (./:/workspace) overlays the source tree at runtime; the .so persists on the host.
+# Rebuild if EITHER: (1) import fails (missing .so / broken ABI / missing OpenMP), or
+# (2) source/build script newer than the .so (same-ABI stale .so = silent perf regression).
 MA_DIR=/workspace/naturalspeech2/ops/monotonic_align
 NEEDS_BUILD=0
 
-# Probe with an import that returns the actual loaded .so path. Combining
-# both into one Python call means the mtime check is guaranteed to compare
-# against the file Python actually imports — no glob, no head -n1 picking
-# the wrong .so if multiple ABI tags ever coexist.
+# Import returns the actual loaded .so path → mtime check compares the file Python imports
+# (no glob / head picking the wrong .so if multiple ABI tags coexist).
 SO_FILE=$(python -c "from naturalspeech2.ops.monotonic_align import core; print(core.__file__)" 2>/dev/null || true)
 
 if [ -z "$SO_FILE" ]; then
@@ -41,5 +34,5 @@ if [ $NEEDS_BUILD -eq 1 ]; then
     (cd "$MA_DIR" && python setup.py build_ext --inplace)
 fi
 
-# Execute the command passed to docker run (defaults to 'bash')
+# Run the docker command (default: bash)
 exec "$@"

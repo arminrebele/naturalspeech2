@@ -1,12 +1,7 @@
 FROM python:3.12-bookworm
 
-# 1. Install system dependencies
-# - mergerfs: for disk merging
-# - espeak-ng: required by phonemizer
-# - ffmpeg: standard backend for torchaudio/video processing
-# - build-essential: required to build C++ extensions like pyworld
-# - fuse: required for mergerfs to run inside the container
-# - libsndfile1: required by the soundfile library
+# 1. System deps: mergerfs + fuse (disk pooling), espeak-ng (phonemizer),
+#    ffmpeg (torchaudio backend), build-essential (pyworld C++ ext), libsndfile1 (soundfile)
 RUN apt-get update && apt-get install -y \
     mergerfs \
     fuse \

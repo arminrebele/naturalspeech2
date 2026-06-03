@@ -1,8 +1,7 @@
 """CLI wrapper around naturalspeech2.inference.generate_audio.
 
-Thin entry point — all real work happens in `naturalspeech2/inference.py`.
-Single-shot only (one clip per invocation); batch generation lives in
-notebook / script consumers that call `generate_audio()` directly.
+Thin entry point — real work is in naturalspeech2/inference.py. Single-shot only
+(one clip per call); batch generation lives in consumers that call generate_audio() directly.
 """
 
 import argparse

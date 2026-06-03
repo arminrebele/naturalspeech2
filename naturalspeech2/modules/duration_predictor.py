@@ -36,10 +36,9 @@ class DurationPredictor(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        # Standard N(0, 0.02) base, then Fixup-style zero-init of every residual-output
-        # projection (convs[i] feeds the conv residual; attns[i].to_out feeds the cross-attn
-        # residual) and the final prediction head (to_duration). All 40 residual writes share
-        # the same stream — every block is identity-at-init.
+        # N(0,0.02) base + Fixup zero-init of every residual-output projection (convs feed
+        # conv residual, attns.to_out feed cross-attn residual) and the head (to_duration)
+        # → all 40 residual writes share one stream, every block identity-at-init.
         standard_init(self)
         for conv in self.convs:
             nn.init.zeros_(conv.conv1d.weight)
@@ -50,15 +49,15 @@ class DurationPredictor(nn.Module):
     def forward(
             self,
             phoneme_encodings,       # [B, P, hidden_dim]
-            phoneme_encodings_mask,  # [B, P, 1]            | dtyppe = bool (True/False)
+            phoneme_encodings_mask,  # [B, P, 1] bool
             prompt_encodings,        # [B, Fp, hidden_dim]
             prompt_encodings_mask,   # [B, Fp, 1]
     ):
         x = phoneme_encodings
         mask = phoneme_encodings_mask.to(x.dtype)
 
-        for group_idx in range(len(self.attns)):            # loop over 10 groups. Each group = 3 conv blocks + 1 attention block
-            for conv_idx in range(self.conv_per_group):     # loop over 3 conv blocks within the group
+        for group_idx in range(len(self.attns)):            # 10 groups: 3 conv blocks + 1 attn block each
+            for conv_idx in range(self.conv_per_group):     # 3 conv blocks
                 layer_idx = group_idx * self.conv_per_group + conv_idx
                 residual = x
                 x = self.conv_norms[layer_idx](x)

@@ -1,11 +1,8 @@
 """Build the monotonic_align Cython extension in place.
 
-Run from this directory:
-    python setup.py build_ext --inplace
-
-The resulting `core.cpython-<abi>-<platform>.so` lands next to core.pyx and
-is importable as `naturalspeech2.ops.monotonic_align.core`. The .so is
-gitignored — the entrypoint script rebuilds it on first container start.
+Run from this directory:  python setup.py build_ext --inplace
+Produces core.cpython-<abi>-<platform>.so next to core.pyx, importable as
+naturalspeech2.ops.monotonic_align.core. Gitignored — entrypoint.sh rebuilds on first container start.
 """
 from setuptools import Extension, setup
 from Cython.Build import cythonize

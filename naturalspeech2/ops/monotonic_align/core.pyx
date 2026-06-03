@@ -41,8 +41,7 @@ cpdef void maximum_path_c(int[:,:,::1] paths, float[:,:,::1] values, int[::1] t_
   cdef int b = values.shape[0]
 
   cdef int i
-  # `num_threads=b` overrides any OMP_NUM_THREADS env var (we set =1 globally
-  # for HF datasets preprocessing — see CLAUDE.md "OMP_NUM_THREADS"). One
-  # thread per batch item is the natural granularity here.
+  # num_threads=b overrides any OMP_NUM_THREADS env var (set =1 globally for HF datasets
+  # preprocessing). One thread per batch item is the natural granularity.
   for i in prange(b, nogil=True, num_threads=b):
     maximum_path_each(paths[i], values[i], t_xs[i], t_ys[i], max_neg_val)

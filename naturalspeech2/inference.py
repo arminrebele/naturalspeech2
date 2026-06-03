@@ -1,15 +1,10 @@
 """Library-level inference entry points for NaturalSpeech2.
 
-Wraps the model-level primitives behind text-friendly, file-friendly helpers
-used by the CLI, the training-loop eval block, notebooks, and downstream
-projects (`fakeinversion-speech` planned).
-
-Three-layer architecture (see .claude/plans/inference.md §2):
-
-    Layer 1: naturalspeech2.modules.diffusion_model.DiffusionModel.sample
-    Layer 2: naturalspeech2.model.NaturalSpeech2Model.generate
-    Layer 3: this module — load_inference_model, generate_audio,
-             compute_inference_data_loss
+Text/file-friendly wrappers over the model primitives, used by the CLI, training-loop
+eval block, notebooks, and downstream projects. Three layers:
+    1. DiffusionModel.sample          (sampler)
+    2. NaturalSpeech2Model.generate   (full pipeline)
+    3. this module — load_inference_model, generate_audio, compute_inference_data_loss
 """
 
 import logging
@@ -37,12 +32,8 @@ logger = logging.getLogger(__name__)
 # ----------------------------------------------------------------------------
 
 def _load_default_cfg() -> DictConfig:
-    """Compose the project default Hydra config (config/config.yaml + groups).
-
-    Used when `load_inference_model(cfg=None)`. Hydra's GlobalHydra singleton
-    is cleared before initializing to support repeated calls from the same
-    process (notebook re-runs, CLI scripts that load multiple checkpoints).
-    """
+    """Compose the default Hydra config (config/config.yaml + groups); used when cfg=None.
+    Clears Hydra's GlobalHydra singleton first → supports repeated calls in one process."""
     from hydra import compose, initialize_config_dir
     from hydra.core.global_hydra import GlobalHydra
 
@@ -53,10 +44,8 @@ def _load_default_cfg() -> DictConfig:
 
 
 def _resolve_vocab_path(cfg: DictConfig) -> Path:
-    """Resolve token_vocabulary_path from cfg, mirroring DatasetWrapper's resolution.
-
-    Vocab is a dataset-level artifact: one file per dataset, shared across splits.
-    """
+    """Resolve token_vocabulary_path from cfg (mirrors DatasetWrapper). Vocab is
+    dataset-level: one file per dataset, shared across splits."""
     explicit = cfg.dataset.token_vocabulary_path
     if explicit is not None:
         return Path(explicit)
@@ -73,16 +62,9 @@ def _load_audio(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Load + normalize a reference clip → ([1, T] float32 on device, [1] long length).
 
-    Accepts path / numpy / tensor. For paths, the source sample rate is read
-    from the file header. For numpy / tensor inputs, the source sample rate
-    is whatever the caller passes as `orig_sr`; if `orig_sr is None`, the
-    input is assumed to already be at `target_sr` (the common case for
-    pre-resampled training-loop slices). Resamples via
-    `torchaudio.functional.resample`, mean-collapses multi-channel to mono.
-
-    If `prompt_seconds_warning_threshold` is set, emits a warning when the
-    final clip is shorter than that (in seconds). The threshold is the model's
-    training prompt length — see plan §4.2.1.
+    Accepts path / numpy / tensor. Path: src sr from file header. numpy/tensor: src sr =
+    orig_sr, or target_sr if None (pre-resampled training slices). Resamples, mono-collapses.
+    prompt_seconds_warning_threshold set → warn if the clip is shorter (model's training prompt length).
     """
     if isinstance(src, (str, Path)):
         data, sr = sf.read(str(src), dtype="float32")
@@ -101,10 +83,8 @@ def _load_audio(
             f"reference_audio must be Path/str/np.ndarray/torch.Tensor, got {type(src).__name__}"
         )
 
-    # Defensive: collapse [C, T] or [T, C] → [T]. The dataset path is always
-    # mono by the time we see it, but external callers may hand in stereo wavs.
-    # Square shapes ([T, T]) are pathological; pick `dim=0` to match the more
-    # common stereo layout, since "is this 1-sample wav" is a non-real case.
+    # Collapse [C, T] or [T, C] → [T] for external stereo wavs (dataset path is already mono).
+    # Square [T, T] is pathological; dim=0 matches the common stereo layout.
     if audio.dim() == 2:
         collapse_dim = 0 if audio.shape[0] <= audio.shape[1] else 1
         audio = audio.mean(dim=collapse_dim)
@@ -135,10 +115,7 @@ def _phonemize_to_tokens(
     device: str | torch.device = "cuda",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """text → ([1, P] long tokens on device, [1, P, 1] bool mask).
-
-    `tokenizer(str)` runs espeak then maps phonemes → IDs in one call (see
-    `PhonemeTokenizer.__call__`).
-    """
+    tokenizer(str) runs espeak then maps phonemes → IDs in one call."""
     tokens_list = tokenizer(text)
     tokens = torch.tensor(tokens_list, dtype=torch.long, device=device)
     tokens = rearrange(tokens, "p -> 1 p")
@@ -157,16 +134,11 @@ def load_inference_model(
     cfg: DictConfig | None = None,
     device: str = "cuda",
 ) -> NaturalSpeech2Model:
-    """Build the model from cfg, load weights, move to device, set eval mode.
+    """Build model from cfg, load weights, move to device, eval mode.
 
-    `cfg=None` falls back to composing the project default
-    (`config/config.yaml` with all `defaults:` groups resolved via Hydra).
-
-    The best-only safetensors checkpoint stores EMA-averaged weights as its
-    primary state_dict, so the loader picks them up transparently.
-
-    Attaches a phonemizing `PhonemeTokenizer` at `model._inference_tokenizer`
-    so downstream `generate_audio()` calls don't need it threaded through.
+    cfg=None → compose the project default (config/config.yaml). The best-only safetensors
+    stores EMA weights as its state_dict, so they load transparently. Attaches a PhonemeTokenizer
+    at model._inference_tokenizer so generate_audio() needn't thread it through.
     """
     if cfg is None:
         cfg = _load_default_cfg()
@@ -190,18 +162,16 @@ def load_inference_model(
         token_vocabulary_size=token_vocabulary_size,
         sampling_rate=sampling_rate,
     )
-    # safetensors.torch.load_model runs _remove_duplicate_names over the model's
-    # state_dict, which errors on buffers whose storage isn't covered by a single
-    # name (torchaudio's spectrogram `window`, encodec's LSTM `_flat_weights`).
-    # load_file + plain load_state_dict copies by name and is indifferent to
-    # storage sharing — the load-side counterpart of the _save_safetensors
-    # clone-on-save workaround in scripts/train.py.
+    # safetensors.torch.load_model runs _remove_duplicate_names, which errors on buffers whose
+    # storage isn't covered by one name (torchaudio `window`, encodec LSTM `_flat_weights`).
+    # load_file + load_state_dict copies by name, storage-sharing-indifferent — load-side
+    # counterpart of the _save_safetensors clone-on-save workaround.
     model.load_state_dict(load_file(str(checkpoint_path)))
     model.to(device)
     model.eval()
 
-    # Attach inference helpers — non-Parameter / non-Buffer attributes so they
-    # don't pollute state_dict, don't affect compilation, don't affect forward.
+    # Attach inference helpers — plain attributes (not Parameter/Buffer) → don't touch
+    # state_dict, compilation, or forward.
     model._inference_tokenizer = tokenizer
     model._inference_sampling_rate = sampling_rate
 
@@ -215,22 +185,13 @@ def generate_audio(
     target_text: str,
     sampling_steps: int = 150,
 ) -> tuple[np.ndarray, int]:
-    """Reference audio + text → synthesized audio.
+    """Reference audio + text → synthesized audio (Layer-3 wrapper over model.generate()).
 
-    Layer-3 wrapper around `model.generate()`. Phonemization + tokenization
-    happen inside via the cached tokenizer attached to the model. Caller hands
-    in a text string; never sees phonemes.
-
-    `reference_audio` accepts a file path (any soundfile-readable format),
-    numpy array, or torch tensor. Auto-resampled to the model's training
-    sample rate. Auto-batched to [1, T] float32 on the model's device.
-
-    Returns (audio_np, valid_length) — caller trims `audio_np[:valid_length]`
-    before writing to disk for B=1 invocations.
-
-    Requires `model._inference_tokenizer` (and ideally `_inference_sampling_rate`)
-    to be set; `load_inference_model` does this. The training loop sets it once
-    at setup so the eval block can call generate_audio uniformly.
+    Phonemization + tokenization happen inside via the model's cached tokenizer; caller
+    passes text, never phonemes. reference_audio = path / numpy / tensor, auto-resampled to
+    the training sample rate, auto-batched to [1, T] float32 on the model's device.
+    Returns (audio_np, valid_length); trim audio_np[:valid_length] for B=1.
+    Requires model._inference_tokenizer (set by load_inference_model / the training loop).
     """
     tokenizer = getattr(model, "_inference_tokenizer", None)
     if tokenizer is None:
@@ -242,9 +203,8 @@ def generate_audio(
 
     device = next(model.parameters()).device
     sampling_rate = getattr(model, "_inference_sampling_rate", SAMPLING_RATE)
-    # Recover trained prompt_seconds from model.prompt_frames so the OOD
-    # warning fires when the user-provided clip is shorter than what the model
-    # has seen during training (plan §4.2.1).
+    # Recover trained prompt_seconds from model.prompt_frames → OOD warning when the
+    # reference clip is shorter than training prompts.
     prompt_seconds = (model.prompt_frames * ENCODER_HOP_LENGTH) / sampling_rate
 
     ref_audio, ref_lengths = _load_audio(
@@ -277,25 +237,16 @@ def compute_inference_data_loss(
     batch: dict,
     sampling_steps_sweep: tuple[int, ...] = (150, 300, 600, 1000),
 ) -> dict[int, float]:
-    """Latent-space diagnostic. For each n_steps in the sweep:
-
-      1. Forward pass with return_diffusion_inputs=True → recover GT
-         condition_target + prompt_encodings + GT z₀ (in normalized space).
-      2. Call model.diffusion_model.sample(condition=..., sampling_steps=n_steps).
-      3. Masked MSE between sampled z₀ and GT z₀.
-
-    Returns {n_steps: loss_float}. Bypasses Encodec decoding entirely —
-    measures solver fidelity directly in latent space, isolating "is the
-    diffusion sampler producing the right latents" from decoder behavior.
-
-    Lifted from scripts/train.py:839-867. Accepts any batch dict the dataloader
-    produces — not restricted to the overfit batch. Non-tensor batch fields
-    (e.g. `text: list[str]`) are filtered out before the model forward.
+    """Latent-space diagnostic. Per n_steps in the sweep:
+      1. forward(return_diffusion_inputs=True) → GT condition_target, prompt_encodings, GT z₀.
+      2. diffusion_model.sample(condition=..., sampling_steps=n_steps).
+      3. masked MSE(sampled z₀, GT z₀).
+    Returns {n_steps: loss}. Bypasses Encodec decode → measures solver fidelity in latent
+    space (isolates sampler from decoder). Accepts any batch dict; non-tensor fields (text) filtered.
     """
     device = next(model.parameters()).device
 
-    # Move only tensor batch fields to device; pass-through non-tensor metadata
-    # (text) without trying to .to() it.
+    # Move only tensor fields to device; pass non-tensor metadata (text) through.
     b = {
         k: (v.to(device, non_blocking=True) if isinstance(v, torch.Tensor) else v)
         for k, v in batch.items()

@@ -4,17 +4,11 @@ Vendored verbatim from Glow-TTS (Kim et al., NeurIPS 2020):
   https://github.com/jaywalnut310/glow-tts/tree/master/monotonic_align
 MIT licensed; see LICENSE.glow_tts in this directory.
 
-The kernel runs the same monotonic stay-or-move-by-1 Viterbi DP we used to
-express as a Python `for f in range(F)` loop, but as a single C call with
-OpenMP-parallelised batches (`prange(num_threads=B)` — explicitly overrides
-any OMP_NUM_THREADS env var). Primary motivation: a 2249-iter Python loop is
-hostile to `torch.compile` (Inductor would either compile-time-blow-up on the
-unrolled FX graph or recompile per bucket length). Secondary: replaces a
-per-batch storm of tiny CUDA kernels with one CPU op + one `.cpu()` move.
-Measured on the PRO 6000 (2026-05-10): 0.55 ms at typical shapes (B=8, F=375,
-P=60), 5.4 ms at worst-case bucket (B=8, F=2250, P=120). Components at worst
-case: 0.56 ms .cpu() move + 2.25 ms Cython DP + 0.025 ms back-transfer. See
-docs/notes/gpu_bringup.md for the full perf probe.
+Monotonic stay-or-move-by-1 Viterbi DP as one C call with OpenMP-parallel batches
+(prange(num_threads=B), overriding OMP_NUM_THREADS). Primary motivation: a 2249-iter
+Python loop is hostile to torch.compile (Inductor blow-up or per-bucket recompiles).
+Secondary: one CPU op + one .cpu() move instead of a storm of tiny CUDA kernels.
+Cost: 0.55 ms typical (B=8,F=375,P=60), 5.4 ms worst-case bucket (B=8,F=2250,P=120).
 """
 import numpy as np
 import torch
@@ -27,24 +21,16 @@ def maximum_path(
 ) -> torch.Tensor:
     """Cython-optimised monotonic alignment search.
 
-    Returns:
-        path_indices: [B, F] int64, on value.device.
-                      Padded frames (y >= t_ys[b]) are 0 — the kernel only
-                      writes 1s in the valid F-range, so an all-zero column's
-                      argmax returns 0 (matches the previous "padded-frames-
-                      clamped-to-0" contract).
+    Returns path_indices [B, F] int64 on value.device. Padded frames (y ≥ t_ys[b]) are 0
+    (kernel writes 1s only in the valid F-range → all-zero column's argmax = 0).
 
-    The argmax over the [B, P, F] one-hot path runs on CPU before the back-
-    transfer, so we move ~`B·F·8` bytes back to GPU instead of the full
-    `B·P·F·4` bytes. At B=8, P=80, F=2250 that's ~140 KB instead of ~5.8 MB.
+    argmax over the [B, P, F] one-hot runs on CPU before back-transfer → move ~B·F·8 bytes
+    to GPU, not the full B·P·F·4 (~140 KB vs ~5.8 MB at B=8, P=80, F=2250).
 
-    The kernel only iterates valid `(x < t_xs[b], y < t_ys[b])` cells and
-    never reads padded positions, so we don't need to pre-zero `value` at
-    padded positions — whatever's there (e.g. `-1e9` mask floor) is invisible
-    to the DP.
+    Kernel iterates only valid (x < t_xs[b], y < t_ys[b]) cells → no need to pre-zero padded
+    positions (a -1e9 mask floor there is invisible to the DP).
 
-    Imported lazily so MacBook-side code editing / static analysis works
-    without the `.so` (which is built only inside the Docker container).
+    Imported lazily so editing / static analysis works without the compiled .so (built only in Docker).
     """
     try:
         from naturalspeech2.ops.monotonic_align.core import maximum_path_c

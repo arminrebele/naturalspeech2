@@ -2,17 +2,14 @@ defaults:
   - base
   - _self_
 
-# Small-data generalization probe (~3807 dev clips vs the paper's 44k h). base.yaml is now
-# literature-grounded for large data (softmax-map dropout 0.0 everywhere, encoder conv/out
-# 0.1, denoiser fully dry) — already most of what a small-data probe wants, so we override
-# only two things:
-#   - variance-predictor conv_dropout 0.5 → 0.1: the paper's 0.5 over-regularizes an
-#     underfitting predictor on this little data.
-#   - WaveNet gate dropout 0.0 → 0.1: one DDPM-style per-resblock denoiser site for honest
-#     held-out regularization, without the softmax-map / per-block attention dropouts that
-#     would compound through the 40-block FiLM conditioning path.
-# Set these to 0.0 to isolate fitting from regularization. EMA halflife (50) + loss warmups
-# inherit base — long enough here, unlike overfit_test.
+# Small-data generalization probe (~3807 dev clips vs the paper's 44k h). base.yaml is already
+# literature-grounded for large data (softmax-map 0.0, encoder conv/out 0.1, denoiser dry) —
+# most of what a small-data probe wants, so override only two things:
+#   - variance-predictor conv_dropout 0.5 → 0.1: paper's 0.5 over-regularizes the underfitting
+#     predictor on this little data.
+#   - WaveNet gate dropout 0.0 → 0.1: one DDPM-style per-resblock denoiser site for honest held-out
+#     reg, without the softmax-map / per-block attention dropouts that compound through the 40-block FiLM path.
+# Set these to 0.0 to isolate fitting from reg. EMA halflife (50) + loss warmups inherit base (long enough here).
 duration_predictor:
   conv_dropout: 0.1
 pitch_predictor:

@@ -1,18 +1,10 @@
-"""Objective generative-TTS eval metrics — consumer-agnostic, off the autograd path.
+"""Objective TTS eval metrics — consumer-agnostic, off the autograd path.
 
-Currently: **WER** (intelligibility) via HuBERT-Large CTC, no LM
-(`facebook/hubert-large-ls960-ft` — the NS2-lineage ASR; a no-LM CTC model
-transcribes acoustic content faithfully rather than letting a decoder LM paper
-over mispronunciations). The model is a module-level lazy singleton on the idle
-second GPU (so it never touches the training card's memory budget), FP32, no_grad.
-
-SIM-o (speaker similarity, WavLM-Large-SV) is planned in `.claude/plans/eval_metrics.md`
-but deferred pending the s3prl / numpy-2.x dependency spike.
-
-WER is the standard word-level Levenshtein(ref, hyp) / len(ref) with shared
-normalization on both sides. (jiwer / Whisper's EnglishTextNormalizer would give
-exact literature-comparable normalization for the final paper eval — a one-line
-swap in `_word_error_rate`/`_norm_text`; kept dependency-free here.)
+WER (intelligibility) via HuBERT-Large CTC, no LM (`facebook/hubert-large-ls960-ft`):
+no-LM CTC transcribes acoustics faithfully instead of letting a decoder LM paper over
+mispronunciations. Lazy module-level singleton on the idle 2nd GPU (off the training
+card's budget), FP32, no_grad. Standard word-level Levenshtein(ref,hyp)/len(ref),
+shared ref/hyp normalization. SIM-o (speaker similarity) deferred (s3prl/numpy-2.x).
 """
 import re
 from functools import lru_cache
@@ -27,8 +19,7 @@ _MIN_SAMPLES = _ASR_SR // 4   # <0.25 s → degenerate (early-training garbage);
 
 
 def _metric_device() -> str:
-    """Idle second GPU when present (keep metrics off the training card), else the
-    only visible CUDA device, else CPU."""
+    """Idle 2nd GPU if present (keep metrics off training card), else cuda:0, else CPU."""
     if torch.cuda.is_available():
         return "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"
     return "cpu"
@@ -48,8 +39,7 @@ def _to_numpy(audio) -> np.ndarray:
 
 
 def _prep_16k(audio, src_sr: int) -> np.ndarray:
-    """24 kHz numpy OR torch tensor → 16 kHz float32 numpy (accepts both — the generated
-    audio is numpy, an original/prompt reference may be a torch tensor)."""
+    """numpy/torch @ src_sr → 16 kHz float32 numpy (gen audio is numpy; reference may be torch)."""
     wav = torch.from_numpy(np.ascontiguousarray(_to_numpy(audio))).float()
     if src_sr != _ASR_SR:
         wav = taF.resample(wav, src_sr, _ASR_SR)
@@ -57,9 +47,8 @@ def _prep_16k(audio, src_sr: int) -> np.ndarray:
 
 
 def _norm_text(s: str) -> list[str]:
-    """Lowercase, strip punctuation, collapse whitespace → word list. Applied to BOTH
-    ref and hyp — HuBERT-CTC emits uppercase with no punctuation, so comparing raw
-    inflates WER. (Digits stay; MLS/VCTK text is already verbalized — verify per corpus.)"""
+    """Lowercase, strip punct, split → words. Applied to BOTH ref+hyp (HuBERT-CTC emits
+    uppercase/no-punct → raw compare inflates WER). Digits kept (MLS/VCTK text pre-verbalized)."""
     return re.sub(r"[^\w\s']", " ", s.lower()).split()
 
 
@@ -91,8 +80,8 @@ def transcribe(audio, src_sr: int = 24000) -> str:
 
 @torch.no_grad()
 def compute_wer(gen_audio, target_text: str, src_sr: int = 24000) -> float:
-    """WER of ASR(gen_audio) vs target_text. Returns NaN on degenerate audio so it
-    drops out of an np.nanmean aggregate instead of crashing or skewing the mean."""
+    """WER of ASR(gen_audio) vs target_text. NaN on degenerate audio (drops out of
+    np.nanmean instead of crashing/skewing)."""
     if _degenerate(gen_audio):
         return float("nan")
     hyp = transcribe(gen_audio, src_sr)

@@ -5,13 +5,12 @@ from phonemizer.separator import Separator
 PUNCTUATION_SET = set(".,!?;:\"'()[]{}–—…-")
 CLOSING_PUNCTUATION_SET = set(".,!?;:)}…]")
 
-# Split on punctuation, but keep contractions (e.g. don't) together by only splitting ' if not surrounded by word chars.
-# Pre-compiling the regex is more efficient.
+# Split on punctuation; keep contractions (don't) by only splitting ' when not word-surrounded.
 SPLIT_REGEX = re.compile(r"([.,!?;:\"()\[\]{}\-–—…]|(?<!\w)'|'(?!\w))")
 
-# Add space before opening brackets if not preceded by whitespace
+# Space before opening brackets if not preceded by whitespace
 OPENING_BRACKETS_REGEX = re.compile(r'(?<!\s)([(\[{])')
-# Add space after closing punctuation if not followed by whitespace or digit
+# Space after closing punct if not followed by whitespace/digit
 CLOSING_PUNCTUATION_REGEX = re.compile(r'([.,!?;:)}\]…])(?!\s|\d)')
 
 
@@ -26,11 +25,11 @@ class PhonemizerWrapper:
             language_switch='remove-flags' 
         )
         
-        # Define a separator that puts spaces between phones
+        # Separator: | between phones, space between words
         self.separator = Separator(phone="|", word=" ", syllable="")
 
     def _text_to_phonemes(self, text: str) -> list[str]:
-        # Preprocess text to ensure correct spacing around punctuation
+        # Normalize spacing around punctuation
         text = OPENING_BRACKETS_REGEX.sub(r' \1', text)
         text = CLOSING_PUNCTUATION_REGEX.sub(r'\1 ', text)
         
@@ -59,11 +58,11 @@ class PhonemizerWrapper:
         
         phoneme_map = {}
         for idx, p_str in zip(to_phonemize_indices, phonemized_list):
-            # Split by the phone separator to get individual phonemes
+            # Split on phone separator → individual phonemes
             p_str = p_str.replace(" ", "| |")
             raw_phonemes = [p for p in p_str.split('|') if p]
-            
-            # stress marks are attached to the phoneme, if with_stress=True
+
+            # stress marks attached to phoneme (with_stress=True)
             phoneme_map[idx] = raw_phonemes
 
         return self._reconstruct(parts, phoneme_map)

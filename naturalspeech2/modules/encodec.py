@@ -11,7 +11,7 @@ from naturalspeech2.paths import ENCODEC_24KHZ_DIR, PROJECT_ROOT
 
 ENCODER_HOP_LENGTH = 320
 LATENT_DIM = 128  # Encodec 24kHz quantizer output dimension
-SAMPLING_RATE = 24000  # facebook/encodec_24khz operating sample rate (paper deviation: 16 kHz → 24 kHz forced by codec choice)
+SAMPLING_RATE = 24000  # facebook/encodec_24khz rate (paper used 16 kHz; 24 kHz forced by codec)
 
 
 class EncodecWrapper(nn.Module):
@@ -27,10 +27,8 @@ class EncodecWrapper(nn.Module):
         self.model_dir = ENCODEC_24KHZ_DIR
         self.model = None
 
-        # Per-channel latent normalization buffers. Persistent so a checkpoint is
-        # self-contained — once trained, the stats file is no longer needed for resume
-        # or inference. Defaults are identity (mean=0, std=1); overwritten by the
-        # stats file at construction time if a path is given.
+        # Per-channel latent norm buffers. Persistent → checkpoint self-contained (stats
+        # file not needed post-train). Default identity (0/1); overwritten by stats file if given.
         self.register_buffer('latent_mean', torch.zeros(LATENT_DIM), persistent=True)
         self.register_buffer('latent_std', torch.ones(LATENT_DIM), persistent=True)
         if latent_stats_path is not None:
@@ -82,9 +80,8 @@ class EncodecWrapper(nn.Module):
         self,
         audio   # [B, T]
     ):
-        # Force FP32: under BF16 autocast the nearest-codebook L2 in the
-        # quantizer can flip assignments at tight ties, silently corrupting
-        # the GT codes the diffusion model trains against.
+        # Force FP32: under BF16 the quantizer's nearest-codebook L2 can flip assignments
+        # at tight ties → silently corrupts the GT codes diffusion trains against.
         with torch.autocast(device_type=audio.device.type, enabled=False):
             audio = audio.float()
             input_values = rearrange(audio, 'b t -> b 1 t')     # [B, C=1, T]   C=1 for mono audio
@@ -95,9 +92,8 @@ class EncodecWrapper(nn.Module):
                 bandwidth=self.bandwidth,
             )
 
-        # output.audio_codes: [C=1, B, Q=32, F]      e.g. 1 second => F=75 frames
-        # Q = Quantizer/Codebook
-        # each codebook [codebook_index=0-1023, latent_dim=128]
+        # output.audio_codes: [C=1, B, Q=32, F] (1 s → F=75). Q = quantizer/codebook,
+        # each codebook [index 0-1023, latent_dim 128]
         return output.audio_codes, output.audio_scales
 
     @torch.compiler.disable
@@ -114,8 +110,7 @@ class EncodecWrapper(nn.Module):
             audio_latents = self.model.quantizer.decode(codebook_indices)      # [B, D=128, F] | sum of the 32 codebook vectors per frame
             audio_latents = rearrange(audio_latents, "b d f -> b f d").contiguous() # [B, F, D]
 
-            # Per-channel normalization: (z - μ) / σ. Identity when stats are at
-            # defaults. Broadcasts [128] → [B, F, 128].
+            # Per-channel norm (z-μ)/σ; identity at defaults. Broadcasts [128]→[B,F,128].
             audio_latents = (audio_latents - self.latent_mean) / self.latent_std
 
             F = audio_latents.shape[1]
@@ -127,8 +122,7 @@ class EncodecWrapper(nn.Module):
         return audio_latents, audio_latents_lengths, codebook_indices
 
     def unnormalize_latents(self, latents):  # [B, F, D] normalized -> [B, F, D] raw
-        # Inverse of the normalization applied in get_latents. Used by CE-RVQ
-        # (codebook embeddings are raw) and internally by decode_from_latents.
+        # Inverse of get_latents norm. Used by CE-RVQ (raw codebook embeds) + decode_from_latents.
         return latents * self.latent_std + self.latent_mean
 
     @torch.compiler.disable
@@ -139,8 +133,7 @@ class EncodecWrapper(nn.Module):
     @torch.compiler.disable
     @torch.no_grad()
     def decode_from_latents(self, latents): # latents: [B, F, D] in normalized space
-        # Invert the per-channel normalization before passing to the Encodec decoder,
-        # which was trained on raw quantizer output.
+        # Un-normalize before the Encodec decoder (trained on raw quantizer output).
         latents = self.unnormalize_latents(latents)
         latents = rearrange(latents, "b f d -> b d f").contiguous()  # [B, D, F]
         return self.model.decoder(latents)

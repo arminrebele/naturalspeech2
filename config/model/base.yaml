@@ -8,14 +8,11 @@ min_target_seconds: 1.0    # safety net — minimum target duration preserved on
 
 # Encodec (frozen audio codec)
 encodec:
-  # Per-channel latent normalization stats (mean, std of length 128). Generated once
-  # by `scripts/compute_encodec_latent_stats.py` on a representative subset of the
-  # training data. Encodec's `quantizer.decode` output has per-scalar var ≈ 22 with
-  # ~6.8× per-channel std heterogeneity (measured on VCTK during bring-up); the
-  # VP-SDE noise schedule assumes unit-variance signals, so we standardize
-  # per-channel before training and invert before the codec decoder. See
-  # bringup_log.md (2026-05-16) for the rationale. Set to null to disable
-  # (identity transform — buffers stay at mean=0, std=1).
+  # Per-channel latent norm stats (mean, std, len 128). Generated once by
+  # scripts/compute_encodec_latent_stats.py on a training subset. Encodec's quantizer.decode
+  # output has per-scalar var ≈ 22 with ~6.8× per-channel std heterogeneity; the VP-SDE schedule
+  # assumes unit-variance signals → standardize per-channel before training, invert before the
+  # codec decoder. null to disable (identity — buffers stay mean=0, std=1).
   latent_stats_path: "models/encodec_24khz/encodec_latent_stats.pt"
 
 # Log Mel Spectrogram Generator
@@ -26,9 +23,9 @@ mel:
   f_max: null
 
 # Phoneme Encoder
-# Dropout: §4.2 prose says 0.1 for this encoder (Table 11's 0.2 conflicts; 0.1 also matches
-# FastSpeech2). attn_weights_dropout is on the softmax attention map (SDPA dropout_p) —
-# unsourced (Vaswani 2017's 0.1 was on sub-layer outputs, not the map) → 0.0.
+# Dropout: §4.2 says 0.1 here (Table 11's 0.2 conflicts; 0.1 matches FastSpeech2).
+# attn_weights_dropout is on the softmax map (SDPA dropout_p) — unsourced (Vaswani's 0.1 was
+# on sub-layer outputs, not the map) → 0.0.
 phoneme_encoder:
   transformer_layers: 6
   attention_heads: 8
@@ -39,17 +36,13 @@ phoneme_encoder:
   attn_out_dropout: 0.1
 
 # Aligner
-# temperature is the cosine-attention scale: features are L2-normalized before the
-# squared-L2, so dist ∈ [0,4] and the per-frame softmax logit is 2·temperature·cos —
-# the effective cosine scale is 2·temperature. At effective ~10 (temperature 5) the
-# alignment softmax cannot sharpen on multi-speaker data: reaching even p=0.5 on the
-# correct phoneme would require a ~0.5 cosine gap against every competitor, so bin_loss
-# floors near ln2 (~half the attention mass off the Viterbi path). temperature 12
-# (effective 24) reaches p≈0.9 at a realistic learned cosine gap of ~0.15–0.25 over the
-# prior's competitor band — the sharpening regime — and stays below CLIP's range (its
-# learned cosine scale converges to ~14–20, clamped at 100). The old 0.0005 was an NVIDIA
-# constant for un-normalized features; under our N(0,0.02) init it collapsed the softmax
-# to ~uniform. See aligner.py AlignerNet.forward.
+# temperature = cosine-attention scale: features are L2-normalized, so dist ∈ [0,4] and the
+# per-frame softmax logit is 2·temperature·cos → effective cosine scale 2·temperature. At
+# effective ~10 (temp 5) the softmax can't sharpen on multi-speaker data (p=0.5 needs a ~0.5
+# cosine gap vs every competitor) → bin_loss floors near ln2. temp 12 (effective 24) reaches
+# p≈0.9 at a realistic ~0.15–0.25 cosine gap (sharpening regime), below CLIP's learned ~14–20.
+# The old 0.0005 was an NVIDIA constant for un-normalized features; under N(0,0.02) init it
+# collapsed the softmax to ~uniform. See aligner.py AlignerNet.forward.
 aligner:
   attn_channels: 80
   temperature: 12.0
@@ -67,12 +60,9 @@ speech_prompt_encoder:
   attn_out_dropout: 0.1
 
 # Duration Predictor
-# conv_dropout 0.5 = the paper's value (§4.2 / Table 11), which traces to FastSpeech2's
-# conv-path variance-predictor dropout (an attention-free 2-conv block, so 0.5 is
-# unambiguously conv-path). The prompt cross-attention is NS2's own addition, unspecified by
-# the paper: attn_weights_dropout is on the softmax map and unsourced (Vaswani's 0.1 was on
-# outputs, not the map) → 0.0; attn_out keeps the Vaswani 0.1 on the attention output.
-# Do not "restore" the attn dropouts to 0.5.
+# conv_dropout 0.5 = paper (§4.2 / Table 11), tracing to FastSpeech2's conv-path variance-predictor
+# dropout. The prompt cross-attention is NS2's own, unspecified by the paper: attn_weights_dropout
+# on the softmax map is unsourced → 0.0; attn_out keeps Vaswani's 0.1. Don't "restore" attn dropouts to 0.5.
 duration_predictor:
   conv1d_layers: 30
   conv1d_kernel_size: 3
@@ -94,13 +84,11 @@ pitch_predictor:
   attn_out_dropout: 0.1
 
 # Diffusion Model
-# Denoiser dropout → 0.0. Diffusion denoisers run dry: DDPM uses 0.0 off CIFAR-10, ADM/DiT/
-# LDM default 0.0, and DiffWave (our WaveNet analog) has none. The paper's single "0.2"
-# (Table 11) is one per-module scalar that the code fans into 5 sites across 40 blocks; at
-# 0.2, only 0.8^40 ≈ 1e-4 of a conditioning unit survives one site un-dropped through all
-# blocks, gutting the FiLM/attention conditioning path. The paper also reports the model
-# "still underfitting" — minimal regularization is right. Small-data probes add a little
-# back at safe sites only (see config/model/multibatch.yaml).
+# Denoiser dropout → 0.0. Diffusion denoisers run dry: DDPM 0.0 off CIFAR-10, ADM/DiT/LDM default
+# 0.0, DiffWave (our WaveNet analog) none. The paper's single 0.2 (Table 11) fans into 5 sites ×
+# 40 blocks; at 0.2 only 0.8^40 ≈ 1e-4 of a conditioning unit survives → guts the FiLM/attention
+# path. Paper also reports "still underfitting" → minimal reg. Small-data probes add a little back
+# at safe sites only (see config/model/multibatch.yaml).
 diffusion_model:
   wavenet_layers: 40
   wavenet_kernel_size: 3
@@ -121,10 +109,8 @@ diffusion_model:
   timestep_eps: 0.001
   min_snr_gamma: 5.0
 
-# EMA of model weights for sampling. halflife_kimg is the EMA halflife in
-# thousands of training examples (Karras EDM Appendix B.4 parameterization);
-# the rampup phase below cur_kimg < halflife_kimg keeps the early shadow
-# from being contaminated by the random init.
+# EMA of model weights for sampling. halflife_kimg = halflife in thousands of training examples
+# (Karras EDM Appendix B.4); rampup at cur_kimg < halflife_kimg keeps the early shadow off the random init.
 ema:
   enabled: true
   halflife_kimg: 50.0
@@ -144,13 +130,11 @@ loss_weights:
     score_loss: 1.0
     ce_rvq_loss: 0.1
 
-# Loss Balance Targets — desired contribution *share* of each loss leaf. Read
-# ONLY by the loss-analysis run (`+experiment=loss_analysis`), which prints
-# suggested loss_weights from these targets and the measured raw magnitudes;
-# never read during training. Flat leaves and each group's `group_target` are on
-# one comparable top-level scale; a group's sub-targets split within the group.
-# Suggested weights are anchored so data_loss's weight stays 1.0 (preserving the
-# diffusion gradient scale, so the paper LR transfers). Set per balancing intent.
+# Loss Balance Targets — desired contribution *share* of each leaf. Read ONLY by the loss-analysis
+# run (+experiment=loss_analysis), which prints suggested loss_weights from these + measured raw
+# magnitudes; never read during training. Flat leaves and each group's group_target share one
+# top-level scale; sub-targets split within the group. Suggested weights anchored so data_loss=1.0
+# (preserves the diffusion gradient scale → paper LR transfers).
 loss_balance_targets:
   duration_predictor_loss: 1.0
   pitch_predictor_loss: 1.0
@@ -165,16 +149,12 @@ loss_balance_targets:
     score_loss: 1.0
     ce_rvq_loss: 1.0
 
-# Warmup ramps a loss weight 0.1×→1.0× over N steps (0 = full weight from step 0). The paper
-# uses no loss warmup; we keep exactly one. duration_predictor_loss warms over 1000 steps
-# because its target is the aligner's Viterbi durations, which move fastest during the
-# aligner's steep early descent (first ~1–2k steps); the ramp keeps the predictor from
-# chasing a rapidly-shifting target before the durations stabilize. pitch/pitch_voicing
-# target stable GT F0/voicing → no warmup. The aligner is full from step 0 (everything
-# downstream depends on it). The
-# diffusion loss is the primary objective and is NOT warmed — warming it would down-weight
-# the conditioning-independent denoising too, and neither the paper nor the diffusion
-# literature warms the main loss.
+# Warmup ramps a loss weight 0.1×→1.0× over N steps (0 = full from step 0). Paper uses none; we keep
+# one. duration_predictor_loss warms over 1000 steps — its target is the aligner's Viterbi durations,
+# which move fastest during the aligner's steep early descent; the ramp avoids chasing a shifting
+# target. pitch/pitch_voicing target stable GT → no warmup. Aligner full from step 0 (everything
+# downstream depends on it). Diffusion loss is the primary objective and is NOT warmed (warming would
+# down-weight conditioning-independent denoising too; neither paper nor diffusion literature warms it).
 loss_warmup_steps:
   duration_predictor_loss: 1000
   pitch_predictor_loss: 0

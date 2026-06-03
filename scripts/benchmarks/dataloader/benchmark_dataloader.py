@@ -116,7 +116,7 @@ def benchmark(cfg: DictConfig):
     gpu_end = torch.cuda.Event(enable_timing=True)
 
     for i in range(NUM_BENCHMARK_STEPS + WARMUP_STEPS):
-        # Snapshot Dynamo's compilation counters before the forward pass
+        # Snapshot Dynamo compile counters pre-forward
         compile_count_before = sum(torch._dynamo.utils.counters["frames"].values())
 
         start_iter = time.perf_counter()
@@ -154,23 +154,23 @@ def benchmark(cfg: DictConfig):
         end_iter = time.perf_counter()
 
         if i >= WARMUP_STEPS:
-            # Total wall-clock time for the iteration (including sync)
+            # wall-clock iter time (incl. sync)
             it = end_iter - start_iter
-            # Pure CPU dispatch + Dataloading time
+            # CPU dispatch + dataloading
             ct = cpu_end - start_iter
-            
-            # True GPU compute time excluding CPU idle gaps, but including PCIe H2D transfers
+
+            # GPU compute (excl. CPU idle, incl. PCIe H2D)
             gt_fwd = gpu_start.elapsed_time(gpu_fwd_end)
             gt_h2d = gpu_h2d_start.elapsed_time(gpu_bwd_start)
             gt_bwd = gpu_bwd_start.elapsed_time(gpu_end)
             gt = (gt_fwd + gt_h2d + gt_bwd) / 1000.0
             
-            # Skip metrics if a loop occurred to avoid worker spin-up poisoning the P95 metrics
+            # Skip on loop — worker spin-up poisons P95
             if looped:
                 logger.warning(f"Step {i}: Skipping metrics due to dataloader worker spin-up latency.")
                 continue
 
-            # Check if Dynamo triggered a recompilation during this step
+            # Detect Dynamo recompile this step
             compile_count_after = sum(torch._dynamo.utils.counters["frames"].values())
             if compile_count_after > compile_count_before:
                 logger.warning(f"Step {i}: Detected graph recompile ({it:.2f}s). Skipping metrics.")
@@ -183,8 +183,7 @@ def benchmark(cfg: DictConfig):
             gpu_h2d_times.append(gt_h2d / 1000.0)
             gpu_bwd_times.append(gt_bwd / 1000.0)
             
-            # Strict check: CPU dispatch + Dataloading must be faster than GPU compute.
-            # Dataloader must be fast enough to completely mask Python dispatch overhead.
+            # CPU dispatch + dataloading must beat GPU compute (fully mask dispatch overhead).
             is_starved = ct > gt
             if is_starved:
                 starved_steps += 1

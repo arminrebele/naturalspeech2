@@ -10,7 +10,7 @@ lr_decay_iters: ${setup.max_iters}
 
 gradient_analysis_run: True
 
-log_interval: 10                 # wandb logs the norms every 10 steps so it's not too spammy
+log_interval: 10                 # log norms every 10 steps (not too spammy)
 eval_interval: 10000             # >= max_iters → in-loop eval never fires
 checkpoint_interval: 0
 

@@ -31,12 +31,11 @@ _PITCH_EXTRACTOR_INSTANCE = None
 
 
 def _decode_audio_to_target_sr(audio_dict: dict, target_sr: int) -> np.ndarray:
-    """Decode an HF Audio cell ({bytes, path}) → mono float32 array at target_sr.
+    """HF Audio cell ({bytes,path}) → mono float32 @ target_sr.
 
-    Bypasses datasets 4.x's torchcodec auto-decoder, which leaks ffmpeg
-    streams across many decode calls inside fork-based map workers
-    (EAGAIN after ~20k calls in a 24-proc map). soundfile + torchaudio
-    resample is fork-safe and ~4 ms/clip.
+    Bypasses datasets 4.x torchcodec auto-decoder (leaks ffmpeg streams under
+    fork-based map workers — EAGAIN after ~20k calls). soundfile+torchaudio
+    resample is fork-safe, ~4 ms/clip.
     """
     if audio_dict.get("bytes") is not None:
         data, sr = sf.read(io.BytesIO(audio_dict["bytes"]), dtype="float32")
@@ -88,16 +87,16 @@ def resample_and_save_audio(sample: dict[str, Any], target_sr: int, resampled_di
     pitch_extractor = get_worker_pitch_extractor(target_sr)
     resampled_array = _decode_audio_to_target_sr(sample["audio"], target_sr)
 
-    # Create a unique path for the new file using the dataset index
+    # Unique path from dataset index
     new_filename = f"{sample['original_index']}_resampled.flac"
     new_path = resampled_dir / new_filename
 
-    # Save to disk. soundfile expects [frames, channels], which matches our 1D mono output
+    # soundfile expects [frames, channels]; 1D mono matches
     sf.write(new_path, resampled_array, target_sr)
 
     f0 = pitch_extractor(resampled_array)
 
-    # Avoid type conflicts (dict vs string) during processing.
+    # Avoid dict-vs-string type conflicts downstream.
     return {
         "audio_path": str(new_path),
         "audio_length": resampled_array.shape[0],
@@ -166,23 +165,20 @@ class DatasetWrapper(Dataset):
         self.subset_seed = subset_seed
         
         self.dataset_dir = DATA_DIR / self.dataset_name
-        # Safely convert the split name into a valid directory name
+        # Split name → valid dir name
         clean_split = self.split.replace("%", "pct")
         clean_split = re.sub(r'[^a-zA-Z0-9]', '_', clean_split)
         clean_split = re.sub(r'_+', '_', clean_split).strip('_')
 
-        # Ensure OTF and Pre-resampled configs cache to distinct directories to prevent cross-contamination
+        # OTF vs pre-resampled cache to distinct dirs
         suffix = "otf" if self.resample_on_the_fly else "pre"
-        # A subset (max_train_clips) caches to its own dir (e.g. processed_otf_n100000)
-        # so different sizes don't collide or serve a stale-size cache.
+        # Subset caches to its own dir (processed_otf_n<N>) so sizes don't collide
         subset_tag = f"_n{self.max_train_clips}" if self.max_train_clips is not None else ""
         self.processed_dir = self.dataset_dir / clean_split / f"processed_{suffix}{subset_tag}"
         self.resampled_dir = self.dataset_dir / clean_split / "resampled"
         self.cache_dir = self.dataset_dir / clean_split / "cache"
-        # Vocabulary is a dataset-level artifact (phoneme inventory is a property
-        # of the dataset, not a split). First split preprocessed builds it;
-        # subsequent splits reuse it. Manual rebuild if a later split introduces
-        # phonemes the original didn't see.
+        # Vocab is dataset-level (phoneme inventory is a dataset property, not a split's).
+        # First split builds it; others reuse. Manual rebuild if a later split adds phonemes.
         self.token_vocabulary_path = token_vocabulary_path
         if self.token_vocabulary_path is None:
             self.token_vocabulary_path = self.dataset_dir / "token_vocabulary.json"
@@ -206,7 +202,7 @@ class DatasetWrapper(Dataset):
             "subset_seed": self.subset_seed if self.max_train_clips is not None else None,
         }
 
-        # Pre-assign the appropriate get_audio function to avoid if/else overhead in __getitem__
+        # Pre-bind get_audio to avoid per-item if/else
         self._get_audio = self._get_audio_on_the_fly if self.resample_on_the_fly else self._get_audio_pre_resampled
 
         self.dataset = self._process_dataset()
@@ -254,17 +250,11 @@ class DatasetWrapper(Dataset):
             logger.info(f"Local dataset unavailable or corrupted ({type(e).__name__}). Triggering preprocessing...")
 
             logger.info(f"Loading dataset '{self.dataset_name}' with split '{self.split}'...")
-            # Restrict the parquet builder to only the requested split's files.
-            # HF's `split=` filters at `as_dataset()` (post-generation), so without
-            # `data_files=` the builder iterates `_split_generators()` for every
-            # declared split and materializes Arrow files for all of them. Passing
-            # an explicit data_files mapping with just our split tells the builder
-            # there's only one split to prepare. Pattern follows HF's standard
-            # `push_to_hub` layout: data/<split>-*.parquet.
-            # `verification_mode="no_checks"` disables the post-generation
-            # sanity check that all README-declared splits are recorded —
-            # without it, generating only dev triggers ExpectedMoreSplitsError
-            # because the dataset README declares 3 splits and we built 1.
+            # data_files= restricts the parquet builder to this split's files: HF's
+            # `split=` filters post-generation, so without it the builder materializes
+            # Arrow for ALL declared splits. Layout follows push_to_hub: data/<split>-*.parquet.
+            # verification_mode="no_checks": skip the all-splits-recorded check (else building
+            # 1 of the README's 3 splits raises ExpectedMoreSplitsError).
             dataset = load_dataset(
                 self.dataset_source,
                 data_files={self.split: f"data/{self.split}-*.parquet"},
@@ -272,15 +262,12 @@ class DatasetWrapper(Dataset):
                 cache_dir=str(self.cache_dir),
                 verification_mode="no_checks",
             )
-            # Add index before filtering to keep track of original rows
+            # Index before filtering → track original rows
             dataset = dataset.add_column("original_index", range(len(dataset)))
             dataset.cleanup_cache_files()
 
-            # Cap the split to N clips BEFORE the expensive F0 / phonemize / tokenize
-            # maps, so only N clips are ever pitch-extracted (not the full split — the
-            # difference between ~1 h and ~5 days on MLS-train). Seeded shuffle →
-            # reproducible, speaker-diverse sample across the whole corpus. Set only
-            # for the training split (held-out dev/test stay full).
+            # Cap to N clips BEFORE the expensive F0/phonemize/tokenize maps (~1 h vs
+            # ~5 days on MLS-train). Seeded shuffle → reproducible, speaker-diverse. Train only.
             if self.max_train_clips is not None and len(dataset) > self.max_train_clips:
                 dataset = dataset.shuffle(seed=self.subset_seed).select(range(self.max_train_clips))
                 logger.info(
@@ -304,10 +291,8 @@ class DatasetWrapper(Dataset):
             if self.audio_column != "audio":
                 dataset = dataset.rename_column(self.audio_column, "audio")
 
-            # Keep the audio column as raw bytes (decode=False). datasets 4.x's
-            # torchcodec auto-decoder leaks ffmpeg streams under fork-based
-            # multiprocessing; we decode manually via _decode_audio_to_target_sr
-            # in worker functions and at runtime.
+            # Raw bytes (decode=False): datasets 4.x torchcodec leaks ffmpeg streams
+            # under fork. Decode manually via _decode_audio_to_target_sr.
             dataset = dataset.cast_column("audio", Audio(decode=False))
 
             if self.resample_on_the_fly:
@@ -323,22 +308,20 @@ class DatasetWrapper(Dataset):
             else:
                 logger.info("`resample_on_the_fly` is False. Pre-resampling and saving audio files. Also extracting F0 and lengths.")
 
-                # Create the directory for resampled audio
                 self.resampled_dir.mkdir(parents=True, exist_ok=True)
 
-                # 2. Map the function to resample and save each audio file to a new location.
+                # Resample + save each audio file to a new location
                 dataset = dataset.map(
                     resample_and_save_audio,
-                    remove_columns=["audio"],                       # Remove original audio dict column
+                    remove_columns=["audio"],                       # drop original audio dict column
                     fn_kwargs={"target_sr": self.sampling_rate, "resampled_dir": self.resampled_dir},
                     num_proc=self.num_proc_pitch,                   # Same cost shape as F0 extract (decode + pyworld)
                     desc="Resampling, extracting F0 and lengths, and saving audio",
                 )
                 
-                # Rename the path column back to 'audio'
                 dataset = dataset.rename_column("audio_path", "audio")
-                
-                # Ensure the audio column is treated as a string path from here on
+
+                # Audio column = string path henceforth
                 dataset = dataset.cast_column("audio", Value("string"))
                 dataset.cleanup_cache_files()
             
@@ -394,10 +377,8 @@ class DatasetWrapper(Dataset):
                 )
                 dataset.cleanup_cache_files()
 
-            # Keep only the columns needed for training to save space.
-            # `text` survives because the eval block surfaces it in
-            # Table 2 ("Original vs. Generated") and the overfit_audio_comparison
-            # wandb table to show the GT transcript alongside the generated audio.
+            # Keep only training columns to save space. `text` survives for the eval block
+            # (Table 2 + overfit_audio_comparison wandb tables: GT transcript vs generated).
             dataset = dataset.select_columns(["audio", "audio_length", "f0", "phoneme_tokens", "phoneme_tokens_length", "original_index", "text"])
             dataset.cleanup_cache_files()
 
@@ -411,7 +392,7 @@ class DatasetWrapper(Dataset):
 
             logger.info(f"Completely deleting project cache directory: {self.cache_dir}")
             del dataset
-            gc.collect()  # Force garbage collection to release file handles
+            gc.collect()  # release file handles
             try:
                 shutil.rmtree(self.cache_dir)
             except Exception as e:
@@ -424,8 +405,7 @@ class DatasetWrapper(Dataset):
         return len(self.dataset)
 
     def _get_audio_on_the_fly(self, audio_dict: dict[str, Any]) -> torch.Tensor:
-        # The column is stored decode=False (raw {bytes, path}). Decode + resample
-        # manually here for the same reason as the worker functions above.
+        # Column stored decode=False (raw {bytes,path}); decode+resample manually (see above).
         audio_array = _decode_audio_to_target_sr(audio_dict, self.sampling_rate)
         return torch.tensor(audio_array, dtype=torch.float32)
 
@@ -449,11 +429,8 @@ class DatasetWrapper(Dataset):
         }
 
 class DynamicBucketedBatchSampler(Sampler):
-    """
-    A Sampler that yields batches of dynamic sizes to maximize VRAM utilization.
-    It groups sequences by length, looks up the corresponding bucket, and chunks
-    the dataset using the allowed batch_size for that specific bucket.
-    """
+    """Yields dynamic-size batches to maximize VRAM use: group sequences by length,
+    look up bucket, chunk by that bucket's batch_size."""
     def __init__(
         self, 
         dataset: DatasetWrapper, 
@@ -469,20 +446,19 @@ class DynamicBucketedBatchSampler(Sampler):
         self.epoch = 0
         self.start_batch_idx = 0
         
-        # Ensure buckets are strictly sorted by audio_length from smallest to largest
+        # Sort buckets by audio_length ascending
         self.bucket_mapping = sorted(bucket_mapping, key=lambda x: x['audio_length'])
-        
-        # Strictly group all sequence indices into their assigned buckets at initialization
+
+        # Group sequence indices into buckets
         self.bucket_to_indices = {i: [] for i in range(len(self.bucket_mapping))}
-        
-        # Extract the lengths directly as a NumPy array
+
         lengths_arr = np.array(dataset.dataset["audio_length"])
         bucket_boundaries = np.array([b['audio_length'] for b in self.bucket_mapping])
-        
-        # Assignment of all sequences to buckets
+
+        # Assign sequences to buckets
         bucket_indices = np.searchsorted(bucket_boundaries, lengths_arr)
-        
-        # Check for sequences that exceed the maximum bucket length
+
+        # Guard: sequences exceeding the max bucket length
         invalid_mask = bucket_indices == len(bucket_boundaries)
         if np.any(invalid_mask):
             invalid_idx = np.where(invalid_mask)[0][0]
@@ -495,10 +471,10 @@ class DynamicBucketedBatchSampler(Sampler):
         for b_idx in range(len(self.bucket_mapping)):
             self.bucket_to_indices[b_idx] = np.where(bucket_indices == b_idx)[0].tolist()
 
-        # Pre-calculate the exact number of batches for tqdm / DataLoader len()
+        # Exact batch count for tqdm / DataLoader len()
         self._num_batches = self._compute_len()
 
-        # Calculate exact audio throughput statistics for logging
+        # Audio throughput stats for logging
         self.expected_batch_audio_samples = 0.0
         self.variance_batch_audio_samples = 0.0
         
@@ -546,30 +522,30 @@ class DynamicBucketedBatchSampler(Sampler):
         batches = []
         rng = np.random.default_rng(self.seed + self.epoch)
         
-        # Build batches directly from the isolated buckets
+        # Build batches from isolated buckets
         for b_idx, indices in self.bucket_to_indices.items():
             bs = self.bucket_mapping[b_idx]['batch_size']
-            
-            # Shuffling within the bucket handles block randomization perfectly
+
+            # Shuffle within bucket = block randomization
             bucket_indices = list(indices)
             if self.shuffle:
                 rng.shuffle(bucket_indices)
-            
-            # Strict chunking ensures batch size is absolutely identical
+
+            # Strict chunking → identical batch size
             for i in range(0, len(bucket_indices), bs):
                 batch = bucket_indices[i : i + bs]
-                
+
                 if len(batch) == bs:
                     batches.append(batch)
                 elif not self.drop_last:
-                    # Warning: If drop_last=False, this final incomplete batch WILL cause a graph recompile!
+                    # drop_last=False: this final partial batch WILL trigger a graph recompile
                     batches.append(batch)
-        
-        # Shuffle the global batch order so the model doesn't see sizes sequentially
+
+        # Shuffle global batch order (avoid sequential sizes)
         if self.shuffle:
             rng.shuffle(batches)
-            
-        # Instantly fast-forward by slicing the list of batch indices
+
+        # Fast-forward by slicing
         batches_to_yield = batches[self.start_batch_idx:]
         for batch in batches_to_yield:
             yield batch
@@ -584,11 +560,8 @@ class DynamicBucketedBatchSampler(Sampler):
         self.start_batch_idx = batch_idx
 
 class BucketedCollateFn:
-    """
-    A callable Collate Function that receives the bucket mapping. 
-    It snaps the padding to exactly the predefined bucket dimensions, drastically
-    reducing graph recompilations in torch.compile().
-    """
+    """Collate fn that snaps padding to exact bucket dimensions → minimizes
+    torch.compile recompilations."""
     def __init__(self, bucket_mapping: list[dict[str, int]], pad_token_id: int = 0):
         self.bucket_mapping = sorted(bucket_mapping, key=lambda x: x['audio_length'])
         self.pad_token_id = pad_token_id
@@ -643,9 +616,8 @@ class BucketedCollateFn:
 
         phoneme_tokens_mask = create_mask_from_lengths(phoneme_tokens_lengths, target_phoneme_len) # [B, P, 1]
         
-        # GT transcripts pass through as a list[str] alongside the tensor
-        # payload — consumed by the eval block's Table 2 / overfit_audio_comparison
-        # text columns. Not tensor-collatable; the training loop ignores it.
+        # GT transcripts pass through as list[str] (eval block's Table 2 /
+        # overfit_audio_comparison). Not tensor-collatable; training loop ignores it.
         text_list = [item["text"] for item in batch]
 
         return {

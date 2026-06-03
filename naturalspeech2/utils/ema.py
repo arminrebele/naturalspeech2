@@ -1,8 +1,7 @@
-"""Exponential moving average of model weights for diffusion sampling.
+"""EMA of model weights for diffusion sampling.
 
-Karras-style EMA (EDM Appendix B.4): halflife specified in number of
-training examples with a linear rampup, so per-step decay is derived at
-update time and stays consistent across batch-size / grad-accum changes.
+Karras-style (EDM Appendix B.4): halflife in #training-examples w/ linear rampup
+→ per-step decay derived at update time, stable across batch-size/grad-accum.
 """
 
 from contextlib import contextmanager
@@ -12,12 +11,10 @@ from torch import nn
 
 
 class EMA:
-    """Karras-style EMA with halflife-in-examples + rampup.
+    """Karras-style EMA: halflife-in-examples + rampup.
 
-    Tracks only trainable params (requires_grad=True) — same set the
-    optimizer updates. Buffers are not in named_parameters() so they're
-    skipped automatically. Shadow is FP32; the .float() at update time
-    is a no-op when the live param is already FP32.
+    Tracks only trainable params (requires_grad) — buffers skipped (not in
+    named_parameters). Shadow FP32 (.float() at update is no-op if param already FP32).
     """
 
     def __init__(self, model: nn.Module, halflife_kimg: float = 50.0):
@@ -72,12 +69,9 @@ class EMA:
         return {"shadow": self.shadow, "halflife_kimg": self.halflife_kimg}
 
     def load_state_dict(self, state: dict) -> None:
-        # Coerce the loaded shadow onto the device the live shadow already lives
-        # on (set in __init__ from the on-device model). Checkpoints load with
-        # map_location="cpu", so state["shadow"] is on CPU; without this move the
-        # first update()'s in-place add_ against on-GPU params raises a
-        # cross-device error. Mirrors torch.optim.Optimizer.load_state_dict,
-        # which casts loaded state onto each param's device.
+        # Move loaded shadow onto the live shadow's device. Checkpoints load
+        # map_location="cpu" → without this, the first update()'s in-place add_
+        # vs on-GPU params raises cross-device. (Mirrors Optimizer.load_state_dict.)
         device = next(iter(self.shadow.values())).device
         self.shadow = {k: v.to(device) for k, v in state["shadow"].items()}
         self.halflife_kimg = state["halflife_kimg"]

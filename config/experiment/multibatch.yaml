@@ -2,25 +2,18 @@
 #
 # Multi-batch generalization probe — python scripts/train.py +experiment=multibatch
 #
-# Trains on the FULL dev split and, every eval, generates FREE-RUNNING audio on the
-# held-out TEST split (fixed_test_refs, never trained on) beside the trained-on dev
-# clips (fixed_dev_refs). The held-out clips becoming intelligible is the signal
-# that the model learns the phoneme/pitch conditioning rather than memorizing — the
-# test the single-batch overfit run structurally could not give. Both tables use a
-# dedicated seeded RNG, so the same clips appear every run for clean cross-run A/B.
+# Trains on the FULL dev split; every eval generates FREE-RUNNING audio on the held-out TEST
+# split (fixed_test_refs, never trained on) beside the trained-on dev clips (fixed_dev_refs).
+# Held-out clips becoming intelligible = the model learns the phoneme/pitch conditioning rather
+# than memorizing — the test the single-batch overfit run couldn't give. Both tables use a
+# dedicated seeded RNG → same clips every run for clean cross-run A/B.
 #
-# Uses model/multibatch (uniform 0.1 dropout). base.yaml carries the paper's
-# full-scale regularization (conv-path 0.5 on the variance predictors, 0.2 on
-# encoders/diffusion) calibrated for 44k hours; on this ~3807-clip probe that
-# starves an already-underfitting model, so model/multibatch drops it to a uniform
-# mild 0.1 — enough to keep the held-out signal honest, not enough to cripple
-# fitting. grad_accum inherits base (= 1).
+# Uses model/multibatch (mild dropout for the small-data regime; see that file). grad_accum
+# inherits base (= 1).
 #
-# TWO KNOBS to tune by watching the held-out audio:
-#   setup.max_iters — how long to train (extend if held-out is still improving; cut
-#                     if it has plateaued or started overfitting dev).
-#   train size      — currently all of dev (~3807 clips). A smaller subset ladder
-#                     ("how little data generalizes?") would need a sampler change.
+# Tune by watching the held-out audio:
+#   setup.max_iters — train longer if held-out still improving; cut if plateaued / overfitting dev.
+#   train size      — currently all of dev (~3807 clips); a smaller-subset ladder needs a sampler change.
 
 defaults:
   - override /model: multibatch
@@ -34,12 +27,11 @@ dataset:
 setup:
   max_iters: 20000
   warmup_iters: 500              # lr_decay_iters inherits base (= ${setup.max_iters} = 20000 here)
-  log_interval: 25               # finer than base's 100 — watch the early generalization dynamics closely
+  log_interval: 25               # finer than base's 100 — watch early generalization
   eval_interval: 1000            # each eval generates 4 clips (2 dev + 2 test) — keep modest
   audio_tables: [fixed_dev_refs, fixed_test_refs]   # trained-on + held-out, both stable across runs
   inference_data_loss_sweep: []  # overfit-only / teacher-forced; blind to conditioning, unused here
-  # num_audio_refs (10) + eval_metrics (["wer"]) inherited from setup/base — WER is standard now,
-  # here it lands on BOTH dev (trained-on) and held-out test.
+  # num_audio_refs (10) + eval_metrics (["wer"]) inherited from setup/base; WER lands on both dev (trained-on) and held-out test.
   log_subdir: "research"
   log_name: "multibatch"
 

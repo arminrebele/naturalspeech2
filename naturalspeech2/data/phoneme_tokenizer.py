@@ -38,7 +38,7 @@ class PhonemeTokenizer:
         return [self.token_vocabulary.get(token, self.unk_id) for token in phonemes]
 
     def decode_tokens(self, token_ids: list[int]) -> list[str]:
-        """Converts token-IDs back into strings (phonemes or special characters)."""
+        """Token-IDs → strings (phonemes/specials)."""
         return [self.id_to_token.get(i, "<unk>") for i in token_ids]
 
 

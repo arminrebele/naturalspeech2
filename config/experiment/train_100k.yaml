@@ -2,26 +2,21 @@
 #
 # 100k-clip MLS-train generalization run — python scripts/train.py +experiment=train_100k
 #
-# A scaled-DOWN real run (NOT the train-on-dev probe): trains on the TRAIN split,
-# capped to 100,000 clips via max_train_clips — applied BEFORE preprocessing in
-# DatasetWrapper, so only 100k clips are ever pitch-extracted (~1.5 h, not ~5 days).
-# Tests the data-starvation hypothesis: does training on more data + far more
-# speakers (100k clips, thousands of speakers vs dev's 42) improve the COMBINED
-# dev+test held-out validation? The held-out trajectory is the signal —
-#   improving      ⇒ on a real scaling curve, the full 10.8M run is justified
-#   flat / rising  ⇒ architecture/optimization ceiling, diagnose deeper.
+# A scaled-DOWN real run (NOT the train-on-dev probe): TRAIN split capped to 100k clips via
+# max_train_clips (applied BEFORE preprocessing → only 100k pitch-extracted, ~1.5 h not ~5 days).
+# Tests data starvation: does more data + far more speakers (100k clips, thousands of speakers vs
+# dev's 42) improve the COMBINED dev+test held-out validation? Held-out trajectory is the signal:
+#   improving     ⇒ real scaling curve → the full 10.8M run is justified
+#   flat / rising ⇒ architecture/optimization ceiling, diagnose deeper.
 #
-# Scale note: ~70 clips/step ⇒ 100k ≈ 1.4k steps/epoch ⇒ 20k iters ≈ ~14 epochs
-# (NOT <1 epoch — that math only holds for the full 10.8M). Watch the combined
-# held-out loss/WER for overfitting (a rising held-out curve = 100k started being
-# memorized, which is itself evidence we need more data).
+# Scale: ~70 clips/step ⇒ 100k ≈ 1.4k steps/epoch ⇒ 20k iters ≈ ~14 epochs (NOT <1 epoch — that
+# holds only for the full 10.8M). A rising held-out curve = 100k being memorized → need more data.
 #
-# Deltas vs base only — everything not listed here (eval_iters, checkpoint_interval,
-# audio_tables=[fixed_val_refs] → combined dev+test, num_audio_refs, eval_metrics=[wer],
-# inference_data_loss_sweep=[], best/final_safetensors, drop_last=True) is inherited.
+# Deltas vs base only; everything else (eval_iters, checkpoint_interval, audio_tables=[fixed_val_refs],
+# num_audio_refs, eval_metrics=[wer], sweeps, safetensors, drop_last) is inherited.
 
 defaults:
-  - override /model: multibatch    # reduced dropout for the data-limited regime (100k « the paper's 44k h); also matches the dev runs for a clean comparison
+  - override /model: multibatch    # reduced dropout for the data-limited regime (100k « paper's 44k h); matches the dev runs
 
 training:
   lr_schedule: "cosine"            # 20k-step run — ISR's 32k warmup doesn't fit

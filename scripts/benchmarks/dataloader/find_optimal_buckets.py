@@ -14,10 +14,7 @@ MIN_BUCKETS = 4
 MAX_BUCKETS = 8
 
 def compute_optimal_buckets_dp(lengths: np.ndarray, max_buckets: int):
-    """
-    Dynamic Programming approach to find mathematically optimal bucket sizes
-    that minimize total padding waste.
-    """
+    """DP for optimal bucket sizes that minimize total padding waste."""
     # Group lengths to speed up DP
     unique_lengths, counts = np.unique(lengths, return_counts=True)
     M = len(unique_lengths)
@@ -52,7 +49,7 @@ def compute_optimal_buckets_dp(lengths: np.ndarray, max_buckets: int):
                     dp[i][k] = dp[j][k - 1] + c
                     choice[i][k] = j
                     
-    # Backtrack to find the optimal bucket boundaries for ALL bucket counts
+    # Backtrack: optimal boundaries for all bucket counts
     results = {}
     for k_target in range(1, max_buckets + 1):
         curr_idx = M
@@ -69,7 +66,7 @@ def compute_optimal_buckets_dp(lengths: np.ndarray, max_buckets: int):
 
 @hydra.main(version_base=None, config_path="../../../config", config_name="config")
 def benchmark_buckets(cfg: DictConfig):
-    # Set up file logging to easily save and copy the optimal buckets later
+    # File logging to save optimal buckets
     log_file = Path(__file__).parent / "optimal_buckets_output.log"
     setup_file_logger(logger, log_file, mode="w", format_str="%(message)s")
 
@@ -95,8 +92,7 @@ def benchmark_buckets(cfg: DictConfig):
     )
     
     logger.info("Extracting audio lengths...")
-    # Convert raw audio sample lengths to latent frame lengths (since the model pads based on frames)
-    # Extract lengths and convert to frame counts
+    # Raw audio sample lengths → latent frame lengths (model pads by frames)
     raw_lengths = np.array(dataset.dataset["audio_length"])
     phoneme_lengths = np.array(dataset.dataset["phoneme_tokens_length"])
     base_frame_lengths = np.ceil(raw_lengths / ENCODER_HOP_LENGTH).astype(int)
@@ -112,7 +108,7 @@ def benchmark_buckets(cfg: DictConfig):
     logger.info(f"Min frames: {np.min(frame_lengths):,} | Max frames: {np.max(frame_lengths):,}")
     logger.info("="*50 + "\n")
 
-    # Safety check: ensure max_buckets doesn't exceed unique lengths available
+    # Cap max_buckets at unique-length count
     max_k = min(MAX_BUCKETS, len(np.unique(frame_lengths)))
     dp_results = compute_optimal_buckets_dp(frame_lengths, max_buckets=max_k)
 

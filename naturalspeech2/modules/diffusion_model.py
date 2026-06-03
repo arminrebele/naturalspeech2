@@ -71,9 +71,8 @@ class _WaveNetBlock(nn.Module):
             attn_weights_dropout=attn_weights_dropout,
         )
         self.film_projection = nn.Linear(hidden_dim, filter_size * 2)
-        # ReZero (Bachlechner et al. 2020): per-block learnable scalar, init=0. Multiplies
-        # the gated branch before the residual add — block is identity-at-init regardless of
-        # what the branch computes.
+        # ReZero (Bachlechner et al. 2020): per-block learnable scalar (init 0) scaling the gated
+        # branch before the residual add → block is identity-at-init regardless of branch output.
         self.alpha = nn.Parameter(torch.zeros(1))
 
         self.gate_dropout = nn.Dropout(gate_dropout)
@@ -205,7 +204,7 @@ class DiffusionModel(nn.Module):
             latent_std,                     # [latent_dim] | per-channel std
     ):
         batch_size = target_latents.shape[0]
-        t = (         #  t ∈ [ε, 1−ε], time_step_eps = 0.01 prevents exact 0 or 1 which can cause issues in the noise schedule math
+        t = (         #  t ∈ [ε, 1−ε]; eps avoids exact 0/1 (singular noise-schedule math)
             torch.rand(batch_size, device=target_latents.device)
             * (1.0 - 2.0 * self.timestep_eps)
             + self.timestep_eps
@@ -224,25 +223,21 @@ class DiffusionModel(nn.Module):
             prompt_summary_tokens,
         )
 
-        # Data loss:     L_data = ‖ẑ₀ − z₀‖²,    masked mean over valid scalars.
+        # Data loss: L_data = ‖ẑ₀ − z₀‖², masked sum over valid scalars (normalized downstream).
         diff_sq = (z0_hat.float() - target_latents.float()) ** 2
         loss_mask = target_latents_mask.to(diff_sq.dtype)
         data_loss = (diff_sq * loss_mask).sum()
 
         # Score loss:
-        #   ŝ(z_t, t)          = (√α̅(t) · ẑ₀ − z_t) / (1 − α̅(t))        (predicted score, derived from ẑ₀)
-        #   ∇ log p_t(z_t|z₀)  = −ε / √(1 − α̅(t))                        (true conditional score)
-        #   L_score            = ‖ŝ − ∇ log p_t‖²
-        #
-        # Algebraically: L_score = (α̅ / σ²) · ‖ẑ₀ − z₀‖²  where σ = 1 − α̅.
-        # The implicit (α̅/σ²) weight blows up as t → 0 (~1.3k at t=0.05, ~2.8e8 at
-        # t=1e-3), spiking gradients and biasing the loss toward low-t (easy) modes.
-        #
+        #   ŝ(z_t, t)         = (√α̅·ẑ₀ − z_t) / (1 − α̅)      (predicted score from ẑ₀)
+        #   ∇ log p_t(z_t|z₀) = −ε / √(1 − α̅)                 (true conditional score)
+        #   L_score           = ‖ŝ − ∇ log p_t‖²
+        # Algebraically = (α̅/σ²)·‖ẑ₀ − z₀‖²,  σ = 1 − α̅. The α̅/σ² weight blows up as t→0
+        # (~1.3k at t=0.05, ~2.8e8 at t=1e-3) → spikes gradients, biases toward low-t modes.
         # Stabilization:
-        #   - Min-SNR(γ) clip (Hang et al. 2023): cap the effective weight at γ via
-        #     a per-sample factor min(γ·σ²/α̅, 1). With γ=5, low-t contribution is
-        #     bounded; high-t (where σ²/α̅ ≥ 1) is unchanged.
-        #   - Clamp (1 − α̅) at 1e-5 as NaN-guard at timestep_eps boundary.
+        #   - Min-SNR(γ) clip (Hang et al. 2023): factor min(γ·σ²/α̅, 1) caps weight at γ; γ=5
+        #     bounds low-t, leaves high-t (σ²/α̅ ≥ 1) unchanged.
+        #   - Clamp (1 − α̅) ≥ 1e-5 as NaN-guard at the timestep_eps boundary.
         alpha_bar = rearrange(self._alpha_bar(t), 'b -> b 1 1')
         sigma = (1.0 - alpha_bar).clamp(min=1e-5)
         score_hat = (alpha_bar.sqrt() * z0_hat.float() - z_t) / sigma
@@ -252,13 +247,9 @@ class DiffusionModel(nn.Module):
         score_diff_sq = (score_hat - score_target) ** 2 * min_snr_clip
         score_loss = (score_diff_sq * loss_mask).sum()
 
-        # CE-RVQ loss:
-        #   Per quantizer j, score the partial residual ẑ₀ − Σᵢ<ⱼ eᵢ against every
-        #   codebook entry via −L2 + softmax, and cross-entropy against the GT code
-        #   index. Supervises the discrete decoding path that plain MSE misses.
-        #
-        #   Codebook embeddings live in raw Encodec space, so ẑ₀ must be unnormalized
-        #   inside _ce_rvq_loss before residual computation.
+        # CE-RVQ loss: per quantizer j, score partial residual ẑ₀ − Σᵢ<ⱼ eᵢ against every codebook
+        # entry (−L2 + softmax), CE vs the GT code index. Supervises the discrete decoding path MSE
+        # misses. (ẑ₀ unnormalized to raw Encodec space inside _ce_rvq_loss before the residual.)
         ce_rvq_loss = self._ce_rvq_loss(
             z0_hat,
             target_codebook_indices,
@@ -283,12 +274,10 @@ class DiffusionModel(nn.Module):
             prompt_encodings_mask,      # [B, Fp, 1] bool
             sampling_steps: int | None = None,
     ):
-        # Probability-flow ODE reverse solve of the VP-SDE, Euler steps over [1, ε].
-        #
-        #   dz/dt   = -½β(t)·(√ᾱ(t)·ẑ₀ − ᾱ(t)·z_t) / (1 − ᾱ(t))
-        #   z_{t-Δt} = z_t + Δt·½β(t)·(√ᾱ(t)·ẑ₀ − ᾱ(t)·z_t) / (1 − ᾱ(t))
-        #
-        # z_T ~ N(0, τ⁻¹·I) with τ = sampling_temperature (paper §4.3).
+        # Probability-flow ODE reverse solve of the VP-SDE, Euler steps over [1, ε]:
+        #   dz/dt    = -½β(t)·(√ᾱ·ẑ₀ − ᾱ·z_t) / (1 − ᾱ)
+        #   z_{t-Δt} = z_t + Δt·½β(t)·(√ᾱ·ẑ₀ − ᾱ·z_t) / (1 − ᾱ)
+        # z_T ~ N(0, τ⁻¹·I), τ = sampling_temperature (paper §4.3).
         n_steps = sampling_steps if sampling_steps is not None else self.sampling_steps
 
         B, Ft, _ = condition.shape
@@ -387,13 +376,12 @@ class DiffusionModel(nn.Module):
             latent_std,               # [latent_dim] | per-channel std
     ):
         # For each quantizer j:
-        #   r_j      = ẑ₀ − Σᵢ<ⱼ eᵢ                 (partial residual, GT earlier codes — no error cascade)
-        #   logit_k  = 2·r_j·Cⱼ[k] − ‖Cⱼ[k]‖²       (= −‖r−C[k]‖² + const; const drops under softmax)
-        #   loss_j   = CE(softmax_k(logit), codes_j)
-        # Single Python loop over Q=32 (static), vectorized over (B, Ft, K) per step.
-        # Running cumsum avoids materializing a full [Q, B, Ft, latent_dim] residual tensor.
-        # Unnormalize ẑ₀ to raw codebook space before residual computation — codebook
-        # embeddings are raw Encodec vectors and the residual interpretation only holds there.
+        #   r_j     = ẑ₀ − Σᵢ<ⱼ eᵢ              (partial residual, GT earlier codes — no error cascade)
+        #   logit_k = 2·r_j·Cⱼ[k] − ‖Cⱼ[k]‖²    (= −‖r−C[k]‖² + const; const drops under softmax)
+        #   loss_j  = CE(softmax_k(logit), codes_j)
+        # Static Python loop over Q=32, vectorized over (B, Ft, K). Running cumsum avoids a full
+        # [Q, B, Ft, latent_dim] residual tensor. Unnormalize ẑ₀ to raw codebook space first
+        # (codebook embeds are raw Encodec; the residual interpretation only holds there).
         z0_hat = z0_hat.float() * latent_std + latent_mean
         Q = target_codebook_indices.shape[2]
         codebooks = codebook_embeddings[:Q].float()                         # [Q, K, latent_dim]
@@ -434,10 +422,8 @@ class DiffusionModel(nn.Module):
             self,
             t,  # [] or [B]
     ):
-        # Standard VP-SDE convention: α̅(t) = exp(−∫₀ᵗ β(s) ds), with
-        # ∫₀ᵗ β(s) ds = t · β_min + ½ t² (β_max − β_min). Forward marginal
-        # z_t = √α̅·z₀ + √(1 − α̅)·ε then matches the paper (ρ(z₀,t) = √α̅·z₀,
-        # Σ_t = 1 − α̅).
+        # VP-SDE: α̅(t) = exp(−∫₀ᵗ β(s) ds), ∫₀ᵗ β(s) ds = t·β_min + ½t²(β_max − β_min).
+        # Forward marginal z_t = √α̅·z₀ + √(1 − α̅)·ε matches paper (ρ = √α̅·z₀, Σ_t = 1 − α̅).
         t = t.float()
         integral_beta = t * self.beta_min + 0.5 * t.square() * (self.beta_max - self.beta_min)
         return torch.exp(-integral_beta)

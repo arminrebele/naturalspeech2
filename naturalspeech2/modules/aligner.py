@@ -49,9 +49,8 @@ class Aligner(nn.Module):
             phoneme_encodings_mask,
         )
 
-        # Mask invalid phoneme columns before softmax (large negative, not -inf,
-        # so the FP32 log_softmax stays well-defined on rows that have at least
-        # one valid column).
+        # Mask invalid phoneme cols pre-softmax with large-negative (not -inf) →
+        # FP32 log_softmax stays defined on rows with ≥1 valid column.
         mask_value = -torch.finfo(learned_scores.dtype).max
         phoneme_col_mask = rearrange(phoneme_encodings_mask.bool(), 'b p 1 -> b 1 p')  # [B, 1, P]
         learned_scores = learned_scores.masked_fill(~phoneme_col_mask, mask_value)
@@ -64,12 +63,10 @@ class Aligner(nn.Module):
             w=self.prior_w,
         )
 
-        # Per-frame log_softmax of learned scores BEFORE the prior is added.
-        # ForwardSumLoss pads a fixed blank logit and softmaxes over [blank, P labels];
-        # without this normalization, label logits sit at an uncalibrated scale (driven
-        # by feature norms × temperature) and silently shift the blank-vs-label calibration.
-        # Viterbi and bin-loss are unaffected: log_softmax adds a per-frame constant, which
-        # is invariant under the monotonic DP and cancels in the second log_softmax below.
+        # Per-frame log_softmax of learned scores BEFORE adding the prior. ForwardSumLoss
+        # softmaxes over [blank, P labels]; without this, label logits sit at an uncalibrated
+        # scale (feature norm × temperature) → shifts blank-vs-label calibration. Viterbi/bin-loss
+        # unaffected: log_softmax adds a per-frame constant, invariant under the DP.
         learned_label_logprobs = learned_scores.log_softmax(dim=-1)             # [B, F, P] FP32
         posterior_label_logits = learned_label_logprobs + prior_logprobs        # [B, F, P] FP32
         posterior_label_logprobs = posterior_label_logits.log_softmax(dim=-1)   # [B, F, P] FP32
@@ -140,8 +137,7 @@ class AlignerNet(nn.Module):
         m = mask.to(x.dtype)
         x = norm(x) * m
 
-        # Conv1D pre-masks; we re-mask after each post-conv activation because
-        # conv bias produces nonzero values at padded positions.
+        # Conv1D pre-masks; re-mask after each activation (conv bias produces nonzero at padding).
         x = conv1(x, mask)
         x = self.act(x) * m
         x = self.dropout(x)
@@ -170,21 +166,15 @@ class AlignerNet(nn.Module):
             self.phoneme_norm, self.phoneme_conv1, self.phoneme_conv2, self.phoneme_proj,
         )  # [B, P, attn_channels]
 
-        # L2-normalize features → cosine-similarity attention: dist_sq = 2·(1 − cos) ∈ [0, 4],
-        # so learned_scores = −temperature·dist_sq ∈ [−2·temperature, 0] — a range INDEPENDENT
-        # of feature magnitude. Without this, softmax sharpness was hostage to the raw feature
-        # norm: our N(0, 0.02) init yields ‖feat‖ ~0.16/channel → ‖Δfeat‖² ~4 → at the old
-        # temperature 0.0005 the scores spanned only ~0.002 → softmax ≈ uniform → the alignment
-        # never sharpened on data the model could not memorize (single-batch overfit grew the
-        # weights large enough to escape this; multi-speaker could not). temperature now sets the
-        # cosine scale directly (2·temperature on cos; ~10 here, cf. CLIP's learned ~14). It also
-        # scales the gradient reaching the features, so the old 0.0005 starved them of alignment
-        # signal — another reason the features stayed tiny.
+        # L2-normalize features → cosine-similarity attention: dist_sq = 2·(1−cos) ∈ [0,4],
+        # so learned_scores = −temperature·dist_sq ∈ [−2·temperature, 0] — range INDEPENDENT of
+        # feature magnitude. Without it, softmax sharpness is hostage to feature norm (tiny under
+        # N(0,0.02) init → near-uniform softmax → alignment never sharpens). temperature sets the
+        # cosine scale directly (2·temperature on cos; ~10 here, cf. CLIP's learned ~14) and also
+        # scales the gradient reaching the features.
         #
-        # FP32 GEMM (autocast disabled): torch.bmm is an autocast op, so .float() alone wouldn't
-        # keep the cross-term FP32 inside the training autocast region. The precision margin is
-        # large now that scores are O(1), but it's free insurance for the temperature-scaled
-        # log_softmax + log_prior arithmetic downstream.
+        # FP32 GEMM (autocast disabled): torch.bmm is an autocast op, so .float() alone wouldn't keep
+        # the cross-term FP32 in the autocast region — cheap insurance for the log_softmax+prior math.
         with torch.autocast(device_type=audio_features.device.type, enabled=False):
             a = torch.nn.functional.normalize(audio_features.float(), dim=-1)   # unit ‖·‖ over channels
             p = torch.nn.functional.normalize(phoneme_features.float(), dim=-1)
@@ -197,10 +187,8 @@ class AlignerNet(nn.Module):
 
 
 
-_PRIOR_PAD = -1e9   # finite stand-in for log 0; exp(-1e9) underflows to 0 in fp32,
-                    # but stays finite under batched CTC backward (which evaluates
-                    # exp(log_probs) * grad over every cell, including padded ones —
-                    # `-inf` there yields 0 * NaN = NaN gradients in PyTorch's CTC).
+_PRIOR_PAD = -1e9   # finite stand-in for log 0 (exp underflows to 0 in fp32) that stays
+                    # finite under batched CTC backward — `-inf` would give 0*NaN=NaN grads.
 
 
 def compute_beta_binomial_prior(
@@ -210,11 +198,8 @@ def compute_beta_binomial_prior(
     phoneme_encodings_max: int,
     w: float = 1.0,
 ) -> torch.Tensor:
-    """
-    Paper: One TTS Alignment To Rule Them All (Equations 12, 13).
-    Returns FP32 log-prior [B, F, P] regardless of autocast context — `lgamma`
-    differences lose precision rapidly in BF16 for moderate F.
-    """
+    """Beta-binomial alignment log-prior (paper: One TTS Alignment To Rule Them All, Eq 12-13).
+    Returns FP32 [B, F, P] regardless of autocast — lgamma diffs lose precision fast in BF16."""
     device = frame_lengths.device
 
     T = rearrange(frame_lengths.float(), 'b -> b 1 1')                              # [B, 1, 1]
@@ -272,31 +257,22 @@ def maximum_path_indices(
     frame_lengths: torch.Tensor,                # [B] long — valid frames per item
     phoneme_encodings_lengths: torch.Tensor,    # [B] long — valid phonemes (acoustic axis)
 ) -> torch.Tensor:
-    """
-    Monotonic Viterbi (stay or move-by-1). Returns compact path indices [B, F] long.
-    Padded frame indices are 0 (the kernel only writes 1s in the valid F-range, so
-    `argmax` over an all-zero padded row returns index 0).
+    """Monotonic Viterbi (stay or move-by-1) → compact path indices [B, F] long.
+    Padded frame indices are 0 (kernel writes 1s only in the valid F-range, so argmax
+    over an all-zero padded row returns 0).
 
-    Backed by the Glow-TTS `monotonic_align` Cython kernel (Kim et al., NeurIPS 2020;
-    full citation chain in CLAUDE.md "Aligner Viterbi"). The Python `for f` loop this
-    replaces was hostile to `torch.compile` — Inductor would either compile-time-blow-up
-    unrolling the 2249-iter FX graph or recompile per bucket length, which is the
-    actual load-bearing motivation. Secondary effect: the kernel's wall-clock cost is
-    0.55 ms at typical shapes (B=8, F=375, P=60) and 5.4 ms at the worst-case bucket
-    (B=8, F=2250, P=120), measured on the PRO 6000 (2026-05-10).
-    The pure-Python alternative was estimated at ~145 ms at worst case but never
-    directly run — see docs/notes/gpu_bringup.md for the perf probe.
+    Backed by the Glow-TTS monotonic_align Cython kernel (Kim et al., NeurIPS 2020). The
+    pure-Python `for f` loop it replaces was hostile to torch.compile (Inductor blow-up
+    unrolling the ~2249-iter graph, or per-bucket recompiles) — the load-bearing motivation.
+    Kernel cost: 0.55 ms typical (B=8,F=375,P=60), 5.4 ms worst-case bucket (B=8,F=2250,P=120).
 
-    `@torch.compiler.disable` because the kernel runs CPU-side after a `.cpu()` move;
-    Dynamo treats this as a graph break and compiles around it.
+    @torch.compiler.disable: kernel runs CPU-side after .cpu(); Dynamo graph-breaks around it.
 
-    Note: the DP is invariant to a per-frame additive constant (V8 / R8), so feeding
-    `learned_scores + prior_logprobs` produces the same hard path as feeding the
-    log-softmax-normalized form. Do not "normalize" the DP scores in a future refactor.
+    DP is invariant to a per-frame additive constant, so learned_scores + prior_logprobs gives
+    the same hard path as the log-softmax-normalized form. Do NOT "normalize" the DP scores.
 
-    Lengths are passed explicitly (rather than recovered from the mask) so the kernel
-    contract doesn't silently assume an outer-product attention mask — see review
-    in `.codex/plans/aligner_followups.md` Phase 6 post-review fixes.
+    Lengths passed explicitly (not recovered from a mask) so the kernel contract doesn't assume
+    an outer-product attention mask.
     """
     # Kernel convention is [B, P, F]; ours is [B, F, P]. Transpose to match.
     value = rearrange(scores, 'b f p -> b p f').contiguous()
@@ -309,22 +285,17 @@ def maximum_path_indices(
 
 
 class ForwardSumLoss(nn.Module):
-    """
-    Paper: RAD-TTS (Appendix A.6). Forward-sum CTC over per-frame label posteriors.
+    """Forward-sum CTC over per-frame label posteriors (paper: RAD-TTS, Appendix A.6).
 
-    Targets are alignment positions 1..P, not phoneme vocabulary ids (Decision 5):
-    repeated phonemes in the transcript remain distinct alignment targets, and the
-    aligner only learns frame-to-position affinity.
+    Targets are alignment positions 1..P, not phoneme vocab ids: repeated phonemes stay
+    distinct targets; the aligner only learns frame-to-position affinity.
     """
 
     def __init__(self, blank_logit: float = -1.0):
         super().__init__()
         self.blank_logit = blank_logit
-        # reduction='sum' (not 'mean') so we can divide by total frame count below.
-        # PyTorch's reduction='mean' divides by target_lengths (phoneme count P), which
-        # puts this loss in nats/phoneme. bin_loss is nats/frame, and the rest of the
-        # training losses are also frame-normalised — keep them all in the same units
-        # so loss_weights are interpretable across terms and don't drift with F/P ratio.
+        # reduction='sum' (not 'mean'): 'mean' divides by phoneme count P → nats/phoneme, but
+        # bin_loss and the rest are frame-normalized. Same units → loss_weights stay comparable.
         self.ctc_loss = nn.CTCLoss(blank=0, reduction='sum', zero_infinity=True)
 
     def forward(
@@ -363,10 +334,8 @@ class ForwardSumLoss(nn.Module):
 
 
 class BinLoss(nn.Module):
-    """
-    Per-step NLL of the posterior-label distribution along the Viterbi hard path.
-    Consumes posterior log-probs (Decision 3), not prior-free learned log-probs.
-    """
+    """Per-step NLL of the posterior-label distribution along the Viterbi hard path.
+    Consumes posterior log-probs, not prior-free learned log-probs."""
 
     def __init__(self):
         super().__init__()

@@ -1,20 +1,15 @@
 #!/usr/bin/env python3
 """Screen one module's dropout sites, then emit paired keep/reject verdicts.
 
-For the given module it runs the rolling baseline plus one trial per site (that
-site at --rate, every other site at its rolling-baseline value), aggregates each
-treatment against the baseline (scripts/tuning/aggregate.py), and — with
---commit — folds the survivors into the rolling-baseline JSON for the next
-module. Run the modules in aggregate.ORDER, reviewing verdicts between each.
+Runs the rolling baseline plus one trial per site (that site at --rate, others at their
+rolling-baseline value), aggregates each treatment vs baseline (aggregate.py), and — with
+--commit — folds survivors into the rolling-baseline JSON for the next module. Run modules
+in aggregate.ORDER, reviewing verdicts between each.
 
-Each trial is a fresh `scripts/train.py +experiment=dropout_trial` subprocess
-(fresh CUDA context + compile cache, no cross-run state). ALL dropout sites are
-passed explicitly every run, so the trial is fully determined regardless of the
-(paper) dropout defaults in config/model/base.yaml — the tuning baseline is zero
-dropout, and the search tests adding a low rate at one site at a time.
-
-This is the per-site screen + gate only. The combo / rate-refine stage on the
-survivors is a follow-up; for now the gate just reports which sites cleared.
+Each trial is a fresh `train.py +experiment=dropout_trial` subprocess (fresh CUDA context +
+compile cache). ALL dropout sites passed explicitly every run → trial fully determined
+regardless of base.yaml defaults; tuning baseline is zero dropout, search adds a low rate at
+one site at a time. Per-site screen + gate only (combo / rate-refine is a follow-up).
 
   python scripts/tuning/run_dropout_screen.py --module duration_predictor --commit
 """
@@ -36,7 +31,7 @@ def load_baseline(path: Path) -> dict:
     """Rolling baseline {site: rate}; all sites zero if the file doesn't exist yet."""
     if path.exists():
         baseline = json.loads(path.read_text())
-        # Surface drift between the saved baseline and the current site manifest loudly.
+        # Surface drift between saved baseline and current site manifest.
         assert set(baseline) == set(ALL_SITES), (
             f"baseline sites {sorted(baseline)} != manifest sites {sorted(ALL_SITES)}"
         )

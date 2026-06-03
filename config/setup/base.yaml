@@ -1,6 +1,5 @@
-# Canonical production training defaults. Per-mode files (overfit_test,
-# loss_analysis, gradient_analysis) inherit and override only their deltas.
-# To run the canonical full-scale training: `python scripts/train.py`.
+# Canonical production training defaults. Per-mode files inherit + override only deltas.
+# Full-scale training: `python scripts/train.py`.
 
 device: "cuda"
 init_from: "scratch"     # 'scratch' or 'resume'
@@ -8,7 +7,7 @@ gradient_accumulation_steps: 1
 
 max_iters: 300000
 warmup_iters: 32000
-lr_decay_iters: ${setup.max_iters}   # cosine decay horizon — tracks max_iters so experiment/CLI bumps stay correct; ISR ignores it
+lr_decay_iters: ${setup.max_iters}   # cosine decay horizon — tracks max_iters; ISR ignores it
 
 # Mode flags — branch training mechanics, not the eval/log/save surface
 overfit_single_batch: False
@@ -16,8 +15,7 @@ loss_analysis_run: False
 gradient_analysis_run: False
 dropout_trial_run: False
 
-# dropout_trial only (inert otherwise): eval just the converged tail, and where
-# to dump the per-eval held-out losses the orchestrator reads back.
+# dropout_trial only (inert otherwise): eval the converged tail; dump per-eval held-out losses for the orchestrator.
 dropout_eval_start_frac: 0.8
 dropout_trial_out: "research/dropout_trial_evals.jsonl"
 
@@ -28,10 +26,10 @@ checkpoint_interval: 5000    # crash-recovery ckpt.pt every 5000 iters
 
 # Eval block contents
 eval_iters: 200
-audio_tables: [fixed_val_refs]  # canonical validation = dev+test combined: one held-out audio table + one combined val-WER (matches the chained dev+test validation loss)
-num_audio_refs: 10              # clips per split for the held-out refs; fixed_val_refs pools dev+test → 2× this many clips (ALSO the WER sample size — keep >=10 for a stable per-eval mean). random_dev + overfit_batch fixed at 2
+audio_tables: [fixed_val_refs]  # validation = dev+test combined: one held-out audio table + one combined val-WER
+num_audio_refs: 10              # clips per split for held-out refs; fixed_val_refs pools dev+test → 2× (also the WER sample size — keep ≥10). random_dev + overfit_batch fixed at 2
 inference_data_loss_sweep: []   # empty by default; overfit_test enables for solver diagnostics
-eval_metrics: ["wer"]           # objective metrics on fixed dev/test refs. WER = HuBERT-CTC (no LM), runs on the idle 2nd GPU. Inert for modes with no fixed-ref table (overfit_test/loss_analysis/gradient_analysis → never loads the ASR).
+eval_metrics: ["wer"]           # objective metrics on fixed dev/test refs. WER = HuBERT-CTC (no LM) on the idle 2nd GPU. Inert for modes with no fixed-ref table.
 
 # Save policy
 best_safetensors: True

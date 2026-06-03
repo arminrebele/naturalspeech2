@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, min_audio_samples: int, batch_size: int, vocab_size: int) -> None:
     
-    """The isolated process that runs the actual model to test VRAM limits."""
+    """Isolated process that runs the model to test VRAM limits."""
     
     from naturalspeech2.model import NaturalSpeech2Model
     from naturalspeech2.config.schema import model_cfg_from_omegaconf
@@ -41,7 +41,7 @@ def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, mi
             loss_warmup_steps=OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
         ).to(device)
         
-        # Perform 10 forward/backward steps to ensure steady-state memory allocation
+        # 10 fwd/bwd steps → steady-state memory
         for _ in range(10):
             batch = generate_dummy_batch(batch_size, audio_samples, phoneme_samples, min_audio_samples, vocab_size, device)
             denominators = compute_denominators([batch], cfg)
@@ -62,7 +62,7 @@ def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, mi
         peak_alloc = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
         peak_res = torch.cuda.max_memory_reserved(device) / (1024 ** 3)
         
-        # Print stats to stdout so the orchestrator can parse them
+        # stdout → orchestrator parses
         print(f"VRAM_STATS:{peak_alloc:.3f},{peak_res:.3f}")
         sys.exit(0) # Success
     except RuntimeError as e:
@@ -84,7 +84,7 @@ def test_batch_size(audio_samples: int, phoneme_samples: int, min_audio_samples:
     env["WORKER_BATCH"] = str(batch_size)
     env["WORKER_VOCAB_SIZE"] = str(vocab_size)
     
-    # We pass the original sys.argv to preserve Hydra configs
+    # pass sys.argv to preserve Hydra configs
     result = subprocess.run([sys.executable, __file__] + sys.argv[1:], env=env, capture_output=True, text=True)
     
     if result.returncode == 0:
@@ -133,7 +133,7 @@ def main(cfg: DictConfig) -> None:
     
     logger.info("Starting Isolated Max Batch Size Search...\n")
     
-    # Sort buckets by audio length to match dataset.py logic perfectly
+    # Sort buckets by audio length (matches dataset.py)
     sorted_buckets = sorted(cfg.dataloader.bucket_mapping, key=lambda x: x.audio_length)
     min_audio_len = 1
 
@@ -154,7 +154,7 @@ def main(cfg: DictConfig) -> None:
             else:
                 break
             
-        # Phase 2: Binary search to find the exact limit between (bs//2) and (bs)
+        # Phase 2: Binary search between bs//2 and bs
         low = bs // 2
         high = bs - 1
         max_stable_bs = low if last_alloc > 0.0 else 0
@@ -174,7 +174,7 @@ def main(cfg: DictConfig) -> None:
             logger.error(f"\n❌ CRITICAL: Bucket {audio_len} is too large. OOM even at batch size 1!")
             raise RuntimeError(f"Bucket {audio_len} fails at batch_size 1. Reduce bucket sizes or model size.")
                 
-        # Safety Margin: Back off by ~10% (at least 1) to leave room for fragmentation/optimizer spikes
+        # Safety margin: back off ~10% (≥1) for fragmentation/optimizer spikes
         safe_bs = max(1, int(max_stable_bs * 0.90))
         
         results.append({
@@ -188,7 +188,7 @@ def main(cfg: DictConfig) -> None:
         logger.info(f"   -> Peak Reserved VRAM:  {max_res:.2f} GB (Fragmentation Overhead: {max_res - max_alloc:.2f} GB)")
         logger.info(f"🟢 Recommended Safe Limit (10% Margin): {safe_bs}\n")
         
-        # The lower bound for the next bucket is one step above the current bucket's maximum
+        # Next bucket's lower bound = this bucket's max + 1
         min_audio_len = audio_len + 1
         
     logger.info("="*50)
@@ -199,7 +199,7 @@ def main(cfg: DictConfig) -> None:
     logger.info("="*50)
 
 if __name__ == "__main__":
-    # Enable PyTorch Memory Expansion to heavily mitigate fragmentation
+    # Memory expansion → mitigate fragmentation
     if "PYTORCH_CUDA_ALLOC_CONF" not in os.environ:
         os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
     main()

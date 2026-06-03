@@ -42,10 +42,8 @@ class PhonemeEncoder(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        # Standard N(0, 0.02) base, then Fixup-style zero-init of the two residual-output
-        # projections per TransformerEncoderLayer: the self-attention output projection
-        # (multi_head_attention.to_out) and the FFN output projection (conv2). Each
-        # transformer layer is identity-at-init → the 6-layer stack is identity-at-init.
+        # N(0,0.02) base + Fixup zero-init of each layer's two residual-output projections
+        # (attn to_out, FFN conv2) → every layer (and the stack) is identity-at-init.
         standard_init(self)
         for layer in self.transformer_layers:
             nn.init.zeros_(layer.multi_head_attention.to_out.weight)

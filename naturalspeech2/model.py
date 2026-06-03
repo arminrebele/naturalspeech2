@@ -74,8 +74,7 @@ class NaturalSpeech2Model(nn.Module):
             **asdict(cfg.pitch_predictor),
         )
 
-        # Projects per-frame pitch (1 channel) up to hidden_dim so it can be
-        # added to expanded_phoneme_encodings to form the diffusion condition c.
+        # Project per-frame pitch (1 ch) → hidden_dim, added to expanded_phoneme_encodings for condition c.
         self.pitch_projection = Conv1D(1, cfg.hidden_dim, 1)
 
         self.diffusion_model = DiffusionModel(
@@ -101,11 +100,10 @@ class NaturalSpeech2Model(nn.Module):
 
         frame_lengths = durations.sum(dim=1)  # [B]
 
-        # Cumulative ends: duration_ends[b, p] = first frame index NOT belonging to phoneme p.
-        # Non-decreasing (durations >= 0), so valid input for searchsorted.
+        # duration_ends[b,p] = first frame NOT in phoneme p; non-decreasing → valid for searchsorted.
         duration_ends = durations.cumsum(dim=1)  # [B, P]
 
-        # For each frame f, the phoneme it belongs to is the smallest p with f < duration_ends[b, p].
+        # Frame f belongs to the smallest p with f < duration_ends[b, p].
         frame_positions = repeat(torch.arange(max_frames, device=durations.device), 'f -> b f', b=durations.shape[0])  # [B, F]
         phoneme_idx = torch.searchsorted(duration_ends, frame_positions, right=True).clamp(max=P - 1)  # [B, F]
 
@@ -127,30 +125,30 @@ class NaturalSpeech2Model(nn.Module):
         device = audio_latents.device
         B, F, D = audio_latents.shape
 
-        # Per-sample prompt length: fixed prompt_frames frames, capped so the target retains
-        # min_target_frames. clamp(min=1) handles degenerate clips shorter than min_target_frames+1.
+        # Prompt length: prompt_frames, capped so target keeps min_target_frames.
+        # clamp(min=1) for degenerate clips shorter than min_target_frames+1.
         max_allowed_prompt = (audio_latents_lengths - min_target_frames).clamp(min=1)               # [B]
-        prompt_latents_lengths = torch.minimum(                                                     # [B] | number of frames for the speech prompt
+        prompt_latents_lengths = torch.minimum(                                                     # [B] | speech-prompt frame count
             max_allowed_prompt,
             audio_latents_lengths.new_full((B,), prompt_frames),
         )
 
-        # Sample prompt_starts in [0, lengths - prompt_lengths]. One rand call per sample — length is deterministic.
+        # Sample prompt_starts in [0, lengths - prompt_lengths]; one rand per sample (length deterministic).
         rand = torch.rand(B, device=device)                                                         # [B]
-        max_starts = audio_latents_lengths - prompt_latents_lengths                                 # [B] | maximum starting index for the speech prompt to ensure it fits within the audio latents
-        prompt_starts = (rand * (max_starts + 1).float()).floor().long()                            # [B] | frame index where the prompt starts
+        max_starts = audio_latents_lengths - prompt_latents_lengths                                 # [B] | max start so the prompt fits
+        prompt_starts = (rand * (max_starts + 1).float()).floor().long()                            # [B] | prompt start frame
 
-        # Extract prompt latents. Buffer width is a Python-int constant — bucket-stable for torch.compile.
+        # Extract prompt latents. Buffer width = Python-int constant → bucket-stable for torch.compile.
         max_prompt_len = min(prompt_frames, F)
-        j_p = rearrange(torch.arange(max_prompt_len, device=device), 'fp -> 1 fp')                              # [1, Fp] | [0, 1, 2, ..., Fp-1] -> relative offset
-        prompt_idx = (rearrange(prompt_starts, 'b -> b 1') + j_p).clamp(max=F - 1)                              # [B, Fp] | frame indices for the prompt in the audio latents
+        j_p = rearrange(torch.arange(max_prompt_len, device=device), 'fp -> 1 fp')                              # [1, Fp] | offsets 0..Fp-1
+        prompt_idx = (rearrange(prompt_starts, 'b -> b 1') + j_p).clamp(max=F - 1)                              # [B, Fp] | prompt frame indices
         prompt_latents = torch.gather(audio_latents, 1, repeat(prompt_idx, 'b fp -> b fp d', d=D))              # [B, Fp, D]
         prompt_latents_mask = rearrange(j_p < rearrange(prompt_latents_lengths, 'b -> b 1'), 'b fp -> b fp 1')  # [B, Fp, 1]
-        prompt_latents = prompt_latents * prompt_latents_mask.to(prompt_latents.dtype)                          # mask out padding frames in the prompt latents
+        prompt_latents = prompt_latents * prompt_latents_mask.to(prompt_latents.dtype)                          # mask padding frames
 
-        # Extract target latents. Buffer width is a Python-int constant — bucket-stable for torch.compile.
+        # Extract target latents. Buffer width = Python-int constant → bucket-stable for torch.compile.
         max_target_len = F - max(1, min(prompt_frames, F - min_target_frames))
-        j_t = rearrange(torch.arange(max_target_len, device=device), 'ft -> 1 ft')                  # [1, Ft] | [0, 1, 2, ..., Ft-1] 
+        j_t = rearrange(torch.arange(max_target_len, device=device), 'ft -> 1 ft')                  # [1, Ft] | offsets 0..Ft-1
         target_idx = (                                                                              # [B, Ft]
             j_t
             + (j_t >= rearrange(prompt_starts, 'b -> b 1')).long()
@@ -162,8 +160,8 @@ class NaturalSpeech2Model(nn.Module):
         target_latents_mask = rearrange(j_t < rearrange(target_latents_lengths, 'b -> b 1'), 'b ft -> b ft 1')  # [B, Ft, 1]
         target_latents = target_latents * target_latents_mask.to(target_latents.dtype)
 
-        # Extract per-quantizer GT codebook indices at target frames
-        # target_idx was clamped on padded slots -> zero those with the mask; index 0 is valid but CE skips them.
+        # Per-quantizer GT codebook indices at target frames. target_idx clamped on padded
+        # slots → zero them via mask (index 0 is valid but CE skips padded).
         Q = codebook_indices.shape[2]
         target_codebook_indices = torch.gather(      # [B, Ft, Q]
             codebook_indices,
@@ -205,18 +203,10 @@ class NaturalSpeech2Model(nn.Module):
 
         pitch: torch.Tensor,                  # [B, F]    | float | GT F0 in Hz (0.0 = unvoiced / padding)
 
-        return_diffusion_inputs: bool = False, # if True, also return the tensors that
-                                               # were passed into the diffusion model so a
-                                               # caller can re-run sample() with the same
-                                               # condition (overfit-test diagnostic).
+        return_diffusion_inputs: bool = False, # also return diffusion inputs so a caller can
+                                               # re-run sample() with the same condition (overfit diagnostic).
     ):
-        """
-        B: batch size
-        T: number of audio samples
-        P: seq_len of phonemes
-        F: seq_len of frames
-        D: hidden_dim
-        """
+        """Shapes — B: batch, T: audio samples, P: phonemes, F: frames, D: hidden_dim."""
 
         (audio_encodings,                                           # audio_encodings: [B, F, n_mels]
          frame_mask,                                                # frame_mask: [B, F, 1]
@@ -309,11 +299,9 @@ class NaturalSpeech2Model(nn.Module):
             frame_mask,
         )
 
-        # Loss is in log-space so errors are scale-symmetric: a 2x overshoot on a 2-frame
-        # consonant (perceptually catastrophic) weighs more than a 2x overshoot on a 50-frame
-        # vowel (barely audible), whereas linear-space MSE would treat them as equal and let
-        # long vowels dominate the gradient. log1p (not log) keeps log(0) → 0 for padded/1-frame
-        # phonemes. The network predicts log-duration directly; exp(y)-1 at inference gives frames.
+        # Log-space loss → scale-symmetric: a 2× error on a 2-frame consonant (catastrophic) outweighs
+        # a 2× error on a 50-frame vowel (inaudible); linear MSE would let long vowels dominate. log1p
+        # keeps log(0)→0 for padded/1-frame phonemes. Net predicts log-duration; exp(y)-1 → frames.
         gt_log_durations = torch.log1p(durations.to(predicted_log_durations.dtype))  # [B, P]
         duration_loss_per_phoneme = F.mse_loss(
             predicted_log_durations,
@@ -335,11 +323,9 @@ class NaturalSpeech2Model(nn.Module):
         )  # [B, F]
         pitch_predictor_loss = (pitch_loss_per_frame * pitch_loss_mask).sum()
 
-        # Voiced/unvoiced BCE over ALL valid frames (not voiced-only). The pitch predictor
-        # is trained voiced-only on the F0 *value*, so at inference it emits ~speaker-mean
-        # F0 on unvoiced frames; this head lets generate() gate those to 0, matching the
-        # GT-pitch condition (pitch=0 on unvoiced) the diffusion was trained on. Without it
-        # ~half the inference condition frames are OOD → noise.
+        # Voiced/unvoiced BCE over ALL valid frames (not voiced-only). Pitch head is trained
+        # voiced-only on F0 value → emits ~speaker-mean F0 on unvoiced frames at inference; this
+        # head lets generate() gate those to 0, matching the GT condition (pitch=0 on unvoiced).
         voicing_bce_per_frame = F.binary_cross_entropy_with_logits(
             predicted_voicing_logit, voiced_mask, reduction='none',
         )  # [B, F]
@@ -392,9 +378,8 @@ class NaturalSpeech2Model(nn.Module):
         durations: torch.Tensor | None = None,   # [B, P] teacher-forced GT durations — skips the duration predictor
         pitch: torch.Tensor | None = None,        # [B, F'] teacher-forced GT pitch in Hz — skips the pitch predictor
     ):
-        # Teacher-forcing contract: predicted pitch lives on the frame grid set by the
-        # durations (F' = Σ durations), so a caller may supply pitch only when also
-        # supplying durations — otherwise the given pitch can't match the predicted F'.
+        # Teacher-forcing contract: pitch lives on the duration-set frame grid (F' = Σ durations),
+        # so a caller may supply pitch only alongside durations.
         if pitch is not None and durations is None:
             raise ValueError(
                 "generate(pitch=...) requires durations=... — pitch is defined on the "
@@ -431,18 +416,17 @@ class NaturalSpeech2Model(nn.Module):
                 prompt_encodings,
                 prompt_encodings_mask,
             )
-            # Inverse of training's torch.log1p: expm1 -> round -> clamp valid phonemes to >=1 frame -> mask padding to 0.
-            # min=1 (not 0) prevents an untrained / early-checkpoint model from collapsing valid phonemes
-            # to zero frames, which would produce max_frames=0 and crash the downstream pitch/diffusion/decode path.
+            # Inverse of training's log1p: expm1 → round → clamp ≥1 frame → mask padding to 0.
+            # min=1 (not 0) stops an untrained model collapsing valid phonemes to 0 frames →
+            # max_frames=0 → crash downstream.
             phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').long()
             durations = torch.expm1(predicted_log_durations).round().long().clamp(min=1)
             durations = durations * phoneme_mask_flat                             # [B, P]
         else:
             durations = durations.long()
 
-        # max_frames as Python int forces one CPU<->GPU sync — acceptable inside generate()
-        # (not inside forward()). Required because _expand_phoneme_encodings needs a
-        # Python int for torch.arange.
+        # max_frames as Python int forces one CPU↔GPU sync — fine in generate() (not forward()).
+        # _expand_phoneme_encodings needs a Python int for torch.arange.
         frame_lengths = durations.sum(dim=1)                                      # [B]
         max_frames = int(frame_lengths.max().item())
 
@@ -462,10 +446,8 @@ class NaturalSpeech2Model(nn.Module):
                 prompt_encodings,
                 prompt_encodings_mask,
             )
-            # Gate by predicted voicing: unvoiced frames → 0 Hz, matching the GT-pitch
-            # condition the diffusion was trained on (pitch=0 on unvoiced). The pitch
-            # predictor is trained voiced-only on the F0 value, so on unvoiced frames it
-            # emits ~speaker-mean F0; feeding that to ~half the clip is OOD → noise.
+            # Gate by predicted voicing: unvoiced → 0 Hz, matching the GT condition (pitch=0 on
+            # unvoiced). Pitch head is voiced-only trained → ~speaker-mean F0 on unvoiced = OOD → noise.
             voiced = (torch.sigmoid(predicted_voicing_logit) > 0.5).to(predicted_log_pitch.dtype)
             pitch = torch.exp(predicted_log_pitch) * voiced                       # [B, F']
 
@@ -487,32 +469,28 @@ class NaturalSpeech2Model(nn.Module):
         # 6. Decode latents to waveform.
         generated_audio = self.encodec.decode_from_latents(generated_latents)     # [B, 1, T]
         generated_audio = rearrange(generated_audio, 'b 1 t -> b t')              # [B, T]
-        # T is the max-padded length; per-sample valid lengths let callers trim
-        # away decoder output beyond each item's frame_lengths (matters for B>1).
+        # T is max-padded; per-sample lengths let callers trim decoder output beyond each item (B>1).
         audio_lengths = frame_lengths * ENCODER_HOP_LENGTH                        # [B]
         return generated_audio, audio_lengths
 
     def num_parameters(self, only_trainable: bool = True) -> int:
-        """Returns the total number of parameters in the model."""
+        """Total parameter count."""
         if only_trainable:
             return sum(p.numel() for p in self.parameters() if p.requires_grad)
         return sum(p.numel() for p in self.parameters())
 
     def configure_optimizers(self, weight_decay, learning_rate, betas):
-        # Start with all candidate parameters
         param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-        
-        # Create optim groups. Tensors that are 2D or higher (Matmuls + Embeddings) decay.
-        # 1D tensors (Biases and LayerNorms) do not decay.
+
+        # Optim groups: ≥2D (matmuls, embeddings) decay; 1D (biases, norms) don't.
         decay_params = [p for _, p in param_dict.items() if p.dim() >= 2]
         nodecay_params = [p for _, p in param_dict.items() if p.dim() < 2]
-        
+
         optim_groups = [
             {'params': decay_params, 'weight_decay': weight_decay},
             {'params': nodecay_params, 'weight_decay': 0.0}
         ]
-        
-        # Hardcode fused=True
+
         return torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, fused=True)
 
     
@@ -544,21 +522,19 @@ class LossWrapper(torch.nn.Module):
             warmup_steps = self.loss_warmup_steps[key]
             if warmup_steps > 0:
                 progress = min(1.0, step / warmup_steps)
-                # Linear warm-up from 1/10th of target weight up to the target weight
+                # Linear warm-up: 0.1×target → target
                 self.current_weights[key] = target_weight * (0.1 + 0.9 * progress)
             else:
                 self.current_weights[key] = target_weight
 
     def forward(self, loss_dict: dict, step: int = None, denominators: dict = None):
-        # log_dict values are detached tensors, NOT Python floats — materialising
-        # to floats here would force a CPU↔GPU sync at training-step frequency
-        # even when the consumer is only logging every log_interval steps.
-        # Callers .item() at log/eval time (see scripts/train.py).
+        # log_dict values are detached tensors, NOT floats — materializing here would force a
+        # CPU↔GPU sync every step. Callers .item() at log/eval time.
         total_loss = 0.0
         log_dict = {}
         weighted_tensors = {}
 
-        # Update current weights only if step is explicitly passed (train loop)
+        # Update weights only if step passed (train loop)
         if step is not None:
             self._update_weights(step)
 
@@ -605,7 +581,7 @@ class GradientAnalyzer:
             
         for p_name, p in model.named_parameters():
             if p.requires_grad and p.grad is not None:
-                # Extract standard .grad to CPU RAM 
+                # .grad → CPU RAM
                 self.grad_vectors[name][p_name] = p.grad.detach().cpu()
         
     def compute_metrics(self):
@@ -621,7 +597,7 @@ class GradientAnalyzer:
             else:
                 grad_norms[f"{name}_total"] = 0.0
             
-        # Compute Cosine Similarities only over dynamically identified shared parameters
+        # Cosine sim over shared params only
         names = list(self.grad_vectors.keys())
         for i in range(len(names)):
             for j in range(i + 1, len(names)):
@@ -631,8 +607,7 @@ class GradientAnalyzer:
                 shared_params = sorted(list(set(self.grad_vectors[name_i].keys()).intersection(set(self.grad_vectors[name_j].keys()))))
                 
                 if shared_params:
-                    # Vectorize parameter arithmetic by concatenating all shared parameters
-                    # This is vastly faster on CPU caches than iterating over dictionaries
+                    # Concatenate shared params → vectorized (faster than per-dict iteration)
                     vi_flat = torch.cat([self.grad_vectors[name_i][p].flatten() for p in shared_params])
                     vj_flat = torch.cat([self.grad_vectors[name_j][p].flatten() for p in shared_params])
                     
@@ -642,7 +617,7 @@ class GradientAnalyzer:
                     
                     del vi_flat, vj_flat
                     
-                    # Log norms computed STRICTLY over the shared backbone
+                    # Norms over the shared backbone only
                     grad_norms[f"{name_i}_shared_with_{name_j}"] = norm_i
                     grad_norms[f"{name_j}_shared_with_{name_i}"] = norm_j
 

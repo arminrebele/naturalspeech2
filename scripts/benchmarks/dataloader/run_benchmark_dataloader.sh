@@ -34,7 +34,7 @@ fi
 
 echo "Provisioning $DATASET_SPLIT_SIZE samples to prevent page cache looping (Assumed Max Batch Size: $ASSUMED_MAX_BATCH_SIZE | Total Steps: $TOTAL_STEPS)" | tee -a $LOG_FILE
 
-# We will test combinations of these workers
+# Worker counts to test
 WORKER_COUNTS=(8 16 24 30)
 
 if [ "$TEST_MODE" == "full" ]; then
@@ -56,12 +56,11 @@ for workers in "${WORKER_COUNTS[@]}"; do
     echo -e "\n===========================================================" | tee -a $LOG_FILE
     echo "Testing Config: Resample On-The-Fly = $resample_flag | Workers = $workers" | tee -a $LOG_FILE
 
-    # Clear OS RAM cache so disk I/O isn't artificially fast between worker iterations
+    # Clear OS RAM cache → disk I/O not artificially fast between iterations
     echo "Clearing OS RAM cache..." | tee -a $LOG_FILE
     sync; echo 3 > /proc/sys/vm/drop_caches || echo "Warning: Failed to drop caches (requires root)" | tee -a $LOG_FILE
     
-    # Run the benchmark and append output to log
-    # Assign sufficiently large subset of the dataset
+    # Run benchmark on a large dataset subset, append to log
     python scripts/benchmarks/dataloader/benchmark_dataloader.py \
       dataset=$DATASET_NAME \
       dataset.split="train[:${DATASET_SPLIT_SIZE}]" \
@@ -71,7 +70,7 @@ for workers in "${WORKER_COUNTS[@]}"; do
       wandb.run_name="workers_${workers}_otf_${resample_flag}" \
       2>&1 | tee -a $LOG_FILE
       
-    # Give the GPU a tiny moment to cool down and free memory allocations
+    # Let GPU free allocations
     sleep 2
   done
 done

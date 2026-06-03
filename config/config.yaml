@@ -6,13 +6,10 @@ defaults:
   - training: base
   - setup: base
   - wandb: base
-  # Per-experiment additive overrides (Hydra canonical experiment pattern):
+  # Per-experiment additive overrides (Hydra experiment pattern):
   #   python scripts/train.py +experiment=overfit_test
-  # See config/experiment/*.yaml. No-arg runs use the canonical full-scale
-  # training defaults (the base files of every group).
+  # See config/experiment/*.yaml. No-arg = full-scale training (every group's base).
 
-# Process-level reproducibility knob — seeds torch + Python random at train()
-# entry. Affects model init, diffusion t/ε sampling, prompt windows, eval-block
-# prompt picks, DataLoader worker RNG. cuDNN determinism is NOT enforced.
-# Override per-run for seed-sensitivity sweeps: `seed=1234`.
+# Reproducibility knob — seeds torch + Python random at train() entry (model init, diffusion
+# t/ε, prompt windows, eval prompt picks, DataLoader RNG). cuDNN determinism NOT enforced.
 seed: 42
