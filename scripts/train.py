@@ -1,10 +1,15 @@
 import os
+import sys
 import json
 import time
 import math
+import queue
+import signal
+import ctypes
 import random
-import itertools
 import logging
+import threading
+import subprocess
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -15,17 +20,23 @@ load_dotenv()
 
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 import torch._dynamo
 import wandb
 import hydra
 from omegaconf import DictConfig, OmegaConf
-from safetensors.torch import save_file
 
 from naturalspeech2.config.schema import model_cfg_from_omegaconf
-from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, DynamicBucketedBatchSampler
+from naturalspeech2.data.loaders import create_dataloader
 from naturalspeech2.inference import compute_inference_data_loss, generate_audio
-from naturalspeech2.eval import compute_wer
+from naturalspeech2.eval import resolve_metric_device, set_metric_device, ipc
+from naturalspeech2.eval.runner import (
+    estimate_loss,
+    get_loss_section,
+    _mean_skip_nan,
+    build_fixed_refs_data,
+    generate_ref_audio,
+    atomic_save_safetensors,
+)
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper, GradientAnalyzer
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.paths import CHECKPOINTS_DIR, PROJECT_ROOT
@@ -35,24 +46,6 @@ from naturalspeech2.utils.utils import setup_file_logger, compute_denominators
 logger = logging.getLogger(__name__)
 
 COMPILE_MILESTONES = [1, 250]
-
-def get_loss_section(key: str, phase: str, split: str = "") -> str:
-    is_weighted = key.endswith("weighted")
-    
-    if "total_weighted" in key:
-        group = "Losses"
-    elif any(x in key for x in ["data_loss", "score_loss", "ce_rvq_loss"]):
-        group = "Diffusion-Losses"
-    elif any(x in key for x in ["forward_sum_loss", "bin_loss"]):
-        group = "Aligner-Losses"
-    else:
-        group = "Losses"
-        
-    weight_str = "(Weighted)" if is_weighted else "(Raw)"
-    if phase == "Train":
-        return f"Train: {group} {weight_str}"
-    else:
-        return f"Evaluation: {split}-{group} {weight_str}"
 
 def get_lr(it, cfg):
     learning_rate = cfg.training.learning_rate
@@ -107,150 +100,6 @@ def get_infinite_batches(loader, start_epoch=0, start_batch_idx=0, overfit_singl
         epoch += 1
         sampler.set_epoch(epoch)
         sampler.set_start_batch_idx(0)
-
-@torch.no_grad()
-def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, eval_iters, grad_accum_steps, device, cfg, eval_train: bool = True):
-    out = {}
-    model.eval()
-
-    # Only the train split's sampler is perturbed (random subset); guarded behind eval_train
-    # (dropout-trial eval skips train — dev+test held-out is the decision signal).
-    # dev and test are both held out from train and speaker-disjoint, with no separate reporting
-    # role (paper reports only on external VCTK / LibriSpeech), so they're evaluated TOGETHER as
-    # one ~32 h validation pool under 'dev' (chained). Separate ONLY when dev IS the train split,
-    # where chaining trained-on dev with held-out test would be meaningless.
-    if cfg.dataset.train_split != cfg.dataset.dev_split:
-        held_out_splits = [('dev', itertools.chain(dev_loader, test_loader))]
-    else:
-        held_out_splits = [('dev', dev_loader), ('test', test_loader)]
-
-    if eval_train:
-        # Store main loop's train sampler state
-        train_sampler = train_loader.batch_sampler
-        main_train_epoch = train_sampler.epoch
-        main_train_batch_idx = train_sampler.start_batch_idx
-
-        # Eval: random shuffled subset from 0
-        train_sampler.set_epoch(random.randint(0, 10000))
-        train_sampler.set_start_batch_idx(0)
-        splits = [('train', train_loader)] + held_out_splits
-    else:
-        splits = held_out_splits
-
-    # Each held-out split runs a full pass (StopIteration breaks); train pulls up to eval_iters
-    # of a random subset. Losses are denominator-normalized means → comparable across splits.
-    for split, loader in splits:
-        loader_iter = iter(loader)
-            
-        eval_total_loss_sum = torch.zeros((), device=device)
-        eval_log_dict_sums = {}
-        actual_eval_iters = 0
-
-        for _ in range(eval_iters):
-            eval_lookahead_queue = []
-            try:
-                for _ in range(grad_accum_steps):
-                    eval_lookahead_queue.append(next(loader_iter))
-                    
-            except StopIteration:
-                break # drop incomplete logical batch, end this split
-
-            eval_denominators = compute_denominators(eval_lookahead_queue, cfg)
-            
-            eval_accum_loss = torch.zeros((), device=device)
-            eval_accum_logged_losses = {}
-
-            for batch in eval_lookahead_queue:
-                # Skip non-tensor fields (text: list[str]) — forward() has an explicit kwarg list.
-                tensor_batch = {
-                    k: v.to(device, non_blocking=True)
-                    for k, v in batch.items()
-                    if isinstance(v, torch.Tensor)
-                }
-
-                with torch.autocast(device_type=device.split(':')[0], dtype=torch.bfloat16):
-                    loss_dict = model(**tensor_batch)
-                    eval_loss, eval_logged_losses, _ = loss_wrapper(loss_dict, denominators=eval_denominators)
-
-                eval_accum_loss += eval_loss.detach()
-                for key, val in eval_logged_losses.items():
-                    eval_accum_logged_losses[key] = eval_accum_logged_losses.get(key, 0.0) + val
-
-            eval_total_loss_sum += eval_accum_loss
-            for key, val in eval_accum_logged_losses.items():
-                eval_log_dict_sums[key] = eval_log_dict_sums.get(key, 0.0) + val
-                
-            actual_eval_iters += 1
-            
-        if actual_eval_iters == 0:
-            continue   # split had fewer than grad_accum_steps batches — skip it
-
-        divisor = actual_eval_iters
-        out[split] = {
-            'total_loss': (eval_total_loss_sum / divisor).item(),
-            'logged_losses': {key: (val / divisor).item() for key, val in eval_log_dict_sums.items()},
-        }
-        
-    # Restore main loop's train sampler state (only perturbed when eval_train)
-    if eval_train:
-        train_sampler.set_epoch(main_train_epoch)
-        train_sampler.set_start_batch_idx(main_train_batch_idx)
-
-    model.train()
-    return out
-
-def create_dataloader(cfg, split: str, token_vocabulary_path: str = None):
-    bucket_mapping = OmegaConf.to_container(cfg.dataloader.bucket_mapping, resolve=True)
-    
-    max_audio_length = cfg.dataset.max_audio_length
-    max_phoneme_length = cfg.dataset.max_phoneme_length
-    
-    if split != cfg.dataset.train_split:    # bucket mapping is derived from train split
-        largest_bucket = max(bucket_mapping, key=lambda x: x['audio_length'])
-        max_audio_length = largest_bucket['audio_length']
-        max_phoneme_length = largest_bucket['phoneme_length']
-        logger.info(f"Overriding upper boundaries for '{split}' split to match max bucket: "
-                    f"audio={max_audio_length}, phonemes={max_phoneme_length}")
-
-    dataset = DatasetWrapper(
-        dataset_source=cfg.dataset.source,
-        dataset_name=cfg.dataset.name,
-        split=split,
-        text_column=cfg.dataset.text_column,
-        audio_column=cfg.dataset.audio_column,
-        filter_column=cfg.dataset.filter_column,
-        filter_substring=cfg.dataset.filter_substring,
-        token_vocabulary_path=token_vocabulary_path,
-        min_audio_length=cfg.dataset.min_audio_length,
-        max_audio_length=max_audio_length,
-        min_phoneme_length=cfg.dataset.min_phoneme_length,
-        max_phoneme_length=max_phoneme_length,
-        sampling_rate=cfg.dataloader.sampling_rate,
-        resample_on_the_fly=cfg.dataloader.resample_on_the_fly,
-        num_proc_pitch=cfg.dataloader.num_proc_pitch,
-        num_proc_phonemize=cfg.dataloader.num_proc_phonemize,
-        num_proc_tokenize=cfg.dataloader.num_proc_tokenize,
-        # Cap ONLY the train split, applied pre-preprocessing in DatasetWrapper (only N clips pitch-extracted).
-        max_train_clips=cfg.dataset.max_train_clips if split == cfg.dataset.train_split else None,
-        subset_seed=cfg.seed,
-    )
-
-    sampler = DynamicBucketedBatchSampler(
-        dataset,
-        bucket_mapping=bucket_mapping,
-        drop_last=cfg.dataloader.drop_last,
-        shuffle=cfg.dataloader.shuffle
-    )
-    collate_fn = BucketedCollateFn(bucket_mapping=bucket_mapping)
-    loader = DataLoader(
-        dataset, 
-        batch_sampler=sampler, 
-        collate_fn=collate_fn,
-        num_workers=cfg.dataloader.num_workers,
-        pin_memory=True
-    )
-    return loader, dataset
-
 
 @dataclass
 class EvalDeps:
@@ -308,44 +157,31 @@ def render_random_dev_table(deps: EvalDeps) -> tuple[str, list, list]:
     )
 
 
-def build_fixed_refs(dataset, n_refs, prompt_samples_len, sampling_rate, rng):
-    """Pick a fixed, reproducible set of ≥prompt-length reference clips for the eval audio tables.
-    Dedicated seeded RNG (random.Random) → selection identical across runs (cross-run A/B on the
-    same audio). Builds wandb.Audio objects → call only when wandb is active."""
-    indices = list(range(len(dataset)))
-    rng.shuffle(indices)
-    refs = []
-    for idx in indices:
-        if len(refs) == n_refs:
-            break
-        if dataset.dataset[idx]["audio_length"] < prompt_samples_len:
-            continue
-        sample = dataset[idx]
-        audio_np = sample["audio"].numpy()
-        start_idx = rng.randint(0, sample["audio_length"] - prompt_samples_len)
-        prompt_audio_np = audio_np[start_idx : start_idx + prompt_samples_len]
-        refs.append({
-            "original_audio": wandb.Audio(audio_np, sample_rate=sampling_rate),
-            "prompt_audio": wandb.Audio(prompt_audio_np, sample_rate=sampling_rate),
-            "prompt_tensor": torch.from_numpy(prompt_audio_np),
-            "original_np": audio_np,   # raw full clip → ASR GT-floor (WER of the ASR on real audio)
-            "text": sample["text"],
-        })
-    return refs
-
-
-def _mean_skip_nan(xs: list) -> float:
-    """Mean over non-NaN values (NaN if all dropped). A degenerate clip's WER is NaN →
-    falls out of the aggregate instead of skewing it."""
-    vals = [x for x in xs if x == x]
-    return sum(vals) / len(vals) if vals else float("nan")
+def build_fixed_refs(dataset, n_refs, prompt_samples_len, sampling_rate, rng, do_wer):
+    """Trainer-side fixed refs: shared data builder (deterministic selection + GT-floor WER cached
+    once) wrapped with wandb.Audio for the original/prompt clips (reused across evals). Call only
+    when wandb is active."""
+    return [
+        {
+            "original_audio": wandb.Audio(r.original_np, sample_rate=sampling_rate),
+            "prompt_audio": wandb.Audio(r.prompt_np, sample_rate=sampling_rate),
+            "prompt_tensor": r.prompt_tensor,
+            "original_np": r.original_np,
+            "text": r.text,
+            "gt_wer": r.gt_wer,   # GT-floor WER, computed once at build
+        }
+        for r in build_fixed_refs_data(
+            dataset, n_refs, prompt_samples_len, rng,
+            sampling_rate=sampling_rate, compute_gt_wer=do_wer,
+        )
+    ]
 
 
 def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str) -> tuple[str, list, list]:
     """Generate audio on a fixed reference set (shared by dev + test tables).
 
-    If "wer" in cfg.setup.eval_metrics: transcribe each clip (HuBERT-CTC), log per-clip WER
-    column + per-split means (synth WER and GT-floor WER) → gap (synth − floor) = honest signal.
+    If "wer" in cfg.setup.eval_metrics: per-clip synth WER column + per-split means (synth WER and
+    the GT-floor cached on each ref) → gap (synth − floor) = honest signal.
     """
     sr = deps.sampling_rate
     do_wer = "wer" in deps.cfg.setup.eval_metrics
@@ -356,8 +192,7 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
 
     rows, synth_wers, gt_wers = [], [], []
     for ref in refs:
-        gen_audio_np, length = generate_audio(deps.unoptimized_model, ref["prompt_tensor"], target_text=ref["text"])
-        gen = gen_audio_np[:length]
+        gen, synth_wer = generate_ref_audio(deps.unoptimized_model, ref["prompt_tensor"], ref["text"], sr, do_wer)
         row = [
             deps.iter_num,
             deps.cfg.model.prompt_seconds,
@@ -367,10 +202,9 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
             wandb.Audio(gen, sample_rate=sr),
         ]
         if do_wer:
-            w = compute_wer(gen, ref["text"], src_sr=sr)
-            synth_wers.append(w)
-            gt_wers.append(compute_wer(ref["original_np"], ref["text"], src_sr=sr))
-            row.append(w)
+            synth_wers.append(synth_wer)
+            gt_wers.append(ref["gt_wer"])
+            row.append(synth_wer)
         rows.append(row)
 
     if do_wer:
@@ -446,17 +280,6 @@ AUDIO_TABLES = {
     "fixed_test_refs": render_fixed_test_refs_table,
     "fixed_val_refs": render_fixed_val_refs_table,
 }
-
-
-def _save_safetensors(model: nn.Module, path) -> None:
-    """Save model state_dict to safetensors, cloning each tensor to fresh storage.
-
-    save_model errors on nn.LSTM weight_ih_l0: _flat_weights aliases the named param, so the dedup
-    pass picks a name not covering full storage and bails. Cloning sidesteps it. (Trigger: Encodec's
-    frozen-encoder LSTM.)
-    """
-    state_dict = {k: v.detach().clone().contiguous() for k, v in model.state_dict().items()}
-    save_file(state_dict, str(path))
 
 
 def _collect_dropout_keys(cfg_model) -> dict:
@@ -548,6 +371,94 @@ def _append_dropout_trial_eval(out_path, step: int, losses: dict) -> None:
         f.write(json.dumps(record) + "\n")
 
 
+# ----------------------------------------------------------------------------
+# Decoupled eval daemon — trainer side (spawn/supervise, snapshot writer, results drain)
+# ----------------------------------------------------------------------------
+
+EVAL_DAEMON_SCRIPT = PROJECT_ROOT / "scripts" / "eval_daemon.py"
+EVAL_DAEMON_SHUTDOWN_TIMEOUT_S = 1200   # allow a slow final dev+test pass + audio at run end
+EVAL_DAEMON_MAX_RESPAWNS = 5            # persistent crash → stop respawning (training continues, eval paused)
+
+
+def _clone_trainable_cpu(model, ema):
+    """Snapshot live trainable params + EMA shadow as fresh CPU tensors. Training-thread cost is a
+    GPU→CPU copy of 2× trainable weights (tens–hundreds of ms once per eval cadence); the slow
+    serialize/write runs on the writer thread."""
+    live = {n: p.detach().to("cpu", copy=True) for n, p in model.named_parameters() if p.requires_grad}
+    shadow = {n: t.detach().to("cpu", copy=True) for n, t in ema.shadow.items()}
+    return live, shadow
+
+
+class SnapshotWriter:
+    """Background thread: serialize weight snapshots to /dev/shm off the training thread. Main
+    thread does the cheap clone + submit; this thread does the torch.save + marker bump."""
+    def __init__(self, run_dir):
+        self.run_dir = run_dir
+        self._q: queue.Queue = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name="snapshot-writer", daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while True:
+            item = self._q.get()
+            if item is None:
+                break
+            step, live, shadow = item
+            ipc.write_snapshot(self.run_dir, step, live, shadow)
+
+    def submit(self, step, live, shadow):
+        self._q.put((step, live, shadow))
+
+    def close(self):
+        """Flush + join — at shutdown, so the final snapshot lands on disk before we signal."""
+        self._q.put(None)
+        self._thread.join()
+
+
+def _pdeathsig_preexec():
+    """Child hook (Linux): PR_SET_PDEATHSIG=1 → SIGTERM when the trainer dies, so a trainer
+    crash/kill never leaves an orphan daemon holding GPU1. Best-effort: a failure here must not
+    abort the spawn (the daemon still works without it; Ctrl-C is covered by the process group)."""
+    try:
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, signal.SIGTERM)
+    except Exception:
+        pass
+
+
+def _spawn_eval_daemon(run_dir):
+    """Launch the eval daemon as a fresh subprocess pinned to GPU1 (clean CUDA context, no fork)."""
+    env = {**os.environ, "CUDA_VISIBLE_DEVICES": "1"}
+    proc = subprocess.Popen(
+        [sys.executable, str(EVAL_DAEMON_SCRIPT), "--run-dir", str(run_dir)],
+        env=env, cwd=str(PROJECT_ROOT), preexec_fn=_pdeathsig_preexec,
+    )
+    logger.info(f"Spawned eval daemon (pid {proc.pid}) on GPU1; run_dir={run_dir}")
+    return proc
+
+
+def _drain_and_log(run_dir, incremental_audio_tables, wandb_log):
+    """Drain finished daemon evals → wandb. Always drains+cleans even when wandb is off (bounds
+    /dev/shm). Audio cells are wav paths (wandb.Audio reads the sample rate from the file); tables
+    stay INCREMENTAL across the run. No step= → eval charts use the eval/snapshot_step data field
+    (set via define_metric), immune to the trainer being many steps ahead of a stale snapshot."""
+    for rec in ipc.drain_results(run_dir):
+        if not wandb_log:
+            continue
+        payload = dict(rec["scalars"])
+        for title, table in rec["audio_tables"].items():
+            wandb_table = incremental_audio_tables.get(title)
+            if wandb_table is None:
+                wandb_table = wandb.Table(columns=table["columns"], log_mode="INCREMENTAL")
+                incremental_audio_tables[title] = wandb_table
+            for row in table["rows"]:
+                cells = [wandb.Audio(c["__audio__"]) if isinstance(c, dict) and "__audio__" in c else c
+                         for c in row]
+                wandb_table.add_data(*cells)
+            payload[title] = wandb_table
+        payload["eval/snapshot_step"] = rec["step"]
+        wandb.log(payload)
+
+
 def run_eval_block(
     deps: EvalDeps,
     train_loader,
@@ -603,6 +514,9 @@ def run_eval_block(
 
             if deps.cfg.setup.audio_tables:
                 logger.info("Generating audio samples for evaluation...")
+                # estimate_loss (above) leaves the shared module in train() mode → force eval()
+                # so generation runs with dropout OFF (predictors use dropout up to 0.5).
+                deps.unoptimized_model.eval()
                 for table_name in deps.cfg.setup.audio_tables:
                     wandb_key, columns, rows = AUDIO_TABLES[table_name](deps)
                     # INCREMENTAL → rows accumulate into one table (compare audio across iters);
@@ -623,13 +537,7 @@ def run_eval_block(
             ):
                 best_dev_loss = losses['dev']['total_loss']
                 logger.info(f"Saving new best model to {CHECKPOINTS_DIR}")
-                best_path = CHECKPOINTS_DIR / 'ema_best.safetensors'
-                best_tmp_path = CHECKPOINTS_DIR / 'ema_best.tmp.safetensors'
-                best_bak_path = CHECKPOINTS_DIR / 'ema_best_bak.safetensors'
-                _save_safetensors(deps.unoptimized_model, best_tmp_path)
-                if best_path.exists():
-                    best_path.replace(best_bak_path)
-                best_tmp_path.replace(best_path)
+                atomic_save_safetensors(deps.unoptimized_model, CHECKPOINTS_DIR / 'ema_best.safetensors')
     finally:
         deps.unoptimized_model.train()
 
@@ -689,7 +597,34 @@ def train(cfg: DictConfig):
     # containers (models/ from encodec setup, no checkpoints subdir yet).
     CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
     setup_file_logger(logger, log_dir / log_name)
-    
+
+    # Decoupled eval daemon vs in-process sync eval. Daemon = standard 2-GPU training run only;
+    # single-GPU AND every diagnostic mode (overfit/loss/grad/dropout) keep in-process eval (they
+    # need trainer-local state and run on one card). Requires EMA (best-selection uses the shadow).
+    is_diagnostic_run = (
+        cfg.setup.overfit_single_batch or cfg.setup.loss_analysis_run
+        or cfg.setup.gradient_analysis_run or cfg.setup.dropout_trial_run
+    )
+    use_eval_daemon = (
+        cfg.setup.eval_daemon.enabled
+        and torch.cuda.device_count() > 1
+        and cfg.model.ema.enabled
+        and not is_diagnostic_run
+    )
+    daemon_proc = None
+    snapshot_writer = None
+    eval_run_dir = None
+    daemon_respawn_count = 0
+    if use_eval_daemon:
+        logger.info("Decoupled eval daemon ENABLED (eval runs on GPU1; training never pauses).")
+    else:
+        # In-process WER ASR honors metric_device (auto → CPU on single-GPU, never the train card).
+        set_metric_device(resolve_metric_device(cfg.setup.metric_device))
+        if cfg.setup.eval_daemon.enabled and not is_diagnostic_run:
+            logger.info(f"Eval daemon requested but inactive (device_count="
+                        f"{torch.cuda.device_count()}, ema_enabled={cfg.model.ema.enabled}); "
+                        "falling back to in-process eval.")
+
     logger.info("Initializing DataLoaders...")
     train_loader, train_dataset = create_dataloader(cfg, cfg.dataset.train_split, cfg.dataset.token_vocabulary_path)
     dev_loader, dev_dataset = create_dataloader(cfg, cfg.dataset.dev_split, train_dataset.token_vocabulary_path)
@@ -828,7 +763,8 @@ def train(cfg: DictConfig):
     model = torch.compile(model)
 
     # Outside the wandb.log gate so render_fixed_dev_refs_table iterates safely on
-    # wandb.log=False debug runs (empty list → no rows).
+    # wandb.log=False debug runs (empty list → no rows). In daemon mode the daemon builds its own
+    # refs → trainer skips them (avoids loading the WER ASR on the training card).
     table_2_refs = []
     test_refs = []
     if cfg.wandb.log:
@@ -843,13 +779,35 @@ def train(cfg: DictConfig):
             resume="allow" if resume_wandb_id else None
         )
 
-        num_static_refs = cfg.setup.num_audio_refs
-        prompt_samples_len = int(cfg.model.prompt_seconds * sampling_rate)
+        if use_eval_daemon:
+            # Eval logged from drained daemon results against a custom x-axis (the true snapshot
+            # step) → eval curves don't collapse when the trainer is many steps ahead of a stale eval.
+            wandb.define_metric("eval/snapshot_step")
+            wandb.define_metric("Evaluation: *", step_metric="eval/snapshot_step")
 
-        # Dedicated seeded RNGs → eval reference clips identical across runs, decoupled from other
-        # global-random usage (cross-run A/B). Training on dev: dev refs = trained-on, test = held-out.
-        table_2_refs = build_fixed_refs(dev_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed))
-        test_refs = build_fixed_refs(test_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed + 1))
+        if not use_eval_daemon:
+            num_static_refs = cfg.setup.num_audio_refs
+            prompt_samples_len = int(cfg.model.prompt_seconds * sampling_rate)
+            # Dedicated seeded RNGs → eval reference clips identical across runs, decoupled from other
+            # global-random usage (cross-run A/B). Training on dev: dev refs = trained-on, test = held-out.
+            do_wer = "wer" in cfg.setup.eval_metrics
+            table_2_refs = build_fixed_refs(dev_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed), do_wer)
+            test_refs = build_fixed_refs(test_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed + 1), do_wer)
+
+    # Spawn the eval daemon (handshake first → daemon reads it at startup). Pinned to GPU1.
+    if use_eval_daemon:
+        run_tag = wandb.run.id if cfg.wandb.log else f"pid{os.getpid()}"
+        eval_run_dir = ipc.resolve_run_dir(cfg.setup.eval_daemon.snapshot_dir, run_tag)
+        ipc.write_daemon_init(eval_run_dir, {
+            "model_cfg": model_cfg_dict,
+            "token_vocabulary_size": token_vocabulary_size,
+            "token_vocabulary_path": train_dataset.token_vocabulary_path,
+            "sampling_rate": sampling_rate,
+            "daemon_device": "cuda:0",   # under CUDA_VISIBLE_DEVICES=1 == physical GPU1
+            "cfg": OmegaConf.to_container(cfg, resolve=True),
+        })
+        snapshot_writer = SnapshotWriter(eval_run_dir)
+        daemon_proc = _spawn_eval_daemon(eval_run_dir)
 
     batch_generator = get_infinite_batches(
         train_loader, 
@@ -919,27 +877,34 @@ def train(cfg: DictConfig):
         # Evaluation
         # -----------------------------
         if _should_run_eval(iter_num, cfg):
-            eval_deps = EvalDeps(
-                iter_num=iter_num,
-                unoptimized_model=unoptimized_model,
-                compiled_model=model,
-                sampling_rate=sampling_rate,
-                device=device,
-                cfg=cfg,
-                dev_dataset=dev_dataset,
-                table_2_refs=table_2_refs,
-                test_refs=test_refs,
-                custom_prompts=custom_prompts,
-                overfit_ref_batch=overfit_ref_batch,
-            )
-            eval_start_time = time.perf_counter()
-            best_dev_loss = run_eval_block(
-                eval_deps,
-                train_loader, dev_loader, test_loader,
-                loss_wrapper, ema, best_dev_loss,
-                incremental_audio_tables,
-            )
-            last_log_time += time.perf_counter() - eval_start_time
+            if use_eval_daemon:
+                # Decoupled: clone weights (cheap, on this thread) + hand to the writer thread.
+                # Training continues; the daemon evals on GPU1 and results drain at log cadence
+                # below. The small clone cost is left in the step-time metric (so it stays visible).
+                live_cpu, shadow_cpu = _clone_trainable_cpu(unoptimized_model, ema)
+                snapshot_writer.submit(iter_num, live_cpu, shadow_cpu)
+            else:
+                eval_deps = EvalDeps(
+                    iter_num=iter_num,
+                    unoptimized_model=unoptimized_model,
+                    compiled_model=model,
+                    sampling_rate=sampling_rate,
+                    device=device,
+                    cfg=cfg,
+                    dev_dataset=dev_dataset,
+                    table_2_refs=table_2_refs,
+                    test_refs=test_refs,
+                    custom_prompts=custom_prompts,
+                    overfit_ref_batch=overfit_ref_batch,
+                )
+                eval_start_time = time.perf_counter()
+                best_dev_loss = run_eval_block(
+                    eval_deps,
+                    train_loader, dev_loader, test_loader,
+                    loss_wrapper, ema, best_dev_loss,
+                    incremental_audio_tables,
+                )
+                last_log_time += time.perf_counter() - eval_start_time
 
         # -----------------------------
         # Forward & Backward Pass
@@ -1132,6 +1097,20 @@ def train(cfg: DictConfig):
                     if not k.endswith("_weighted"):
                         loss_analysis_accumulators[k] = loss_analysis_accumulators.get(k, 0.0) + v.item()
 
+            # Drain finished daemon evals → wandb; respawn the daemon if it crashed (capped,
+            # non-blocking). Training never waits on the daemon.
+            if use_eval_daemon:
+                if daemon_proc.poll() is not None:
+                    daemon_respawn_count += 1
+                    if daemon_respawn_count <= EVAL_DAEMON_MAX_RESPAWNS:
+                        logger.warning(f"Eval daemon exited (code {daemon_proc.returncode}); "
+                                       f"respawning ({daemon_respawn_count}/{EVAL_DAEMON_MAX_RESPAWNS}).")
+                        daemon_proc = _spawn_eval_daemon(eval_run_dir)
+                    elif daemon_respawn_count == EVAL_DAEMON_MAX_RESPAWNS + 1:
+                        logger.error("Eval daemon exceeded max respawns; leaving it down "
+                                     "(training continues, eval paused).")
+                _drain_and_log(eval_run_dir, incremental_audio_tables, cfg.wandb.log)
+
         # -----------------------------
         # Periodic crash-recovery checkpoint (.pt) — decoupled from log_interval
         # -----------------------------
@@ -1213,32 +1192,47 @@ def train(cfg: DictConfig):
     # -----------------------------
     # Final eval pass + inference-iterable safetensors save
     # -----------------------------
-    # Final eval at iter_num=max_iters under EMA shadow weights; then a separate ema.swap_in
-    # writes the final safetensors (swap_in is non-reentrant → can't nest the two).
-    final_eval_deps = EvalDeps(
-        iter_num=cfg.setup.max_iters,
-        unoptimized_model=unoptimized_model,
-        compiled_model=model,
-        sampling_rate=sampling_rate,
-        device=device,
-        cfg=cfg,
-        dev_dataset=dev_dataset,
-        table_2_refs=table_2_refs,
-        test_refs=test_refs,
-        custom_prompts=custom_prompts,
-        overfit_ref_batch=overfit_ref_batch,
-    )
-    best_dev_loss = run_eval_block(
-        final_eval_deps,
-        train_loader, dev_loader, test_loader,
-        loss_wrapper, ema, best_dev_loss,
-        incremental_audio_tables,
-    )
+    # Final eval at iter_num=max_iters. In-process: run the eval block under EMA. Daemon: write a
+    # final snapshot + signal shutdown → the daemon runs the final eval (+ ema_best), then drain it.
+    # ema_final weights are written by the trainer below regardless (no dependency on the daemon).
+    if use_eval_daemon:
+        logger.info("Signaling eval daemon shutdown + final eval...")
+        live_cpu, shadow_cpu = _clone_trainable_cpu(unoptimized_model, ema)
+        snapshot_writer.submit(cfg.setup.max_iters, live_cpu, shadow_cpu)
+        snapshot_writer.close()                       # flush the final snapshot to disk first
+        ipc.signal_shutdown(eval_run_dir, cfg.setup.max_iters)
+        try:
+            daemon_proc.wait(timeout=EVAL_DAEMON_SHUTDOWN_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            logger.warning("Eval daemon did not exit within timeout; terminating.")
+            daemon_proc.terminate()
+        _drain_and_log(eval_run_dir, incremental_audio_tables, cfg.wandb.log)
+    else:
+        # swap_in writes the final safetensors below separately (non-reentrant → can't nest the two).
+        final_eval_deps = EvalDeps(
+            iter_num=cfg.setup.max_iters,
+            unoptimized_model=unoptimized_model,
+            compiled_model=model,
+            sampling_rate=sampling_rate,
+            device=device,
+            cfg=cfg,
+            dev_dataset=dev_dataset,
+            table_2_refs=table_2_refs,
+            test_refs=test_refs,
+            custom_prompts=custom_prompts,
+            overfit_ref_batch=overfit_ref_batch,
+        )
+        best_dev_loss = run_eval_block(
+            final_eval_deps,
+            train_loader, dev_loader, test_loader,
+            loss_wrapper, ema, best_dev_loss,
+            incremental_audio_tables,
+        )
 
     if cfg.setup.final_safetensors:
         final_path = CHECKPOINTS_DIR / 'ema_final.safetensors'
         with ema.swap_in(unoptimized_model) if ema is not None else nullcontext():
-            _save_safetensors(unoptimized_model, final_path)
+            atomic_save_safetensors(unoptimized_model, final_path)
         logger.info(f"Saved final EMA weights for offline inference to {final_path}")
 
 

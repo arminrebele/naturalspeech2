@@ -18,11 +18,32 @@ _ASR_SR = 16000
 _MIN_SAMPLES = _ASR_SR // 4   # <0.25 s → degenerate (early-training garbage); skip → NaN
 
 
-def _metric_device() -> str:
-    """Idle 2nd GPU if present (keep metrics off training card), else cuda:0, else CPU."""
-    if torch.cuda.is_available():
-        return "cuda:1" if torch.cuda.device_count() > 1 else "cuda:0"
+_METRIC_DEVICE_OVERRIDE: str | None = None
+
+
+def resolve_metric_device(value: str) -> str:
+    """Resolve a config `metric_device`. 'auto' → idle 2nd GPU if present, else CPU — never the
+    training card unless named explicitly (eval is infrequent; CPU beats stealing train VRAM).
+    Any other value passes through verbatim (e.g. 'cuda:0', 'cuda:1', 'cpu')."""
+    if value != "auto":
+        return value
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        return "cuda:1"
     return "cpu"
+
+
+def set_metric_device(device: str | None) -> None:
+    """Pin the ASR device; call once at startup before the first WER. Clears the cached ASR
+    singleton so a re-pin re-homes it. None → revert to the resolved 'auto' default.
+    Daemon sets its own card ('cuda:0' under CUDA_VISIBLE_DEVICES=1 == physical GPU1)."""
+    global _METRIC_DEVICE_OVERRIDE
+    _METRIC_DEVICE_OVERRIDE = device
+    _load_asr.cache_clear()
+
+
+def _metric_device() -> str:
+    """Override if pinned (config/daemon), else the resolved 'auto' default (idle 2nd GPU / CPU)."""
+    return _METRIC_DEVICE_OVERRIDE if _METRIC_DEVICE_OVERRIDE is not None else resolve_metric_device("auto")
 
 
 @lru_cache(maxsize=1)

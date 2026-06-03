@@ -30,6 +30,17 @@ audio_tables: [fixed_val_refs]  # validation = dev+test combined: one held-out a
 num_audio_refs: 10              # clips per split for held-out refs; fixed_val_refs pools dev+test → 2× (also the WER sample size — keep ≥10). random_dev + overfit_batch fixed at 2
 inference_data_loss_sweep: []   # empty by default; overfit_test enables for solver diagnostics
 eval_metrics: ["wer"]           # objective metrics on fixed dev/test refs. WER = HuBERT-CTC (no LM) on the idle 2nd GPU. Inert for modes with no fixed-ref table.
+metric_device: auto             # WER ASR device. auto → cuda:1 if ≥2 GPUs else CPU (never silently steals the training card); override e.g. cuda:0. Daemon forces its own card.
+
+# Decoupled eval daemon — off-loads the eval block to a persistent process on the 2nd GPU so
+# the training step never pauses. Active ONLY on a standard 2-GPU training run; single-GPU and
+# all diagnostic modes fall back to today's in-process synchronous eval.
+eval_daemon:
+  enabled: true
+  compile: false                # eager by default (robust); opt-in torch.compile for faster eval forwards
+  snapshot_dir: null            # null → /dev/shm/ns2_eval/<wandb-run-or-pid>; RAM-backed weight handoff
+  num_workers: 4                # dataloader workers for the daemon's own dev/test/train loaders (modest — shares the 32-core host)
+  poll_interval_s: 2.0          # marker poll cadence when idle
 
 # Save policy
 best_safetensors: True
