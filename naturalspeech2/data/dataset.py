@@ -480,8 +480,18 @@ class DatasetWrapper(Dataset):
         return raw, perm
 
     def _build_chunk(self, raw: HFDataset, perm: np.ndarray, k: int, final_dir: Path) -> None:
-        idx = perm[k * self.chunk_size : min((k + 1) * self.chunk_size, len(raw))].tolist()
-        chunk = self._preprocess_untokenized(raw.select(idx))   # select carries original_index
+        # Sorted so the gather reads ascending row positions (near-sequential across the mmap shards)
+        # instead of a random scatter; within-chunk order is irrelevant (the loader shuffles, and
+        # original_index is preserved regardless).
+        idx = np.sort(perm[k * self.chunk_size : min((k + 1) * self.chunk_size, len(raw))]).tolist()
+        # Materialize ONLY the selected rows before preprocessing. raw.select() attaches a chunk-sized
+        # indices mask but leaves _data = the full ~10.8M-row mmap table, so the downstream cast/F0/
+        # phonemize ops — and the main-process flatten that .map(num_proc>1) runs on an indices view —
+        # operate against the whole table's backing store rather than the 50k-row selection. flatten_indices
+        # rewrites just the selected rows to a fresh arrow (streamed, writer_batch_size rows at a time),
+        # so every downstream op sees only this chunk.
+        sub = raw.select(idx).flatten_indices(keep_in_memory=False)   # select carries original_index
+        chunk = self._preprocess_untokenized(sub)
         # Atomic build: write into chunk_k.tmp, drop a COMPLETE sentinel, then os.replace. A crash
         # mid-build leaves a .tmp (cleared next run); load never sees a half-written "complete" shard.
         tmp = final_dir.with_name(final_dir.name + ".tmp")
@@ -490,6 +500,7 @@ class DatasetWrapper(Dataset):
         (tmp / "COMPLETE").write_text("ok")
         os.replace(tmp, final_dir)
         del chunk
+        sub.cleanup_cache_files()   # drop this chunk's flatten arrow so it doesn't accumulate over the ladder
         gc.collect()
         logger.info(f"Built {final_dir.name} ({len(idx)} clips pre-filter).")
 
