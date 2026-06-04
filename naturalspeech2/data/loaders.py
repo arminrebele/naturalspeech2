@@ -13,8 +13,15 @@ from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, Dynam
 logger = logging.getLogger(__name__)
 
 
-def create_dataloader(cfg, split: str, token_vocabulary_path: str = None, num_workers: int = None):
+def create_dataloader(cfg, split: str, token_vocabulary_path: str = None, num_workers: int = None,
+                      batch_size_divisor: int = 1):
     bucket_mapping = OmegaConf.to_container(cfg.dataloader.bucket_mapping, resolve=True)
+    if batch_size_divisor > 1:
+        # Daemon eval only: shrink the batch dimension (lower forward VRAM) WITHOUT touching the
+        # per-bucket (audio_length, phoneme_length) pad targets — the collate keys on max length, not
+        # batch_size, so padded/compiled shapes are unchanged. grad_accum compensates (run_decoupled_eval).
+        bucket_mapping = [{**b, "batch_size": max(1, b["batch_size"] // batch_size_divisor)}
+                          for b in bucket_mapping]
 
     max_audio_length = cfg.dataset.max_audio_length
     max_phoneme_length = cfg.dataset.max_phoneme_length

@@ -42,6 +42,7 @@ eval_daemon:
   compile: true                 # torch.compile the daemon's eval forward (the in-process eval forward was already compiled); set false to debug the daemon in eager mode
   snapshot_dir: null            # null → /dev/shm/ns2_eval/<wandb-run-or-pid>; RAM-backed weight handoff
   num_workers: 4                # dataloader workers for EACH of the daemon's own dev/test/train loaders (independent of dataloader.num_workers so the main run isn't slowed)
+  batch_size_divisor: 2         # daemon eval only: divide each bucket's batch_size by this on the 2nd GPU (lower forward VRAM); grad_accum is multiplied by the same factor so the logical batch + total sample count match the in-process eval. 1 = full batch.
   poll_interval_s: 2.0          # marker poll cadence when idle
 
 # Save policy

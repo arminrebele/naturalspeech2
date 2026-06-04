@@ -287,7 +287,11 @@ def run_decoupled_eval(
     """
     report = EvalReport(snapshot_step=snapshot_step, best_dev_loss=prev_best_dev_loss)
     eval_iters = cfg.setup.eval_iters
-    gas = cfg.setup.gradient_accumulation_steps
+    # Daemon eval runs a divisor-shrunk batch (lower VRAM on the 2nd GPU); multiply grad_accum by the
+    # same divisor so the logical batch (gas × batch) and total samples (eval_iters × gas × batch) are
+    # unchanged vs the in-process eval. Loss is a masked sum / shared per-step denominator → invariant
+    # to the micro-batch split, so the metric is unchanged (modulo ~1-sample integer rounding).
+    gas = cfg.setup.gradient_accumulation_steps * cfg.setup.eval_daemon.batch_size_divisor
 
     # Set warmup-ramped weights (e.g. duration_predictor over 1000 steps) to this snapshot's step →
     # weighted losses + EMA-dev best-pick match the trainer. The daemon's LossWrapper is a fresh

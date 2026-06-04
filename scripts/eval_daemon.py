@@ -74,10 +74,16 @@ def build(run_dir: Path):
     ).to(device)
 
     nw = cfg.setup.eval_daemon.num_workers
+    bsd = cfg.setup.eval_daemon.batch_size_divisor
     tok_path = init["token_vocabulary_path"]
-    train_loader, _ = create_dataloader(cfg, cfg.dataset.train_split, tok_path, num_workers=nw)
-    dev_loader, dev_dataset = create_dataloader(cfg, cfg.dataset.dev_split, tok_path, num_workers=nw)
-    test_loader, test_dataset = create_dataloader(cfg, cfg.dataset.test_split, tok_path, num_workers=nw)
+    train_loader, _ = create_dataloader(cfg, cfg.dataset.train_split, tok_path, num_workers=nw, batch_size_divisor=bsd)
+    dev_loader, dev_dataset = create_dataloader(cfg, cfg.dataset.dev_split, tok_path, num_workers=nw, batch_size_divisor=bsd)
+    test_loader, test_dataset = create_dataloader(cfg, cfg.dataset.test_split, tok_path, num_workers=nw, batch_size_divisor=bsd)
+    if bsd > 1:
+        base_gas = cfg.setup.gradient_accumulation_steps
+        logger.info(f"Eval batch reduced on the 2nd GPU: bucket batch_size //{bsd}, grad_accum x{bsd} "
+                    f"(base {base_gas} -> {base_gas * bsd}) -> logical batch + total samples unchanged, "
+                    f"~{bsd}x lower forward VRAM.")
 
     # Fixed refs — same seeds as the trainer → identical clips; GT-floor WER cached once.
     do_wer = "wer" in cfg.setup.eval_metrics
