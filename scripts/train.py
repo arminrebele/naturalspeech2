@@ -805,7 +805,7 @@ def train(cfg: DictConfig):
         ipc.write_daemon_init(eval_run_dir, {
             "model_cfg": model_cfg_dict,
             "token_vocabulary_size": token_vocabulary_size,
-            "token_vocabulary_path": train_dataset.token_vocabulary_path,
+            "token_vocabulary_path": str(train_dataset.token_vocabulary_path),
             "sampling_rate": sampling_rate,
             "daemon_device": "cuda:0",   # under CUDA_VISIBLE_DEVICES=1 == physical GPU1
             "cfg": OmegaConf.to_container(cfg, resolve=True),
