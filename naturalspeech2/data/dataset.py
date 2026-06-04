@@ -142,6 +142,7 @@ class DatasetWrapper(Dataset):
         num_proc_tokenize: int = 4,
         max_train_clips: Optional[int] = None,
         subset_seed: int = 42,
+        delete_raw_cache_after_preprocess: bool = False,
     ):
         super().__init__()
         self.dataset_source = dataset_source
@@ -163,6 +164,7 @@ class DatasetWrapper(Dataset):
         self.num_proc_tokenize = num_proc_tokenize
         self.max_train_clips = max_train_clips
         self.subset_seed = subset_seed
+        self.delete_raw_cache_after_preprocess = delete_raw_cache_after_preprocess
         
         self.dataset_dir = DATA_DIR / self.dataset_name
         # Split name → valid dir name
@@ -390,13 +392,21 @@ class DatasetWrapper(Dataset):
             with open(config_path, "w") as f:
                 json.dump(self.preprocessing_config, f, indent=4)
 
-            logger.info(f"Completely deleting project cache directory: {self.cache_dir}")
             del dataset
             gc.collect()  # release file handles
-            try:
-                shutil.rmtree(self.cache_dir)
-            except Exception as e:
-                logger.warning(f"Failed to completely delete cache directory: {e}")
+            if self.delete_raw_cache_after_preprocess:
+                logger.info(f"Completely deleting project cache directory: {self.cache_dir}")
+                try:
+                    shutil.rmtree(self.cache_dir)
+                except Exception as e:
+                    logger.warning(f"Failed to completely delete cache directory: {e}")
+            else:
+                # Keep the reusable raw load_dataset arrow (content-addressed, identical across every
+                # subset/vocab/filter variant) so re-preprocessing skips regeneration; prune only the
+                # disposable intermediate map caches.
+                logger.info(f"Keeping raw cache; pruning intermediate map caches in {self.cache_dir}")
+                for f in self.cache_dir.rglob("cache-*.arrow"):
+                    f.unlink(missing_ok=True)
             
             logger.info(f"Loading standalone dataset from {self.processed_dir} into memory...")
             return load_from_disk(str(self.processed_dir))
