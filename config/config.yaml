@@ -13,3 +13,7 @@ defaults:
 # Reproducibility knob — seeds torch + Python random at train() entry (model init, diffusion
 # t/ε, prompt windows, eval prompt picks, DataLoader RNG). cuDNN determinism NOT enforced.
 seed: 42
+
+# Splits that `scripts/preprocess.py` builds (null → train + dev + test). Train is always built
+# first regardless of order (it builds the vocab; dev/test require it to exist).
+preprocess_splits: null

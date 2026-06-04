@@ -94,7 +94,7 @@ def benchmark_buckets(cfg: DictConfig):
     logger.info("Extracting audio lengths...")
     # Raw audio sample lengths → latent frame lengths (model pads by frames)
     raw_lengths = np.array(dataset.dataset["audio_length"])
-    phoneme_lengths = np.array(dataset.dataset["phoneme_tokens_length"])
+    phoneme_lengths = np.array(dataset.dataset["phoneme_length"])
     base_frame_lengths = np.ceil(raw_lengths / ENCODER_HOP_LENGTH).astype(int)
     
     # Round up to the nearest multiple of 8 (Tensor Core optimization).

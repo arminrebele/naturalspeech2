@@ -12,5 +12,6 @@ min_audio_length: 24000             # 1 second of audio at 24kHz
 max_audio_length: null
 min_phoneme_length: 1
 max_phoneme_length: null
-max_train_clips: null               # cap TRAIN to N clips, applied in DatasetWrapper BEFORE preprocessing (only N pitch-extracted). Seeded shuffle (cfg.seed) → reproducible. null = full. Each N caches to processed_*_n<N>.
-delete_raw_cache_after_preprocess: false  # false = keep the reusable raw load_dataset arrow (content-addressed, identical across every subset/vocab/filter variant) so re-preprocessing skips the ~13-min regen; only disposable intermediate map caches are pruned. Flip true to reclaim disk before the final long run.
+max_train_clips: null               # TRAIN target = first N (post-filter) clips of the seeded shuffle, served from the chunked store: existing shards are reused, only missing ones are F0'd. Cumulative — set the new total to grow. null = full.
+chunk_size: 50000                   # TRAIN shard size (post-filter ≲ this). Each shard F0'd once ever; growing N builds only new shards. Frozen for the store's life (chunks_otf/meta.json guards it — changing it forces a rebuild). null → legacy single-folder train.
+delete_raw_cache_after_preprocess: false  # false = keep the reusable raw load_dataset arrow (needed to build every shard; identical across every subset/vocab/filter variant) so re-preprocessing skips the ~13-min regen. Keep false through the whole ladder; flip true only after the final shard to reclaim disk.

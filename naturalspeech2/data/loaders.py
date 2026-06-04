@@ -55,6 +55,10 @@ def create_dataloader(cfg, split: str, token_vocabulary_path: str = None, num_wo
         max_train_clips=cfg.dataset.max_train_clips if split == cfg.dataset.train_split else None,
         subset_seed=cfg.seed,
         delete_raw_cache_after_preprocess=cfg.dataset.delete_raw_cache_after_preprocess,
+        # Chunked store + vocab-building apply ONLY to the train split (dev/test stay single-folder
+        # and must not build the vocab — IDs stay train-derived).
+        chunk_size=(cfg.dataset.get("chunk_size") if split == cfg.dataset.train_split else None),
+        build_vocabulary=(split == cfg.dataset.train_split),
     )
 
     sampler = DynamicBucketedBatchSampler(
