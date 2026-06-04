@@ -587,6 +587,12 @@ def train(cfg: DictConfig):
     torch.manual_seed(cfg.seed)
     random.seed(cfg.seed)
 
+    # Warmup is canonically a fraction of the run (cfg.setup.warmup_ratio); resolve to an absolute
+    # step count unless a config pins warmup_iters explicitly (e.g. overfit_test=0). ISR's
+    # post-warmup LR = peak·√(warmup/it) is run-length-independent only for a fixed warmup.
+    if cfg.setup.warmup_iters is None:
+        cfg.setup.warmup_iters = round(cfg.setup.warmup_ratio * cfg.setup.max_iters)
+
     # Startup assertions — catch config-pilot-error before the first eval fires.
     if "overfit_batch" in cfg.setup.audio_tables:
         assert cfg.setup.overfit_single_batch, (

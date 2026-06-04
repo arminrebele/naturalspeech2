@@ -5,7 +5,7 @@ defaults:
 # Overrides on top of setup/base.yaml — only the deltas live here.
 
 max_iters: 2000
-warmup_iters: 0
+warmup_iters: 0                  # explicit absolute override of base's warmup_ratio (no warmup; cosine, since ISR asserts warmup>0)
 # lr_decay_iters now inherits base (= ${setup.max_iters})
 
 overfit_single_batch: True

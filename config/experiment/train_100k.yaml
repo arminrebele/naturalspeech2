@@ -18,15 +18,11 @@
 defaults:
   - override /model: multibatch    # reduced dropout for the data-limited regime (100k « paper's 44k h); matches the dev runs
 
-training:
-  lr_schedule: "cosine"            # 20k-step run — ISR's 32k warmup doesn't fit
-
 dataset:
   max_train_clips: 100000          # cap train to 100k BEFORE preprocessing; train_split stays "train" (base default)
 
 setup:
-  max_iters: 20000
-  warmup_iters: 500                # lr_decay_iters inherits base (= ${setup.max_iters} = 20000 here)
+  max_iters: 20000                 # ISR + warmup_ratio (0.11 → 2200) inherited from base — same schedule type as the full run
   eval_interval: 2000              # 10 evals across the run; each one is the combined dev+test held-out (loss + val-WER + audio)
   log_subdir: "research"
   log_name: "train_100k"

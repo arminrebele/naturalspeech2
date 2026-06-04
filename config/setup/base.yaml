@@ -6,7 +6,8 @@ init_from: "scratch"     # 'scratch' or 'resume'
 gradient_accumulation_steps: 1
 
 max_iters: 300000
-warmup_iters: 32000
+warmup_ratio: 0.11                   # warmup length as a fraction of max_iters (0.11·300k ≈ 33k; paper: 32k). Canonical knob.
+warmup_iters: null                   # absolute override; null → round(warmup_ratio · max_iters), resolved at train() entry
 lr_decay_iters: ${setup.max_iters}   # cosine decay horizon — tracks max_iters; ISR ignores it
 
 # Mode flags — branch training mechanics, not the eval/log/save surface

@@ -4,8 +4,7 @@ defaults:
 
 # Overrides on top of setup/base.yaml — only the deltas live here.
 
-max_iters: 10000
-warmup_iters: 1100               # ~11% fractional match to the main run's ISR warmup
+max_iters: 10000                 # warmup_ratio (0.11 → 1100) + ISR inherited from base
 lr_decay_iters: ${setup.max_iters}
 
 gradient_analysis_run: True

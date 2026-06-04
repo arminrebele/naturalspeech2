@@ -6,8 +6,7 @@ defaults:
 # (mirrors the main run). Decision metric = per-term dev+test held-out loss over the last 20%,
 # dumped to setup.dropout_trial_out (orchestrator overrides that path + wandb.group/run_name per trial).
 
-max_iters: 30000
-warmup_iters: 3300               # ~11% fractional match to the main run's ISR warmup
+max_iters: 30000                 # warmup_ratio (0.11 → 3300) + ISR inherited from base
 lr_decay_iters: ${setup.max_iters}
 
 dropout_trial_run: True

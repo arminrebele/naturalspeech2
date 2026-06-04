@@ -18,15 +18,11 @@
 defaults:
   - override /model: multibatch
 
-training:
-  lr_schedule: "cosine"          # short run — ISR's 32k warmup doesn't fit
-
 dataset:
   train_split: "dev"             # train on dev; test is the held-out eval set
 
 setup:
-  max_iters: 20000
-  warmup_iters: 500              # lr_decay_iters inherits base (= ${setup.max_iters} = 20000 here)
+  max_iters: 20000               # ISR + warmup_ratio (0.11 → 2200) inherited from base — same schedule type as the full run
   log_interval: 25               # finer than base's 100 — watch early generalization
   eval_interval: 1000            # each eval generates 4 clips (2 dev + 2 test) — keep modest
   audio_tables: [fixed_dev_refs, fixed_test_refs]   # trained-on + held-out, both stable across runs
