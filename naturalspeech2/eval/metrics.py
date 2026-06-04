@@ -100,10 +100,11 @@ def transcribe(audio, src_sr: int = 24000) -> str:
 
 
 @torch.no_grad()
-def compute_wer(gen_audio, target_text: str, src_sr: int = 24000) -> float:
-    """WER of ASR(gen_audio) vs target_text. NaN on degenerate audio (drops out of
-    np.nanmean instead of crashing/skewing)."""
+def compute_wer(gen_audio, target_text: str, src_sr: int = 24000) -> tuple[float, str]:
+    """(WER, raw transcription) of ASR(gen_audio) vs target_text. (NaN, "") on degenerate audio
+    (the NaN drops out of np.nanmean instead of crashing/skewing). The returned `hyp` is the RAW
+    ASR output (pre-normalization) so callers can surface literally what the ASR emitted."""
     if _degenerate(gen_audio):
-        return float("nan")
+        return float("nan"), ""
     hyp = transcribe(gen_audio, src_sr)
-    return _word_error_rate(_norm_text(target_text), _norm_text(hyp))
+    return _word_error_rate(_norm_text(target_text), _norm_text(hyp)), hyp

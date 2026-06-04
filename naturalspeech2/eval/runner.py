@@ -4,7 +4,7 @@ daemon. Pure compute → plain data; no wandb, no IPC, no process assumptions.
 Contents:
   - estimate_loss: held-out loss over dev/test (+train subset), denominator-normalized.
   - build_fixed_refs_data / FixedRef: deterministic reference clips, GT-floor WER cached once.
-  - generate_ref_audio: one ref → (generated waveform, synth WER).
+  - generate_ref_audio: one ref → (generated waveform, synth WER, ASR transcription).
   - run_decoupled_eval: daemon orchestration — both live + EMA losses, EMA audio/WER, best-pick.
   - get_loss_section / _mean_skip_nan / atomic_save_safetensors: shared formatting + IO helpers.
 """
@@ -185,7 +185,7 @@ def build_fixed_refs_data(dataset, n_refs, prompt_samples_len, rng, *, sampling_
         audio_np = sample["audio"].numpy()
         start_idx = rng.randint(0, sample["audio_length"] - prompt_samples_len)
         prompt_audio_np = audio_np[start_idx: start_idx + prompt_samples_len]
-        gt = compute_wer(audio_np, sample["text"], src_sr=sampling_rate) if compute_gt_wer else None
+        gt = compute_wer(audio_np, sample["text"], src_sr=sampling_rate)[0] if compute_gt_wer else None
         refs.append(FixedRef(
             original_np=audio_np,
             prompt_np=prompt_audio_np,
@@ -197,12 +197,13 @@ def build_fixed_refs_data(dataset, n_refs, prompt_samples_len, rng, *, sampling_
 
 
 def generate_ref_audio(model, prompt_tensor, text: str, sampling_rate: int, do_wer: bool):
-    """One ref → (trimmed generated waveform np, synth WER or None). GT-floor is cached on the
-    ref (build time); only the synth WER is computed here."""
+    """One ref → (trimmed generated waveform np, synth WER or None, ASR transcription or None).
+    GT-floor is cached on the ref (build time); only the synth WER + transcription are computed here.
+    The transcription is the raw ASR hypothesis on the generated audio (debugging intelligibility)."""
     gen_audio_np, length = generate_audio(model, prompt_tensor, target_text=text)
     gen = gen_audio_np[:length]
-    synth_wer = compute_wer(gen, text, src_sr=sampling_rate) if do_wer else None
-    return gen, synth_wer
+    synth_wer, hyp = compute_wer(gen, text, src_sr=sampling_rate) if do_wer else (None, None)
+    return gen, synth_wer, hyp
 
 
 # ----------------------------------------------------------------------------
@@ -320,10 +321,10 @@ def run_decoupled_eval(
         columns = ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt",
                    "Original Audio", "Speech-Prompt", "Generated Audio"]
         if do_wer:
-            columns.append("WER")
+            columns += ["Transcription", "WER"]
         rows, synth_wers, gt_wers = [], [], []
         for ref in refs:
-            gen, synth_wer = generate_ref_audio(model, ref.prompt_tensor, ref.text, sampling_rate, do_wer)
+            gen, synth_wer, hyp = generate_ref_audio(model, ref.prompt_tensor, ref.text, sampling_rate, do_wer)
             row = [snapshot_step, prompt_seconds, ref.text,
                    AudioClip(ref.original_np, sampling_rate),
                    AudioClip(ref.prompt_np, sampling_rate),
@@ -331,7 +332,7 @@ def run_decoupled_eval(
             if do_wer:
                 synth_wers.append(synth_wer)
                 gt_wers.append(ref.gt_wer)
-                row.append(synth_wer)
+                row += [hyp, synth_wer]
             rows.append(row)
         if do_wer:
             report.scalars[f"Evaluation: Metrics/{split}-WER"] = _mean_skip_nan(synth_wers)

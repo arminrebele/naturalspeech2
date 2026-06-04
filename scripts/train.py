@@ -188,11 +188,11 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
     columns = ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt",
                "Original Audio", "Speech-Prompt", "Generated Audio"]
     if do_wer:
-        columns.append("WER")
+        columns += ["Transcription", "WER"]
 
     rows, synth_wers, gt_wers = [], [], []
     for ref in refs:
-        gen, synth_wer = generate_ref_audio(deps.unoptimized_model, ref["prompt_tensor"], ref["text"], sr, do_wer)
+        gen, synth_wer, hyp = generate_ref_audio(deps.unoptimized_model, ref["prompt_tensor"], ref["text"], sr, do_wer)
         row = [
             deps.iter_num,
             deps.cfg.model.prompt_seconds,
@@ -204,7 +204,7 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
         if do_wer:
             synth_wers.append(synth_wer)
             gt_wers.append(ref["gt_wer"])
-            row.append(synth_wer)
+            row += [hyp, synth_wer]
         rows.append(row)
 
     if do_wer:
