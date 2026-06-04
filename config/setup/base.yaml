@@ -28,7 +28,7 @@ checkpoint_interval: 5000    # crash-recovery ckpt.pt every 5000 iters
 eval_iters: 200
 audio_tables: [fixed_val_refs]  # validation = dev+test combined: one held-out audio table + one combined val-WER
 num_audio_refs: 10              # clips per split for held-out refs; fixed_val_refs pools dev+test → 2× (also the WER sample size — keep ≥10). random_dev + overfit_batch fixed at 2
-num_table_rows: 3               # how many of those refs to RENDER in each wandb audio table; WER/metrics still use ALL num_audio_refs. Caps table size so it doesn't balloon as num_audio_refs scales (set ≥ num_audio_refs to show all). The dev+test val table interleaves both splits so these rows stay balanced.
+num_table_rows: 2               # how many of those refs to RENDER in each wandb audio table; WER/metrics still use ALL num_audio_refs. Caps table size so it doesn't balloon as num_audio_refs scales (set ≥ num_audio_refs to show all). The dev+test val table interleaves both splits so these rows stay balanced.
 inference_data_loss_sweep: []   # empty by default; overfit_test enables for solver diagnostics
 eval_metrics: ["wer"]           # objective metrics on fixed dev/test refs. WER = HuBERT-CTC (no LM) on the idle 2nd GPU. Inert for modes with no fixed-ref table.
 metric_device: auto             # WER ASR device. auto → cuda:1 if ≥2 GPUs else CPU (never silently steals the training card); override e.g. cuda:0. Daemon forces its own card.
