@@ -312,7 +312,10 @@ def run_decoupled_eval(
     # dropout OFF (the predictors use dropout up to 0.5; sampling under it is wrong).
     model.eval()
     do_wer = "wer" in cfg.setup.eval_metrics
-    refs_by_source = {"dev": dev_refs, "test": test_refs, "val": dev_refs + test_refs}
+    num_table_rows = cfg.setup.num_table_rows
+    # val = dev+test interleaved → the first num_table_rows stay balanced across both splits.
+    val_refs = [r for pair in itertools.zip_longest(dev_refs, test_refs) for r in pair if r is not None]
+    refs_by_source = {"dev": dev_refs, "test": test_refs, "val": val_refs}
     for table_name in cfg.setup.audio_tables:
         if table_name not in FIXED_REF_TABLES:
             continue  # random_dev / overfit_batch are in-process-only; skip in the daemon
@@ -322,18 +325,25 @@ def run_decoupled_eval(
                    "Original Audio", "Speech-Prompt", "Generated Audio"]
         if do_wer:
             columns += ["Transcription", "WER"]
+        # WER is the mean over ALL refs (well-sampled metric); only the first num_table_rows are
+        # rendered as wandb rows (keeps the audio table small as num_audio_refs scales up).
         rows, synth_wers, gt_wers = [], [], []
-        for ref in refs:
+        for i, ref in enumerate(refs):
+            in_table = i < num_table_rows
+            if not do_wer and not in_table:
+                continue  # needed for neither the WER metric nor a table row → skip generation
             gen, synth_wer, hyp = generate_ref_audio(model, ref.prompt_tensor, ref.text, sampling_rate, do_wer)
-            row = [snapshot_step, prompt_seconds, ref.text,
-                   AudioClip(ref.original_np, sampling_rate),
-                   AudioClip(ref.prompt_np, sampling_rate),
-                   AudioClip(gen, sampling_rate)]
             if do_wer:
                 synth_wers.append(synth_wer)
                 gt_wers.append(ref.gt_wer)
-                row += [hyp, synth_wer]
-            rows.append(row)
+            if in_table:
+                row = [snapshot_step, prompt_seconds, ref.text,
+                       AudioClip(ref.original_np, sampling_rate),
+                       AudioClip(ref.prompt_np, sampling_rate),
+                       AudioClip(gen, sampling_rate)]
+                if do_wer:
+                    row += [hyp, synth_wer]
+                rows.append(row)
         if do_wer:
             report.scalars[f"Evaluation: Metrics/{split}-WER"] = _mean_skip_nan(synth_wers)
             report.scalars[f"Evaluation: Metrics/{split}-WER-gt"] = _mean_skip_nan(gt_wers)

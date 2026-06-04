@@ -6,6 +6,7 @@ import math
 import queue
 import signal
 import ctypes
+import itertools
 import random
 import logging
 import threading
@@ -185,27 +186,35 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
     """
     sr = deps.sampling_rate
     do_wer = "wer" in deps.cfg.setup.eval_metrics
+    num_table_rows = deps.cfg.setup.num_table_rows
     columns = ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt",
                "Original Audio", "Speech-Prompt", "Generated Audio"]
     if do_wer:
         columns += ["Transcription", "WER"]
 
+    # WER is the mean over ALL refs (well-sampled metric); only the first num_table_rows are
+    # rendered as wandb rows (keeps the audio table small as num_audio_refs scales up).
     rows, synth_wers, gt_wers = [], [], []
-    for ref in refs:
+    for i, ref in enumerate(refs):
+        in_table = i < num_table_rows
+        if not do_wer and not in_table:
+            continue  # needed for neither the WER metric nor a table row → skip generation
         gen, synth_wer, hyp = generate_ref_audio(deps.unoptimized_model, ref["prompt_tensor"], ref["text"], sr, do_wer)
-        row = [
-            deps.iter_num,
-            deps.cfg.model.prompt_seconds,
-            ref["text"],
-            ref["original_audio"],
-            ref["prompt_audio"],
-            wandb.Audio(gen, sample_rate=sr),
-        ]
         if do_wer:
             synth_wers.append(synth_wer)
             gt_wers.append(ref["gt_wer"])
-            row += [hyp, synth_wer]
-        rows.append(row)
+        if in_table:
+            row = [
+                deps.iter_num,
+                deps.cfg.model.prompt_seconds,
+                ref["text"],
+                ref["original_audio"],
+                ref["prompt_audio"],
+                wandb.Audio(gen, sample_rate=sr),
+            ]
+            if do_wer:
+                row += [hyp, synth_wer]
+            rows.append(row)
 
     if do_wer:
         deps.metrics_out[f"Evaluation: Metrics/{split}-WER"] = _mean_skip_nan(synth_wers)
@@ -230,8 +239,10 @@ def render_fixed_val_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
     dev+test together = validation set (speaker-disjoint from train and each other; paper reports
     only on external VCTK / LibriSpeech), so one table + one combined val-WER under 'dev' (matches
     the chained 'dev' loss in estimate_loss)."""
+    val_refs = [r for pair in itertools.zip_longest(deps.table_2_refs, deps.test_refs)
+                for r in pair if r is not None]
     return _render_fixed_refs_table(
-        deps, deps.table_2_refs + deps.test_refs,
+        deps, val_refs,
         "Eval Audio: dev+test (held-out validation)", "dev",
     )
 
