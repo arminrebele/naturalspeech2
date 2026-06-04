@@ -2,8 +2,8 @@
 """Aggregate dropout-trial JSONL dumps into keep/reject verdicts.
 
 Each trial writes per-eval held-out losses (train.py `_append_dropout_trial_eval`): one JSON
-line per eval step with per-term dev/test losses. A site's effect is a PAIRED effect size vs
-the rolling baseline run:
+line per eval step with per-term held-out losses (dev+test chained into one 'dev' pool). A
+site's effect is a PAIRED effect size vs the rolling baseline run:
 
     at each shared eval step:  delta = treatment_metric - baseline_metric
     z = mean(delta) / std(delta)     over the converged-tail window
@@ -105,9 +105,9 @@ GUARD_THRESHOLD = 2.0
 
 
 def load_series(jsonl_path, terms) -> dict:
-    """{step: combined_metric}, combined = sum over `terms` of (dev+test)/2.
-    dev+test averaged into one held-out number; linear and identical per run → cancels in the
-    paired difference (average-vs-count-weighted choice is second order for z)."""
+    """{step: combined_metric}, combined = sum over `terms` of the held-out value.
+    Trials run on the real train split, so estimate_loss (runner.py) chains dev+test into one
+    'dev' pool — the record carries that single combined number per term, no separate 'test'."""
     series = {}
     with open(jsonl_path) as f:
         for line in f:
@@ -115,7 +115,7 @@ def load_series(jsonl_path, terms) -> dict:
             if not line:
                 continue
             rec = json.loads(line)
-            value = sum((rec["dev"][t] + rec["test"][t]) / 2.0 for t in terms)
+            value = sum(rec["dev"][t] for t in terms)
             series[rec["step"]] = value
     return series
 
