@@ -4,7 +4,7 @@ daemon. Pure compute → plain data; no wandb, no IPC, no process assumptions.
 Contents:
   - estimate_loss: held-out loss over dev/test (+train subset), denominator-normalized.
   - build_fixed_refs_data / FixedRef: deterministic reference clips, GT-floor WER cached once.
-  - generate_ref_audio: one ref → (generated waveform, synth WER, ASR transcription).
+  - generate_ref_audio: one ref → (generated waveform, synth WER, ASR transcription, SIM-o).
   - run_decoupled_eval: daemon orchestration — both live + EMA losses, EMA audio/WER, best-pick.
   - get_loss_section / _mean_skip_nan / atomic_save_safetensors: shared formatting + IO helpers.
 """
@@ -20,7 +20,7 @@ import torch
 from torch import nn
 from safetensors.torch import save_file
 
-from naturalspeech2.eval.metrics import compute_wer
+from naturalspeech2.eval.metrics import compute_sim_o, compute_wer
 from naturalspeech2.inference import generate_audio
 from naturalspeech2.utils.utils import compute_denominators
 
@@ -196,14 +196,16 @@ def build_fixed_refs_data(dataset, n_refs, prompt_samples_len, rng, *, sampling_
     return refs
 
 
-def generate_ref_audio(model, prompt_tensor, text: str, sampling_rate: int, do_wer: bool):
-    """One ref → (trimmed generated waveform np, synth WER or None, ASR transcription or None).
-    GT-floor is cached on the ref (build time); only the synth WER + transcription are computed here.
-    The transcription is the raw ASR hypothesis on the generated audio (debugging intelligibility)."""
+def generate_ref_audio(model, prompt_tensor, text: str, sampling_rate: int, do_wer: bool,
+                       do_sim_o: bool = False):
+    """One ref → (trimmed generated waveform np, synth WER|None, ASR transcription|None, SIM-o|None).
+    GT-floor WER is cached on the ref (build time); synth WER + transcription + SIM-o computed here.
+    SIM-o = speaker-embedding cosine vs. the prompt clip (prompt_tensor). hyp = raw ASR hypothesis."""
     gen_audio_np, length = generate_audio(model, prompt_tensor, target_text=text)
     gen = gen_audio_np[:length]
     synth_wer, hyp = compute_wer(gen, text, src_sr=sampling_rate) if do_wer else (None, None)
-    return gen, synth_wer, hyp
+    sim_o = compute_sim_o(gen, prompt_tensor, src_sr=sampling_rate) if do_sim_o else None
+    return gen, synth_wer, hyp, sim_o
 
 
 # ----------------------------------------------------------------------------
@@ -312,6 +314,7 @@ def run_decoupled_eval(
     # dropout OFF (the predictors use dropout up to 0.5; sampling under it is wrong).
     model.eval()
     do_wer = "wer" in cfg.setup.eval_metrics
+    do_sim_o = "sim_o" in cfg.setup.eval_metrics
     num_table_rows = cfg.setup.num_table_rows
     # val = dev+test interleaved → the first num_table_rows stay balanced across both splits.
     val_refs = [r for pair in itertools.zip_longest(dev_refs, test_refs) for r in pair if r is not None]
@@ -325,17 +328,22 @@ def run_decoupled_eval(
                    "Original Audio", "Speech-Prompt", "Generated Audio"]
         if do_wer:
             columns += ["Transcription", "WER"]
-        # WER is the mean over ALL refs (well-sampled metric); only the first num_table_rows are
-        # rendered as wandb rows (keeps the audio table small as num_audio_refs scales up).
-        rows, synth_wers, gt_wers = [], [], []
+        if do_sim_o:
+            columns += ["SIM-o"]
+        # WER/SIM-o are means over ALL refs (well-sampled metrics); only the first num_table_rows
+        # are rendered as wandb rows (keeps the audio table small as num_audio_refs scales up).
+        rows, synth_wers, gt_wers, sim_os = [], [], [], []
         for i, ref in enumerate(refs):
             in_table = i < num_table_rows
-            if not do_wer and not in_table:
-                continue  # needed for neither the WER metric nor a table row → skip generation
-            gen, synth_wer, hyp = generate_ref_audio(model, ref.prompt_tensor, ref.text, sampling_rate, do_wer)
+            if not do_wer and not do_sim_o and not in_table:
+                continue  # needed for neither a metric nor a table row → skip generation
+            gen, synth_wer, hyp, sim_o = generate_ref_audio(
+                model, ref.prompt_tensor, ref.text, sampling_rate, do_wer, do_sim_o)
             if do_wer:
                 synth_wers.append(synth_wer)
                 gt_wers.append(ref.gt_wer)
+            if do_sim_o:
+                sim_os.append(sim_o)
             if in_table:
                 row = [snapshot_step, prompt_seconds, ref.text,
                        AudioClip(ref.original_np, sampling_rate),
@@ -343,10 +351,14 @@ def run_decoupled_eval(
                        AudioClip(gen, sampling_rate)]
                 if do_wer:
                     row += [hyp, synth_wer]
+                if do_sim_o:
+                    row += [sim_o]
                 rows.append(row)
         if do_wer:
             report.scalars[f"Evaluation: Metrics/{split}-WER"] = _mean_skip_nan(synth_wers)
             report.scalars[f"Evaluation: Metrics/{split}-WER-gt"] = _mean_skip_nan(gt_wers)
+        if do_sim_o:
+            report.scalars[f"Evaluation: Metrics/{split}-SIM-o"] = _mean_skip_nan(sim_os)
         report.audio_tables[title] = {"columns": columns, "rows": rows}
 
     # --- 3. best-ckpt decision (EMA dev loss) ---

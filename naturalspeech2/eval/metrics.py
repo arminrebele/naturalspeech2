@@ -39,6 +39,7 @@ def set_metric_device(device: str | None) -> None:
     global _METRIC_DEVICE_OVERRIDE
     _METRIC_DEVICE_OVERRIDE = device
     _load_asr.cache_clear()
+    _load_sv.cache_clear()
 
 
 def _metric_device() -> str:
@@ -108,3 +109,55 @@ def compute_wer(gen_audio, target_text: str, src_sr: int = 24000) -> tuple[float
         return float("nan"), ""
     hyp = transcribe(gen_audio, src_sr)
     return _word_error_rate(_norm_text(target_text), _norm_text(hyp)), hyp
+
+
+# ----------------------------------------------------------------------------
+# SIM-o (speaker similarity) — WavLM-Large-SV via the s3prl recipe
+# ----------------------------------------------------------------------------
+
+_SV_CKPT_REPO = "Dongchao/UniAudio"          # HF mirror of UniSpeech's wavlm_large_finetune.pth
+_SV_CKPT_FILE = "wavlm_large_finetune.pth"
+# Backbone key prefixes that MUST load (strict=False). A wrong frontend silently skips the whole
+# transformer/CNN stack → this asserts the catastrophic case, NOT `missing == []` (benign aux
+# buffers may legitimately be missing).
+_SV_BACKBONE_PREFIXES = (
+    "feature_extract.model.encoder.layers.",
+    "feature_extract.model.feature_extractor.",
+)
+
+
+@lru_cache(maxsize=1)
+def _load_sv():
+    """Lazy WavLM-Large-SV singleton (ECAPA head + s3prl WavLM frontend) on the metric device.
+    Loads the fine-tuned backbone via the s3prl recipe — NOT a transformers frontend swap, which
+    silently ships pretrained weights. The scoped load-assertion guards that backbone load."""
+    from huggingface_hub import hf_hub_download
+    from naturalspeech2.eval.ecapa_tdnn import ECAPA_TDNN_SMALL
+
+    device = _metric_device()
+    model = ECAPA_TDNN_SMALL(feat_dim=1024, feat_type="wavlm_large", config_path=None)
+    ckpt_path = hf_hub_download(_SV_CKPT_REPO, _SV_CKPT_FILE)
+    state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    missing, unexpected = model.load_state_dict(state["model"], strict=False)
+    # Print once (first load) to pin expectations against the silent-skip bug.
+    print(f"[sim_o load] missing={len(missing)} unexpected={len(unexpected)}; missing[:8]={missing[:8]}")
+    backbone_missing = [k for k in missing if k.startswith(_SV_BACKBONE_PREFIXES)]
+    assert not backbone_missing, (
+        f"WavLM-SV backbone weights did not load — frontend/checkpoint mismatch. "
+        f"e.g. {backbone_missing[:5]}"
+    )
+    return model.to(device).eval(), device
+
+
+@torch.no_grad()
+def compute_sim_o(gen_audio, ref_audio, src_sr: int = 24000) -> float:
+    """SIM-o = cosine of WavLM-Large-SV speaker embeddings, generated vs. reference prompt.
+    NaN on degenerate generated audio (drops out of the mean). ref_audio = the speaker prompt
+    (numpy or torch); both resampled to 16 kHz. FP32, no autocast (faithful comparable numbers).
+    cosine_similarity normalizes internally — no manual L2-norm (matches F5-TTS)."""
+    if _degenerate(gen_audio):
+        return float("nan")
+    model, device = _load_sv()
+    gen = torch.from_numpy(_prep_16k(gen_audio, src_sr)).to(device).unsqueeze(0)   # [1, T]
+    ref = torch.from_numpy(_prep_16k(ref_audio, src_sr)).to(device).unsqueeze(0)   # [1, T]
+    return torch.cosine_similarity(model(gen), model(ref)).item()

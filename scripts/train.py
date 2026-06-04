@@ -183,26 +183,33 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
 
     If "wer" in cfg.setup.eval_metrics: per-clip synth WER column + per-split means (synth WER and
     the GT-floor cached on each ref) → gap (synth − floor) = honest signal.
+    If "sim_o" in cfg.setup.eval_metrics: per-clip speaker-similarity column + per-split mean.
     """
     sr = deps.sampling_rate
     do_wer = "wer" in deps.cfg.setup.eval_metrics
+    do_sim_o = "sim_o" in deps.cfg.setup.eval_metrics
     num_table_rows = deps.cfg.setup.num_table_rows
     columns = ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt",
                "Original Audio", "Speech-Prompt", "Generated Audio"]
     if do_wer:
         columns += ["Transcription", "WER"]
+    if do_sim_o:
+        columns += ["SIM-o"]
 
-    # WER is the mean over ALL refs (well-sampled metric); only the first num_table_rows are
-    # rendered as wandb rows (keeps the audio table small as num_audio_refs scales up).
-    rows, synth_wers, gt_wers = [], [], []
+    # WER/SIM-o are means over ALL refs (well-sampled metrics); only the first num_table_rows
+    # are rendered as wandb rows (keeps the audio table small as num_audio_refs scales up).
+    rows, synth_wers, gt_wers, sim_os = [], [], [], []
     for i, ref in enumerate(refs):
         in_table = i < num_table_rows
-        if not do_wer and not in_table:
-            continue  # needed for neither the WER metric nor a table row → skip generation
-        gen, synth_wer, hyp = generate_ref_audio(deps.unoptimized_model, ref["prompt_tensor"], ref["text"], sr, do_wer)
+        if not do_wer and not do_sim_o and not in_table:
+            continue  # needed for neither a metric nor a table row → skip generation
+        gen, synth_wer, hyp, sim_o = generate_ref_audio(
+            deps.unoptimized_model, ref["prompt_tensor"], ref["text"], sr, do_wer, do_sim_o)
         if do_wer:
             synth_wers.append(synth_wer)
             gt_wers.append(ref["gt_wer"])
+        if do_sim_o:
+            sim_os.append(sim_o)
         if in_table:
             row = [
                 deps.iter_num,
@@ -214,11 +221,15 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
             ]
             if do_wer:
                 row += [hyp, synth_wer]
+            if do_sim_o:
+                row += [sim_o]
             rows.append(row)
 
     if do_wer:
         deps.metrics_out[f"Evaluation: Metrics/{split}-WER"] = _mean_skip_nan(synth_wers)
         deps.metrics_out[f"Evaluation: Metrics/{split}-WER-gt"] = _mean_skip_nan(gt_wers)
+    if do_sim_o:
+        deps.metrics_out[f"Evaluation: Metrics/{split}-SIM-o"] = _mean_skip_nan(sim_os)
 
     return (title, columns, rows)
 
