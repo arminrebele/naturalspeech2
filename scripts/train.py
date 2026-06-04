@@ -438,25 +438,32 @@ def _spawn_eval_daemon(run_dir):
 
 def _drain_and_log(run_dir, incremental_audio_tables, wandb_log):
     """Drain finished daemon evals → wandb. Always drains+cleans even when wandb is off (bounds
-    /dev/shm). Audio cells are wav paths (wandb.Audio reads the sample rate from the file); tables
-    stay INCREMENTAL across the run. No step= → eval charts use the eval/snapshot_step data field
-    (set via define_metric), immune to the trainer being many steps ahead of a stale snapshot."""
+    /dev/shm). Audio cells are wav paths wrapped as wandb.Audio, which reads the file at construction
+    → the wavs are deleted only AFTER that (in the finally, via cleanup_eval_dir). Tables stay
+    INCREMENTAL across the run. No step= → eval charts use the eval/snapshot_step data field (set via
+    define_metric), immune to the trainer being many steps ahead of a stale snapshot. A wandb hiccup
+    here logs + continues — forwarding eval results must never crash training (the daemon's
+    crash-isolation guarantee; wandb is an external boundary)."""
     for rec in ipc.drain_results(run_dir):
-        if not wandb_log:
-            continue
-        payload = dict(rec["scalars"])
-        for title, table in rec["audio_tables"].items():
-            wandb_table = incremental_audio_tables.get(title)
-            if wandb_table is None:
-                wandb_table = wandb.Table(columns=table["columns"], log_mode="INCREMENTAL")
-                incremental_audio_tables[title] = wandb_table
-            for row in table["rows"]:
-                cells = [wandb.Audio(c["__audio__"]) if isinstance(c, dict) and "__audio__" in c else c
-                         for c in row]
-                wandb_table.add_data(*cells)
-            payload[title] = wandb_table
-        payload["eval/snapshot_step"] = rec["step"]
-        wandb.log(payload)
+        try:
+            if wandb_log:
+                payload = dict(rec["scalars"])
+                for title, table in rec["audio_tables"].items():
+                    wandb_table = incremental_audio_tables.get(title)
+                    if wandb_table is None:
+                        wandb_table = wandb.Table(columns=table["columns"], log_mode="INCREMENTAL")
+                        incremental_audio_tables[title] = wandb_table
+                    for row in table["rows"]:
+                        cells = [wandb.Audio(c["__audio__"]) if isinstance(c, dict) and "__audio__" in c else c
+                                 for c in row]
+                        wandb_table.add_data(*cells)
+                    payload[title] = wandb_table
+                payload["eval/snapshot_step"] = rec["step"]
+                wandb.log(payload)
+        except Exception:
+            logger.exception(f"Failed to log drained eval (step {rec.get('step')}); skipping.")
+        finally:
+            ipc.cleanup_eval_dir(rec["_eval_dir"])
 
 
 def run_eval_block(

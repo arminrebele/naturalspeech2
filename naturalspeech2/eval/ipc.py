@@ -152,9 +152,11 @@ def write_results(run_dir: Path, report: EvalReport) -> None:
 
 
 def drain_results(run_dir: Path) -> list[dict]:
-    """Load + remove all pending eval results, oldest step first. Audio cells resolved to absolute
-    wav paths ({"__audio__": "/abs/path.wav"}) for the trainer to wrap as wandb.Audio. Each record's
-    files are deleted after loading (bounded /dev/shm usage)."""
+    """Load all pending eval results, oldest step first. Audio cells resolved to absolute wav paths
+    ({"__audio__": "/abs/path.wav"}) for the trainer to wrap as wandb.Audio; each record carries
+    "_eval_dir" so the caller cleans the wavs via cleanup_eval_dir AFTER reading them (wandb.Audio
+    reads the file at construction — deleting earlier FileNotFounds it). The json is dropped here so
+    the record isn't re-drained."""
     results_dir = run_dir / _RESULTS
     jsons = sorted(results_dir.glob("eval_*.json"), key=lambda p: int(p.stem.split("_")[1]))
     drained = []
@@ -166,14 +168,20 @@ def drain_results(run_dir: Path) -> list[dict]:
                 for cell in row:
                     if isinstance(cell, dict) and "__audio__" in cell:
                         cell["__audio__"] = str(eval_dir / cell["__audio__"])
+        payload["_eval_dir"] = str(eval_dir)
         drained.append(payload)
-        # Cleanup: json first (so a crash mid-cleanup can't resurface a half-deleted record), then wavs.
-        jp.unlink()
-        if eval_dir.is_dir():
-            for w in eval_dir.glob("*.wav"):
-                w.unlink()
-            eval_dir.rmdir()
+        jp.unlink()   # drop the json now so the record isn't re-drained; wavs cleaned by the caller
     return drained
+
+
+def cleanup_eval_dir(eval_dir) -> None:
+    """Delete a drained eval's wav dir (bounds /dev/shm). Call AFTER consuming the wav paths —
+    wandb.Audio reads the file at construction, so deleting earlier FileNotFounds it."""
+    eval_dir = Path(eval_dir)
+    if eval_dir.is_dir():
+        for w in eval_dir.glob("*.wav"):
+            w.unlink()
+        eval_dir.rmdir()
 
 
 # ----------------------------------------------------------------------------
