@@ -23,7 +23,7 @@ dataset:
 
 setup:
   max_iters: 20000                 # ISR + warmup_ratio (0.11 → 2200) inherited from base — same schedule type as the full run
-  eval_interval: 2000              # 10 evals across the run; each one is the combined dev+test held-out (loss + val-WER + audio)
+  # eval_interval inherits base (5000) → 4 evals across the run; each = combined dev+test held-out (loss + WER + SIM-o + audio)
   log_subdir: "research"
   log_name: "train_100k"
 
