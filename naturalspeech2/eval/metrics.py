@@ -4,7 +4,8 @@ WER (intelligibility) via HuBERT-Large CTC, no LM (`facebook/hubert-large-ls960-
 no-LM CTC transcribes acoustics faithfully instead of letting a decoder LM paper over
 mispronunciations. Lazy module-level singleton on the idle 2nd GPU (off the training
 card's budget), FP32, no_grad. Standard word-level Levenshtein(ref,hyp)/len(ref),
-shared ref/hyp normalization. SIM-o (speaker similarity) deferred (s3prl/numpy-2.x).
+shared ref/hyp normalization. SIM-o (speaker similarity) = WavLM-Large-SV embedding
+cosine (s3prl WavLM frontend + vendored ECAPA head; see `compute_sim_o`).
 """
 import re
 from functools import lru_cache
