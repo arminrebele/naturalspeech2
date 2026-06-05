@@ -228,9 +228,17 @@ python scripts/train.py +experiment=gradient_analysis
 
 **5. Hyperparameter-Tuning**
 
-For all Hyperparameters that are explicitly stated in the original paper [1], we use the declared values. The rest is tuned by Optuna, or alternatively set to our best guesses, to perform Hyperparameter-Tuning inside a reasonable time frame. 
+For every hyperparameter the original paper [1] states explicitly, we use the declared value. The rest is set to a sensible default or — where the paper is silent and the choice is sensitive — tuned with **Optuna**.
 
-For a detailed breakdown, see **this table**.
+**Aligner scalars.** The alignment paper [3] leaves three scalars unspecified: `temperature` (cosine-attention scale), `prior_w` (Beta-Binomial prior strength), and `blank_logit` (CTC blank-vs-label calibration). Because alignment gates everything downstream, we search them with Optuna (TPE sampler) to **minimize the held-out aligner loss** (`forward_sum + bin`):
+
+```bash
+python scripts/tuning/run_aligner_optuna.py --n-trials 30
+```
+
+Each trial is a fresh `+experiment=aligner_trial` training job (`--max-iters`, default 5000) that dumps per-eval held-out aligner losses; the trial is scored on the mean over its converged tail. Study state persists to SQLite under `research/aligner_optuna/`, so runs are resumable and inspectable. Tune the search ranges in `SEARCH_SPACE` at the top of [the driver](scripts/tuning/run_aligner_optuna.py), and use `--override <hydra.key=value>` to forward extra Hydra overrides to every trial. The best scalars print at the end → paste into [`config/model/base.yaml`](config/model/base.yaml). To probe one setting by hand: `python scripts/train.py +experiment=aligner_trial model.aligner.temperature=10`. The winner still gets a manual `overfit_test` (monotonic durations, intelligible audio) — the loss objective is necessary, not sufficient.
+
+**Dropout.** Zero by default: the paper reports the model still underfitting at 300k steps, so regularization is expected net-negative. We reintroduce it locally only if a run shows overfitting (dev/train divergence), most likely in the small duration/pitch predictors.
 
 ## Hardware: Reference, Assumptions, and Minimum Baseline
 
