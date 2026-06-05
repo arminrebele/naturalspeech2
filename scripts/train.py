@@ -30,12 +30,14 @@ from naturalspeech2.config.schema import model_cfg_from_omegaconf
 from naturalspeech2.data.loaders import create_dataloader
 from naturalspeech2.inference import compute_inference_data_loss, generate_audio
 from naturalspeech2.eval import resolve_metric_device, set_metric_device, ipc
+from naturalspeech2.eval.metrics import compute_sim_o, compute_wer
+from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 from naturalspeech2.eval.runner import (
     estimate_loss,
     get_loss_section,
     _mean_skip_nan,
     build_fixed_refs_data,
-    generate_ref_audio,
+    batch_generate,
     generate_random_dev_clips,
     atomic_save_safetensors,
     EVAL_TEXT_PROMPTS,
@@ -177,19 +179,21 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
 
     # WER/SIM-o are means over ALL refs (well-sampled metrics); only the first num_table_rows
     # are rendered as wandb rows (keeps the audio table small as num_audio_refs scales up).
+    # Generate for ALL refs when a metric is on, else just the rendered rows.
     rows, synth_wers, gt_wers, sim_os = [], [], [], []
-    for i, ref in enumerate(refs):
-        in_table = i < num_table_rows
-        if not do_wer and not do_sim_o and not in_table:
-            continue  # needed for neither a metric nor a table row → skip generation
-        gen, synth_wer, hyp, sim_o = generate_ref_audio(
-            deps.unoptimized_model, ref["prompt_tensor"], ref["text"], sr, do_wer, do_sim_o)
+    k = len(refs) if (do_wer or do_sim_o) else min(num_table_rows, len(refs))
+    proxies = [len(refs[i]["original_np"]) // ENCODER_HOP_LENGTH for i in range(k)]
+    gens = batch_generate(deps.unoptimized_model, [refs[i]["prompt_tensor"] for i in range(k)],
+                          [refs[i]["text"] for i in range(k)], proxies, deps.cfg.setup.gen_frame_budget)
+    for i in range(k):
+        ref, gen = refs[i], gens[i]
         if do_wer:
+            synth_wer, hyp = compute_wer(gen, ref["text"], src_sr=sr)
             synth_wers.append(synth_wer)
             gt_wers.append(ref["gt_wer"])
         if do_sim_o:
-            sim_os.append(sim_o)
-        if in_table:
+            sim_os.append(compute_sim_o(gen, ref["prompt_tensor"], src_sr=sr))
+        if i < num_table_rows:
             row = [
                 deps.iter_num,
                 deps.cfg.model.prompt_seconds,
@@ -201,7 +205,7 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
             if do_wer:
                 row += [hyp, synth_wer]
             if do_sim_o:
-                row += [sim_o]
+                row += [sim_os[-1]]
             rows.append(row)
 
     if do_wer:

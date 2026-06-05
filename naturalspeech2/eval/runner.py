@@ -4,7 +4,7 @@ daemon. Pure compute → plain data; no wandb, no IPC, no process assumptions.
 Contents:
   - estimate_loss: held-out loss over dev/test (+train subset), denominator-normalized.
   - build_fixed_refs_data / FixedRef: deterministic reference clips, GT-floor WER cached once.
-  - generate_ref_audio: one ref → (generated waveform, synth WER, ASR transcription, SIM-o).
+  - batch_generate / _frame_budget_groups: length-sorted, frame-budget-packed batched generation.
   - run_decoupled_eval: daemon orchestration — both live + EMA losses, EMA audio/WER, best-pick.
   - get_loss_section / _mean_skip_nan / atomic_save_safetensors: shared formatting + IO helpers.
 """
@@ -21,7 +21,8 @@ from torch import nn
 from safetensors.torch import save_file
 
 from naturalspeech2.eval.metrics import compute_sim_o, compute_wer
-from naturalspeech2.inference import generate_audio
+from naturalspeech2.inference import generate_audio_batch
+from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 from naturalspeech2.utils.utils import compute_denominators
 
 
@@ -153,7 +154,7 @@ def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, ev
 
 
 # ----------------------------------------------------------------------------
-# Fixed reference clips (data-only) + per-ref audio generation
+# Fixed reference clips (data-only) + batched audio generation
 # ----------------------------------------------------------------------------
 
 @dataclass
@@ -196,16 +197,36 @@ def build_fixed_refs_data(dataset, n_refs, prompt_samples_len, rng, *, sampling_
     return refs
 
 
-def generate_ref_audio(model, prompt_tensor, text: str, sampling_rate: int, do_wer: bool,
-                       do_sim_o: bool = False):
-    """One ref → (trimmed generated waveform np, synth WER|None, ASR transcription|None, SIM-o|None).
-    GT-floor WER is cached on the ref (build time); synth WER + transcription + SIM-o computed here.
-    SIM-o = speaker-embedding cosine vs. the prompt clip (prompt_tensor). hyp = raw ASR hypothesis."""
-    gen_audio_np, length = generate_audio(model, prompt_tensor, target_text=text)
-    gen = gen_audio_np[:length]
-    synth_wer, hyp = compute_wer(gen, text, src_sr=sampling_rate) if do_wer else (None, None)
-    sim_o = compute_sim_o(gen, prompt_tensor, src_sr=sampling_rate) if do_sim_o else None
-    return gen, synth_wer, hyp, sim_o
+def _frame_budget_groups(proxies, budget):
+    """Greedy length-sorted packing. proxies[i] ~ output latent frames; returns lists of original
+    indices with batch·max_proxy ≤ budget. A lone over-budget item still runs alone."""
+    order = sorted(range(len(proxies)), key=lambda i: proxies[i])
+    groups, cur, cur_max = [], [], 0
+    for i in order:
+        nm = max(cur_max, proxies[i])
+        if cur and (len(cur) + 1) * nm > budget:
+            groups.append(cur)
+            cur, cur_max = [i], proxies[i]
+        else:
+            cur.append(i)
+            cur_max = nm
+    if cur:
+        groups.append(cur)
+    return groups
+
+
+def batch_generate(model, prompts, texts, frame_proxies, frame_budget):
+    """Length-sorted, frame-budget-packed batched generation → trimmed gens in INPUT order.
+    frame_proxies need only be a consistent relative length estimate (exact F' unknown pre-duration)."""
+    n = len(prompts)
+    if n == 0:
+        return []
+    gens = [None] * n
+    for group in _frame_budget_groups(frame_proxies, frame_budget):
+        out = generate_audio_batch(model, [prompts[i] for i in group], [texts[i] for i in group])
+        for pos, i in enumerate(group):
+            gens[i] = out[pos]
+    return gens
 
 
 # ----------------------------------------------------------------------------
@@ -213,7 +234,7 @@ def generate_ref_audio(model, prompt_tensor, text: str, sampling_rate: int, do_w
 # ----------------------------------------------------------------------------
 
 # Eval-block static text prompts (short → very long, ~3/6/15/30 s) → probe length generalization.
-# generate_audio re-phonemizes per call (~50 ms each — negligible). Shared by both eval paths.
+# Generation re-phonemizes per call (~50 ms each — negligible). Shared by both eval paths.
 EVAL_TEXT_PROMPTS = [
     "Hello, world! This is a test.",
     "The quick brown fox jumps over the lazy dog, while the sun sets.",
@@ -250,11 +271,9 @@ def generate_random_dev_clips(model, dev_dataset, sampling_rate: int, custom_pro
     start = random.randint(0, sample["audio_length"] - ten)
     target_text = custom_prompts[random.randint(0, len(custom_prompts) - 1)]
 
-    clips = []
-    for p_len, n_samples in [(5.0, five), (10.0, ten)]:
-        prompt_np = audio_np[start: start + n_samples]
-        gen_np, length = generate_audio(model, prompt_np, target_text=target_text)
-        clips.append((p_len, prompt_np, gen_np[:length]))
+    prompts = [audio_np[start: start + n] for n in (five, ten)]
+    gens = generate_audio_batch(model, prompts, [target_text, target_text])
+    clips = [(p_len, prompts[j], gens[j]) for j, p_len in enumerate((5.0, 10.0))]
     return target_text, clips
 
 
@@ -397,19 +416,22 @@ def run_decoupled_eval(
             columns += ["SIM-o"]
         # WER/SIM-o are means over ALL refs (well-sampled metrics); only the first num_table_rows
         # are rendered as wandb rows (keeps the audio table small as num_audio_refs scales up).
+        # Generate (length-sorted, frame-budget-packed) for as many refs as needed: ALL when a
+        # metric is on, else just the rendered rows.
+        k = len(refs) if (do_wer or do_sim_o) else min(num_table_rows, len(refs))
+        proxies = [len(refs[i].original_np) // ENCODER_HOP_LENGTH for i in range(k)]
+        gens = batch_generate(model, [refs[i].prompt_tensor for i in range(k)],
+                              [refs[i].text for i in range(k)], proxies, cfg.setup.gen_frame_budget)
         rows, synth_wers, gt_wers, sim_os = [], [], [], []
-        for i, ref in enumerate(refs):
-            in_table = i < num_table_rows
-            if not do_wer and not do_sim_o and not in_table:
-                continue  # needed for neither a metric nor a table row → skip generation
-            gen, synth_wer, hyp, sim_o = generate_ref_audio(
-                model, ref.prompt_tensor, ref.text, sampling_rate, do_wer, do_sim_o)
+        for i in range(k):
+            ref, gen = refs[i], gens[i]
             if do_wer:
+                synth_wer, hyp = compute_wer(gen, ref.text, src_sr=sampling_rate)
                 synth_wers.append(synth_wer)
                 gt_wers.append(ref.gt_wer)
             if do_sim_o:
-                sim_os.append(sim_o)
-            if in_table:
+                sim_os.append(compute_sim_o(gen, ref.prompt_tensor, src_sr=sampling_rate))
+            if i < num_table_rows:
                 row = [snapshot_step, prompt_seconds, ref.text,
                        AudioClip(ref.original_np, sampling_rate),
                        AudioClip(ref.prompt_np, sampling_rate),
@@ -417,7 +439,7 @@ def run_decoupled_eval(
                 if do_wer:
                     row += [hyp, synth_wer]
                 if do_sim_o:
-                    row += [sim_o]
+                    row += [sim_os[-1]]
                 rows.append(row)
         if do_wer:
             report.scalars[f"Evaluation: Metrics/{split}-WER"] = _mean_skip_nan(synth_wers)
