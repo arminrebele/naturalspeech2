@@ -46,7 +46,10 @@ from naturalspeech2.utils.utils import setup_file_logger, compute_denominators
 
 logger = logging.getLogger(__name__)
 
-COMPILE_MILESTONES = [1, 250]
+# rel-to-start: step 1 = compile-happened sanity; 250 + 2000 = post-warmup leak check
+# (unique_graphs must PLATEAU once all buckets have compiled — see the Dynamo block in the loop).
+COMPILE_MILESTONES = [1, 250, 2000]
+COMPILE_WARMUP_STEP = 250  # by here all buckets + their dynamic-shape promotions have compiled
 
 def get_lr(it, cfg):
     learning_rate = cfg.training.learning_rate
@@ -885,6 +888,7 @@ def train(cfg: DictConfig):
     logger.info("Starting training loop...")
     last_log_time = time.perf_counter()
     last_log_iter = start_iter - 1
+    prev_unique_graphs = None  # post-warmup recompile-leak check across COMPILE_MILESTONES
 
     # Filled on the first loop iter when overfit_batch table is active. Overfit cycling yields
     # the same 5 objects forever, so caching lookahead_queue[0] once gives a stable ref batch.
@@ -1041,20 +1045,37 @@ def train(cfg: DictConfig):
         # Dynamo Compilation Verdict
         # -----------------------------
         if (iter_num - start_iter) in COMPILE_MILESTONES:
-            logger.info(f"\n========== TORCH.COMPILE STATUS (Step {iter_num - start_iter}) ==========")
+            rel_step = iter_num - start_iter
             counters = torch._dynamo.utils.counters
-            
-            graph_breaks = counters.get("graph_break", {})
+            # unique_graphs increments once per FX graph (re)compiled; guard-passing cache hits do NOT
+            # advance it. THIS is the shape-leak signal — it must plateau once all buckets have compiled.
+            unique_graphs = counters["stats"]["unique_graphs"]
+            frames_compiled = counters["frames"]["total"]
+            # graph breaks are STRUCTURAL: one per @torch.compiler.disable site reached
+            # (encodec.get_latents ×2 + aligner.maximum_path_indices). They saturate on the first trace
+            # and do NOT scale with buckets/recompiles — shown for transparency, NOT a leak signal.
+            graph_breaks = dict(counters.get("graph_break", {}))
             total_breaks = sum(graph_breaks.values())
             num_buckets = len(cfg.dataloader.bucket_mapping)
-            num_disable_points = 2  # encodec.get_latents, aligner.maximum_path_indices
-            expected_breaks = num_buckets * num_disable_points
 
-            logger.info(f"Total Traced Graph Breaks: {total_breaks} (Expected maximum: {num_buckets} buckets * {num_disable_points} disable points = {expected_breaks})")
-            if total_breaks <= expected_breaks:
-                logger.info("✅ Batch bucketing is stable and no unintended graph breaks occurred.")
-            else:
-                logger.warning("⚠️ WARNING: Too many traces! Either new graph breaks were introduced, or batch shapes are leaking.")
+            logger.info(f"\n========== TORCH.COMPILE STATUS (Step {rel_step}) ==========")
+            logger.info(f"Unique compiled graphs: {unique_graphs}  |  frames compiled: {frames_compiled}")
+            logger.info(f"Structural graph breaks (fixed, not a leak signal): {total_breaks}")
+            for reason, n in sorted(graph_breaks.items(), key=lambda kv: -kv[1]):
+                logger.info(f"    {n:>4}× {reason}")
+            # Leak = unique_graphs still growing AFTER warmup (recompiling beyond the K buckets).
+            if rel_step >= COMPILE_WARMUP_STEP:
+                if prev_unique_graphs is None:
+                    logger.info(f"✅ Post-warmup baseline: {unique_graphs} graphs. Leak check fires at the next milestone.")
+                elif unique_graphs > prev_unique_graphs:
+                    logger.warning(
+                        f"⚠️ unique_graphs grew {prev_unique_graphs} → {unique_graphs} after warmup — batch shapes "
+                        f"are LEAKING (recompiling beyond the {num_buckets} buckets). Re-run with "
+                        f"TORCH_LOGS=recompiles to see the guard failure."
+                    )
+                else:
+                    logger.info(f"✅ Stable at {unique_graphs} graphs since the last milestone — bucketing healthy, no shape leaking.")
+                prev_unique_graphs = unique_graphs
             logger.info("==========================================\n")
 
         # -----------------------------
