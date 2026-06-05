@@ -2,22 +2,9 @@ defaults:
   - base
   - _self_
 
-# Overrides on top of setup/base.yaml — only the deltas live here.
-
-max_iters: 10000                 # warmup_ratio (0.11 → 1100) + ISR inherited from base
-lr_decay_iters: ${setup.max_iters}
+max_iters: 30000
 
 loss_analysis_run: True
-
-log_interval: 10
-eval_interval: 10000             # >= max_iters → in-loop eval never fires
-checkpoint_interval: 0
-
-eval_iters: 0
-audio_tables: []
-
-best_safetensors: False
-final_safetensors: False         # loss_analysis has its own end-of-run summary; no inference artifact needed
 
 log_subdir: "research"
 log_name: "loss_analysis"

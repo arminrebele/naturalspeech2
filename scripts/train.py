@@ -637,18 +637,17 @@ def train(cfg: DictConfig):
     CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
     setup_file_logger(logger, log_dir / log_name)
 
-    # Decoupled eval daemon vs in-process sync eval. Daemon = standard 2-GPU training run only;
-    # single-GPU AND every diagnostic mode (overfit/loss/grad/dropout) keep in-process eval (they
-    # need trainer-local state and run on one card). Requires EMA (best-selection uses the shadow).
-    is_diagnostic_run = (
-        cfg.setup.overfit_single_batch or cfg.setup.loss_analysis_run
+    # Daemon offloads eval to GPU1. overfit/gradient_analysis/dropout_trial need trainer-local eval
+    # state so they stay in-process; loss_analysis's eval is plain held-out loss → daemon-compatible.
+    daemon_incompatible_run = (
+        cfg.setup.overfit_single_batch
         or cfg.setup.gradient_analysis_run or cfg.setup.dropout_trial_run
     )
     use_eval_daemon = (
         cfg.setup.eval_daemon.enabled
         and torch.cuda.device_count() > 1
         and cfg.model.ema.enabled
-        and not is_diagnostic_run
+        and not daemon_incompatible_run
     )
     daemon_proc = None
     snapshot_writer = None
@@ -659,7 +658,7 @@ def train(cfg: DictConfig):
     else:
         # In-process WER ASR honors metric_device (auto → CPU on single-GPU, never the train card).
         set_metric_device(resolve_metric_device(cfg.setup.metric_device))
-        if cfg.setup.eval_daemon.enabled and not is_diagnostic_run:
+        if cfg.setup.eval_daemon.enabled and not daemon_incompatible_run:
             logger.info(f"Eval daemon requested but inactive (device_count="
                         f"{torch.cuda.device_count()}, ema_enabled={cfg.model.ema.enabled}); "
                         "falling back to in-process eval.")

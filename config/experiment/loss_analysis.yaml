@@ -5,10 +5,13 @@
 #
 # LR stays at base.yaml's ISR — matches the main run so the unweighted-loss balance readout
 # reflects the production schedule (cosine's min_lr tail would over-settle magnitudes).
-# Train split (MLS dev is too small at ~3807 rows → a 10000-iter run re-epochs it many times,
+# Train split (MLS dev is too small at ~3807 rows → a long run re-epochs it many times,
 # making the readout reflect memorized repeats, not the production balance).
 
 defaults:
   - override /model: loss_analysis
   - override /setup: loss_analysis
   - override /wandb: loss_analysis
+
+dataset:
+  max_train_clips: 400000

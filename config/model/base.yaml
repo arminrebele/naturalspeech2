@@ -147,7 +147,7 @@ loss_balance_targets:
     group_target: 1.0
     data_loss: 1.0
     score_loss: 1.0
-    ce_rvq_loss: 1.0
+    ce_rvq_loss: 0.1
 
 # Warmup ramps a loss weight 0.1×→1.0× over N steps (0 = full from step 0). Paper uses none; we keep
 # one. duration_predictor_loss warms over 1000 steps — its target is the aligner's Viterbi durations,
