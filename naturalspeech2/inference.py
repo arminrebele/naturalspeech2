@@ -23,6 +23,7 @@ from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.model import NaturalSpeech2Model
 from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH, SAMPLING_RATE
 from naturalspeech2.paths import CONFIG_DIR, DATA_DIR
+from naturalspeech2.utils.utils import create_mask_from_lengths
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +230,61 @@ def generate_audio(
     audio_np = generated_audio[0].detach().cpu().to(torch.float32).numpy()
     valid_length = int(audio_lengths[0].item())
     return audio_np, valid_length
+
+
+@torch.no_grad()
+def generate_audio_batch(
+    model: NaturalSpeech2Model,
+    reference_audios: list,
+    target_texts: list,
+    sampling_steps: int = 150,
+) -> list:
+    """Batched generate_audio: (ref clips, texts) → list of trimmed audio np, INPUT order.
+    Zero-pads prompts/tokens to batch max (+ masks), one model.generate, trims each by its
+    predicted length. model.generate is batch-native; this generalizes the [1,T] wrapper."""
+    assert len(reference_audios) == len(target_texts), "reference/text count mismatch"
+    tokenizer = getattr(model, "_inference_tokenizer", None)
+    if tokenizer is None:
+        raise RuntimeError("model._inference_tokenizer is not set (see generate_audio).")
+    device = next(model.parameters()).device
+    sampling_rate = getattr(model, "_inference_sampling_rate", SAMPLING_RATE)
+    prompt_seconds = (model.prompt_frames * ENCODER_HOP_LENGTH) / sampling_rate
+
+    refs, ref_lens, tok_lists = [], [], []
+    for ref, text in zip(reference_audios, target_texts):
+        audio, length = _load_audio(ref, target_sr=sampling_rate, device=device,
+                                    prompt_seconds_warning_threshold=prompt_seconds)
+        refs.append(audio[0])
+        ref_lens.append(int(length.item()))
+        tok_lists.append(tokenizer(text))
+
+    B = len(refs)
+    T_ref = max(ref_lens)
+    P = max(len(t) for t in tok_lists)
+
+    reference_audio = torch.zeros((B, T_ref), dtype=refs[0].dtype, device=device)
+    for i, a in enumerate(refs):
+        reference_audio[i, : a.shape[0]] = a
+    reference_audio_lengths = torch.tensor(ref_lens, dtype=torch.long, device=device)
+
+    phoneme_tokens = torch.zeros((B, P), dtype=torch.long, device=device)   # pad id 0 (<pad>)
+    for i, toks in enumerate(tok_lists):
+        phoneme_tokens[i, : len(toks)] = torch.tensor(toks, dtype=torch.long, device=device)
+    phoneme_lengths = torch.tensor([len(t) for t in tok_lists], dtype=torch.long, device=device)
+    phoneme_tokens_mask = create_mask_from_lengths(phoneme_lengths, P)      # [B, P, 1]
+
+    with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+        generated_audio, audio_lengths = model.generate(
+            reference_audio=reference_audio,
+            reference_audio_lengths=reference_audio_lengths,
+            phoneme_tokens=phoneme_tokens,
+            phoneme_tokens_mask=phoneme_tokens_mask,
+            sampling_steps=sampling_steps,
+        )
+
+    audio_np = generated_audio.detach().cpu().to(torch.float32).numpy()     # [B, T]
+    lengths = audio_lengths.detach().cpu().tolist()
+    return [audio_np[i, : int(lengths[i])] for i in range(B)]
 
 
 @torch.no_grad()

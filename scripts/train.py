@@ -30,13 +30,19 @@ from naturalspeech2.config.schema import model_cfg_from_omegaconf
 from naturalspeech2.data.loaders import create_dataloader
 from naturalspeech2.inference import compute_inference_data_loss, generate_audio
 from naturalspeech2.eval import resolve_metric_device, set_metric_device, ipc
+from naturalspeech2.eval.metrics import compute_sim_o, compute_wer_batch
+from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 from naturalspeech2.eval.runner import (
     estimate_loss,
     get_loss_section,
     _mean_skip_nan,
     build_fixed_refs_data,
-    generate_ref_audio,
+    batch_generate,
+    generate_random_dev_clips,
     atomic_save_safetensors,
+    EVAL_TEXT_PROMPTS,
+    RANDOM_DEV_TITLE,
+    RANDOM_DEV_COLUMNS,
 )
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper, GradientAnalyzer
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
@@ -126,57 +132,33 @@ class EvalDeps:
 def render_random_dev_table(deps: EvalDeps) -> tuple[str, list, list]:
     """Pick one random ≥10s dev clip, generate audio at 5s + 10s prompt lengths."""
     sr = deps.sampling_rate
-    ten_seconds_samples = int(10.0 * sr)
-    five_seconds_samples = int(5.0 * sr)
-
-    random_indices = list(range(len(deps.dev_dataset)))
-    random.shuffle(random_indices)
-    test_idx = next(i for i in random_indices if deps.dev_dataset.dataset[i]["audio_length"] >= ten_seconds_samples)
-    sample = deps.dev_dataset[test_idx]
-
-    audio_np = sample["audio"].numpy()
-    max_start = sample["audio_length"] - ten_seconds_samples
-    start_idx = random.randint(0, max_start)
-
-    prompt_5s_np = audio_np[start_idx : start_idx + five_seconds_samples]
-    prompt_10s_np = audio_np[start_idx : start_idx + ten_seconds_samples]
-
-    target_text = deps.custom_prompts[random.randint(0, len(deps.custom_prompts) - 1)]
-
-    rows = []
-    for p_len, p_np in [(5.0, prompt_5s_np), (10.0, prompt_10s_np)]:
-        gen_audio_np, length = generate_audio(deps.unoptimized_model, p_np, target_text=target_text)
-        rows.append([
-            deps.iter_num,
-            p_len,
-            target_text,
-            wandb.Audio(p_np, sample_rate=sr),
-            wandb.Audio(gen_audio_np[:length], sample_rate=sr),
-        ])
-
-    return (
-        "Evaluation: Random Generation Examples",
-        ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt", "Speech-Prompt", "Generated Audio"],
-        rows,
-    )
+    target_text, clips = generate_random_dev_clips(
+        deps.unoptimized_model, deps.dev_dataset, sr, deps.custom_prompts)
+    rows = [
+        [deps.iter_num, p_len, target_text,
+         wandb.Audio(prompt_np, sample_rate=sr), wandb.Audio(gen_np, sample_rate=sr)]
+        for p_len, prompt_np, gen_np in clips
+    ]
+    return RANDOM_DEV_TITLE, RANDOM_DEV_COLUMNS, rows
 
 
-def build_fixed_refs(dataset, n_refs, prompt_samples_len, sampling_rate, rng, do_wer):
-    """Trainer-side fixed refs: shared data builder (deterministic selection + GT-floor WER cached
-    once) wrapped with wandb.Audio for the original/prompt clips (reused across evals). Call only
-    when wandb is active."""
+def build_fixed_refs(dataset, n_refs, prompt_samples_len, sampling_rate, rng, do_wer, do_sim_o):
+    """Trainer-side fixed refs: shared data builder (deterministic selection + GT-floor WER and, when
+    SIM-o is on, the prompt speaker embedding cached once) wrapped with wandb.Audio for the
+    original/prompt clips (reused across evals). Call only when wandb is active."""
     return [
         {
             "original_audio": wandb.Audio(r.original_np, sample_rate=sampling_rate),
             "prompt_audio": wandb.Audio(r.prompt_np, sample_rate=sampling_rate),
             "prompt_tensor": r.prompt_tensor,
+            "prompt_embedding": r.prompt_embedding,   # cached WavLM-SV embedding (None if SIM-o off)
             "original_np": r.original_np,
             "text": r.text,
             "gt_wer": r.gt_wer,   # GT-floor WER, computed once at build
         }
         for r in build_fixed_refs_data(
             dataset, n_refs, prompt_samples_len, rng,
-            sampling_rate=sampling_rate, compute_gt_wer=do_wer,
+            sampling_rate=sampling_rate, compute_gt_wer=do_wer, compute_sim_emb=do_sim_o,
         )
     ]
 
@@ -201,19 +183,23 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
 
     # WER/SIM-o are means over ALL refs (well-sampled metrics); only the first num_table_rows
     # are rendered as wandb rows (keeps the audio table small as num_audio_refs scales up).
+    # Generate for ALL refs when a metric is on, else just the rendered rows.
     rows, synth_wers, gt_wers, sim_os = [], [], [], []
-    for i, ref in enumerate(refs):
-        in_table = i < num_table_rows
-        if not do_wer and not do_sim_o and not in_table:
-            continue  # needed for neither a metric nor a table row → skip generation
-        gen, synth_wer, hyp, sim_o = generate_ref_audio(
-            deps.unoptimized_model, ref["prompt_tensor"], ref["text"], sr, do_wer, do_sim_o)
+    k = len(refs) if (do_wer or do_sim_o) else min(num_table_rows, len(refs))
+    proxies = [len(refs[i]["original_np"]) // ENCODER_HOP_LENGTH for i in range(k)]
+    gens = batch_generate(deps.unoptimized_model, [refs[i]["prompt_tensor"] for i in range(k)],
+                          [refs[i]["text"] for i in range(k)], proxies, deps.cfg.setup.gen_frame_budget)
+    wer_list = (compute_wer_batch(gens, [refs[i]["text"] for i in range(k)], src_sr=sr,
+                                  batch_samples=deps.cfg.setup.metric_batch_samples) if do_wer else None)
+    for i in range(k):
+        ref, gen = refs[i], gens[i]
         if do_wer:
+            synth_wer, hyp = wer_list[i]
             synth_wers.append(synth_wer)
             gt_wers.append(ref["gt_wer"])
         if do_sim_o:
-            sim_os.append(sim_o)
-        if in_table:
+            sim_os.append(compute_sim_o(gen, ref["prompt_embedding"], src_sr=sr))
+        if i < num_table_rows:
             row = [
                 deps.iter_num,
                 deps.cfg.model.prompt_seconds,
@@ -225,7 +211,7 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
             if do_wer:
                 row += [hyp, synth_wer]
             if do_sim_o:
-                row += [sim_o]
+                row += [sim_os[-1]]
             rows.append(row)
 
     if do_wer:
@@ -675,23 +661,8 @@ def train(cfg: DictConfig):
     )
     token_vocabulary_size = inference_tokenizer.token_vocabulary_size
 
-    # Eval block's static text prompts. generate_audio re-phonemizes per call
-    # (~50 ms × 4 prompts × eval intervals — negligible).
-    custom_prompts = [
-        "Hello, world! This is a test.", # Short (~3s)
-        "The quick brown fox jumps over the lazy dog, while the sun sets.", # Medium (~6s)
-        ("Natural speech synthesis has come a long way in recent years. "
-         "Today, we can generate highly realistic human voices from just a "
-         "few seconds of reference audio, opening up new possibilities for "
-         "accessibility and content creation."), # Long (~15s)
-        ("In the early days of artificial intelligence, text to speech systems "
-         "sounded incredibly robotic and lacked emotional nuance. Researchers "
-         "spent decades studying human phonetics, prosody, and intonation. "
-         "Now, thanks to advanced deep learning techniques, diffusion models, "
-         "and massive datasets, the boundaries between synthesized and natural "
-         "voices are becoming indistinguishable. This marks a paradigm shift "
-         "in how we interact with technology on a daily basis.") # Very long (~30s)
-    ]
+    # Eval block's static text prompts (random_dev table); shared with the daemon via runner.
+    custom_prompts = EVAL_TEXT_PROMPTS
 
     sampling_rate = cfg.dataloader.sampling_rate
     model_cfg_dict = OmegaConf.to_container(cfg.model, resolve=True)
@@ -833,8 +804,9 @@ def train(cfg: DictConfig):
             # Dedicated seeded RNGs → eval reference clips identical across runs, decoupled from other
             # global-random usage (cross-run A/B). Training on dev: dev refs = trained-on, test = held-out.
             do_wer = "wer" in cfg.setup.eval_metrics
-            table_2_refs = build_fixed_refs(dev_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed), do_wer)
-            test_refs = build_fixed_refs(test_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed + 1), do_wer)
+            do_sim_o = "sim_o" in cfg.setup.eval_metrics
+            table_2_refs = build_fixed_refs(dev_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed), do_wer, do_sim_o)
+            test_refs = build_fixed_refs(test_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed + 1), do_wer, do_sim_o)
 
     # Spawn the eval daemon (handshake first → daemon reads it at startup). Pinned to GPU1.
     if use_eval_daemon:

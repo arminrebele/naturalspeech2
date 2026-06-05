@@ -85,20 +85,21 @@ def build(run_dir: Path):
                     f"(base {base_gas} -> {base_gas * bsd}) -> logical batch + total samples unchanged, "
                     f"~{bsd}x lower forward VRAM.")
 
-    # Fixed refs — same seeds as the trainer → identical clips; GT-floor WER cached once.
+    # Fixed refs — same seeds as the trainer → identical clips; GT-floor WER + prompt SIM-o embedding cached once.
     do_wer = "wer" in cfg.setup.eval_metrics
+    do_sim_o = "sim_o" in cfg.setup.eval_metrics
     n_refs = cfg.setup.num_audio_refs
     prompt_samples_len = int(cfg.model.prompt_seconds * sr)
     dev_refs = build_fixed_refs_data(dev_dataset, n_refs, prompt_samples_len, random.Random(seed),
-                                     sampling_rate=sr, compute_gt_wer=do_wer)
+                                     sampling_rate=sr, compute_gt_wer=do_wer, compute_sim_emb=do_sim_o)
     test_refs = build_fixed_refs_data(test_dataset, n_refs, prompt_samples_len, random.Random(seed + 1),
-                                      sampling_rate=sr, compute_gt_wer=do_wer)
+                                      sampling_rate=sr, compute_gt_wer=do_wer, compute_sim_emb=do_sim_o)
 
     return {
         "cfg": cfg, "device": device, "sr": sr,
         "model": model, "loss_model": loss_model, "loss_wrapper": loss_wrapper,
         "train_loader": train_loader, "dev_loader": dev_loader, "test_loader": test_loader,
-        "dev_refs": dev_refs, "test_refs": test_refs,
+        "dev_dataset": dev_dataset, "dev_refs": dev_refs, "test_refs": test_refs,
     }
 
 
@@ -111,7 +112,7 @@ def evaluate_snapshot(ctx: dict, snap: dict, best_dev_loss: float) -> float:
         model=ctx["model"], loss_model=ctx["loss_model"], loss_wrapper=ctx["loss_wrapper"],
         train_loader=ctx["train_loader"], dev_loader=ctx["dev_loader"], test_loader=ctx["test_loader"],
         live_trainable=snap["live"], shadow_trainable=snap["shadow"],
-        dev_refs=ctx["dev_refs"], test_refs=ctx["test_refs"],
+        dev_refs=ctx["dev_refs"], test_refs=ctx["test_refs"], dev_dataset=ctx["dev_dataset"],
         cfg=cfg, device=ctx["device"], prompt_seconds=cfg.model.prompt_seconds,
         sampling_rate=ctx["sr"], snapshot_step=step, prev_best_dev_loss=best_dev_loss,
     )

@@ -14,6 +14,8 @@ import numpy as np
 import torch
 import torchaudio.functional as taF
 
+from naturalspeech2.utils.utils import pack_by_budget
+
 _ASR_NAME = "facebook/hubert-large-ls960-ft"
 _ASR_SR = 16000
 _MIN_SAMPLES = _ASR_SR // 4   # <0.25 s → degenerate (early-training garbage); skip → NaN
@@ -112,6 +114,43 @@ def compute_wer(gen_audio, target_text: str, src_sr: int = 24000) -> tuple[float
     return _word_error_rate(_norm_text(target_text), _norm_text(hyp)), hyp
 
 
+@torch.no_grad()
+def compute_wer_batch(gen_audios: list, target_texts: list, src_sr: int = 24000,
+                      batch_samples: int = 1_600_000) -> list[tuple[float, str]]:
+    """Batched compute_wer: lists of (generated audio, target text) → list of (WER, raw hyp), INPUT
+    order. Degenerate clips → (NaN, "") with no forward (drops out of the mean). Valid clips are
+    length-sorted + packed (batch·max_16k_samples ≤ batch_samples); each group runs one padded
+    HuBERT-CTC forward WITH an attention mask, and each sample's logits are sliced to its own CTC
+    length before decode so padded-frame tokens never leak. Matches per-clip compute_wer up to a
+    sub-frame conv-boundary effect at clip ends (trailing silence → CTC blank → no hyp change)."""
+    assert len(gen_audios) == len(target_texts), "audio/text count mismatch"
+    n = len(gen_audios)
+    results: list = [None] * n
+    valid = [i for i in range(n) if not _degenerate(gen_audios[i])]
+    valid_set = set(valid)
+    for i in range(n):
+        if i not in valid_set:
+            results[i] = (float("nan"), "")
+    if not valid:
+        return results
+
+    proc, model, device = _load_asr()
+    wavs = [_prep_16k(gen_audios[i], src_sr) for i in valid]   # 16 kHz float32 numpy, valid-order
+    for group in pack_by_budget([len(w) for w in wavs], batch_samples):
+        enc = proc([wavs[g] for g in group], sampling_rate=_ASR_SR,
+                   return_tensors="pt", padding=True)
+        input_values = enc.input_values.to(device)
+        attention_mask = enc.attention_mask.to(device)
+        logits = model(input_values, attention_mask=attention_mask).logits          # [b, T, V]
+        out_lens = model._get_feat_extract_output_lengths(attention_mask.sum(-1)).tolist()
+        preds = logits.argmax(-1)                                                    # [b, T]
+        for pos, g in enumerate(group):
+            hyp = proc.decode(preds[pos, : int(out_lens[pos])])
+            i = valid[g]
+            results[i] = (_word_error_rate(_norm_text(target_texts[i]), _norm_text(hyp)), hyp)
+    return results
+
+
 # ----------------------------------------------------------------------------
 # SIM-o (speaker similarity) — WavLM-Large-SV via the s3prl recipe
 # ----------------------------------------------------------------------------
@@ -151,14 +190,19 @@ def _load_sv():
 
 
 @torch.no_grad()
-def compute_sim_o(gen_audio, ref_audio, src_sr: int = 24000) -> float:
+def speaker_embedding(audio, src_sr: int = 24000) -> torch.Tensor:
+    """WavLM-Large-SV speaker embedding for one clip → [1, D] on the metric device. FP32, no
+    autocast. Fixed per reference prompt → cache once (build) instead of re-embedding every eval."""
+    model, device = _load_sv()
+    wav = torch.from_numpy(_prep_16k(audio, src_sr)).to(device).unsqueeze(0)       # [1, T]
+    return model(wav)
+
+
+@torch.no_grad()
+def compute_sim_o(gen_audio, ref_embedding: torch.Tensor, src_sr: int = 24000) -> float:
     """SIM-o = cosine of WavLM-Large-SV speaker embeddings, generated vs. reference prompt.
-    NaN on degenerate generated audio (drops out of the mean). ref_audio = the speaker prompt
-    (numpy or torch); both resampled to 16 kHz. FP32, no autocast (faithful comparable numbers).
-    cosine_similarity normalizes internally — no manual L2-norm (matches F5-TTS)."""
+    ref_embedding = the prompt's cached speaker_embedding() (fixed per ref). NaN on degenerate
+    generated audio (drops out of the mean). cosine_similarity normalizes internally (matches F5-TTS)."""
     if _degenerate(gen_audio):
         return float("nan")
-    model, device = _load_sv()
-    gen = torch.from_numpy(_prep_16k(gen_audio, src_sr)).to(device).unsqueeze(0)   # [1, T]
-    ref = torch.from_numpy(_prep_16k(ref_audio, src_sr)).to(device).unsqueeze(0)   # [1, T]
-    return torch.cosine_similarity(model(gen), model(ref)).item()
+    return torch.cosine_similarity(speaker_embedding(gen_audio, src_sr), ref_embedding).item()
