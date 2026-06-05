@@ -30,7 +30,7 @@ from naturalspeech2.config.schema import model_cfg_from_omegaconf
 from naturalspeech2.data.loaders import create_dataloader
 from naturalspeech2.inference import compute_inference_data_loss, generate_audio
 from naturalspeech2.eval import resolve_metric_device, set_metric_device, ipc
-from naturalspeech2.eval.metrics import compute_sim_o, compute_wer
+from naturalspeech2.eval.metrics import compute_sim_o, compute_wer_batch
 from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 from naturalspeech2.eval.runner import (
     estimate_loss,
@@ -185,10 +185,12 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
     proxies = [len(refs[i]["original_np"]) // ENCODER_HOP_LENGTH for i in range(k)]
     gens = batch_generate(deps.unoptimized_model, [refs[i]["prompt_tensor"] for i in range(k)],
                           [refs[i]["text"] for i in range(k)], proxies, deps.cfg.setup.gen_frame_budget)
+    wer_list = (compute_wer_batch(gens, [refs[i]["text"] for i in range(k)], src_sr=sr,
+                                  batch_samples=deps.cfg.setup.metric_batch_samples) if do_wer else None)
     for i in range(k):
         ref, gen = refs[i], gens[i]
         if do_wer:
-            synth_wer, hyp = compute_wer(gen, ref["text"], src_sr=sr)
+            synth_wer, hyp = wer_list[i]
             synth_wers.append(synth_wer)
             gt_wers.append(ref["gt_wer"])
         if do_sim_o:

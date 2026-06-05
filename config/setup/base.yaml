@@ -33,6 +33,7 @@ num_table_rows: 2               # how many of those refs to RENDER in each wandb
 gen_frame_budget: 40000         # eval-block batched generation: length-sorted refs packed up to batch·max_latent_frames ≤ this. ~ the bsd-halved training batch (≈80k → ≈40k); eager no_grad on the 2nd GPU keeps VRAM well below a training step, so raise if headroom allows. Used by fixed-ref + random_dev gen (in-process + daemon).
 inference_data_loss_sweep: []   # empty by default; overfit_test enables for solver diagnostics
 eval_metrics: ["wer", "sim_o"]  # objective metrics on fixed dev/test refs. WER = HuBERT-CTC (no LM); SIM-o = WavLM-Large-SV speaker cosine (gen vs prompt). On the metric device. Inert for modes with no fixed-ref table.
+metric_batch_samples: 1600000   # batched-WER budget: length-sorted gen clips packed up to batch·max_16kHz_samples ≤ this (≈100 s audio/forward). Conservative for the 2nd GPU under no_grad FP32 — raise given headroom. Per-sample logits sliced to CTC length → ~ per-clip WER. (SIM-o stays per-clip: ECAPA pooling is unmasked.)
 metric_device: auto             # WER ASR device. auto → cuda:1 if ≥2 GPUs else CPU (never silently steals the training card); override e.g. cuda:0. Daemon forces its own card.
 
 # Decoupled eval daemon — off-loads the eval block to a persistent process on the 2nd GPU so

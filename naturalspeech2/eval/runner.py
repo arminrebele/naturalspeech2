@@ -4,7 +4,7 @@ daemon. Pure compute → plain data; no wandb, no IPC, no process assumptions.
 Contents:
   - estimate_loss: held-out loss over dev/test (+train subset), denominator-normalized.
   - build_fixed_refs_data / FixedRef: deterministic reference clips, GT-floor WER cached once.
-  - batch_generate / _frame_budget_groups: length-sorted, frame-budget-packed batched generation.
+  - batch_generate: length-sorted, frame-budget-packed batched generation (packer: utils.pack_by_budget).
   - run_decoupled_eval: daemon orchestration — both live + EMA losses, EMA audio/WER, best-pick.
   - get_loss_section / _mean_skip_nan / atomic_save_safetensors: shared formatting + IO helpers.
 """
@@ -20,10 +20,10 @@ import torch
 from torch import nn
 from safetensors.torch import save_file
 
-from naturalspeech2.eval.metrics import compute_sim_o, compute_wer
+from naturalspeech2.eval.metrics import compute_sim_o, compute_wer, compute_wer_batch
 from naturalspeech2.inference import generate_audio_batch
 from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
-from naturalspeech2.utils.utils import compute_denominators
+from naturalspeech2.utils.utils import compute_denominators, pack_by_budget
 
 
 # ----------------------------------------------------------------------------
@@ -197,24 +197,6 @@ def build_fixed_refs_data(dataset, n_refs, prompt_samples_len, rng, *, sampling_
     return refs
 
 
-def _frame_budget_groups(proxies, budget):
-    """Greedy length-sorted packing. proxies[i] ~ output latent frames; returns lists of original
-    indices with batch·max_proxy ≤ budget. A lone over-budget item still runs alone."""
-    order = sorted(range(len(proxies)), key=lambda i: proxies[i])
-    groups, cur, cur_max = [], [], 0
-    for i in order:
-        nm = max(cur_max, proxies[i])
-        if cur and (len(cur) + 1) * nm > budget:
-            groups.append(cur)
-            cur, cur_max = [i], proxies[i]
-        else:
-            cur.append(i)
-            cur_max = nm
-    if cur:
-        groups.append(cur)
-    return groups
-
-
 def batch_generate(model, prompts, texts, frame_proxies, frame_budget):
     """Length-sorted, frame-budget-packed batched generation → trimmed gens in INPUT order.
     frame_proxies need only be a consistent relative length estimate (exact F' unknown pre-duration)."""
@@ -222,7 +204,7 @@ def batch_generate(model, prompts, texts, frame_proxies, frame_budget):
     if n == 0:
         return []
     gens = [None] * n
-    for group in _frame_budget_groups(frame_proxies, frame_budget):
+    for group in pack_by_budget(frame_proxies, frame_budget):
         out = generate_audio_batch(model, [prompts[i] for i in group], [texts[i] for i in group])
         for pos, i in enumerate(group):
             gens[i] = out[pos]
@@ -422,11 +404,13 @@ def run_decoupled_eval(
         proxies = [len(refs[i].original_np) // ENCODER_HOP_LENGTH for i in range(k)]
         gens = batch_generate(model, [refs[i].prompt_tensor for i in range(k)],
                               [refs[i].text for i in range(k)], proxies, cfg.setup.gen_frame_budget)
+        wer_list = (compute_wer_batch(gens, [refs[i].text for i in range(k)], src_sr=sampling_rate,
+                                      batch_samples=cfg.setup.metric_batch_samples) if do_wer else None)
         rows, synth_wers, gt_wers, sim_os = [], [], [], []
         for i in range(k):
             ref, gen = refs[i], gens[i]
             if do_wer:
-                synth_wer, hyp = compute_wer(gen, ref.text, src_sr=sampling_rate)
+                synth_wer, hyp = wer_list[i]
                 synth_wers.append(synth_wer)
                 gt_wers.append(ref.gt_wer)
             if do_sim_o:

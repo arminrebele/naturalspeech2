@@ -36,6 +36,25 @@ def create_mask_from_lengths(
     return mask  # [B, T, 1]
 
 
+def pack_by_budget(sizes: list[int], budget: int) -> list[list[int]]:
+    """Greedy length-sorted bin-packing. sizes[i] = a length proxy in any consistent unit (latent
+    frames, audio samples); returns lists of original indices with batch·max_size ≤ budget. Sorting
+    keeps each group's lengths close → minimal padding; a lone over-budget item still runs alone."""
+    order = sorted(range(len(sizes)), key=lambda i: sizes[i])
+    groups, cur, cur_max = [], [], 0
+    for i in order:
+        nm = max(cur_max, sizes[i])
+        if cur and (len(cur) + 1) * nm > budget:
+            groups.append(cur)
+            cur, cur_max = [i], sizes[i]
+        else:
+            cur.append(i)
+            cur_max = nm
+    if cur:
+        groups.append(cur)
+    return groups
+
+
 def compute_denominators(micro_batches: list[dict], cfg: DictConfig) -> dict:
     denominators = {
         "duration_predictor_loss": 0,
