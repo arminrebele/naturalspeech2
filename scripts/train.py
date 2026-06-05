@@ -370,20 +370,15 @@ def compute_suggested_loss_weights(
 
 
 def _should_run_eval(iter_num: int, cfg) -> bool:
-    """Eval-trigger schedule. Normal: every eval_interval. Dropout trials: only the converged
-    tail (from dropout_eval_start_frac onward) at eval_interval — the decision metric needs only
-    the tail, skipping the early run removes most eval overhead."""
-    if iter_num <= 0:
-        return False
-    if cfg.setup.dropout_trial_run and iter_num < int(cfg.setup.dropout_eval_start_frac * cfg.setup.max_iters):
-        return False
-    return iter_num % cfg.setup.eval_interval == 0
+    """Eval trigger: every eval_interval steps (never at step 0)."""
+    return iter_num > 0 and iter_num % cfg.setup.eval_interval == 0
 
 
-def _append_dropout_trial_eval(out_path, step: int, losses: dict) -> None:
-    """Append one eval point as a JSON line for the dropout-trial orchestrator: step +
-    per-term (+total) held-out loss(es). Training on train → dev+test chained as one 'dev'
-    record; only when dev IS the train split do dev and test appear separately."""
+def _append_aligner_trial_eval(out_path, step: int, losses: dict) -> None:
+    """Append one held-out eval point as a JSON line for the aligner Optuna driver: step +
+    per-term (+total) held-out loss(es) (the driver minimizes forward_sum+bin over the tail).
+    Training on train → dev+test chained as one 'dev' record; only when dev IS the train split
+    do dev and test appear separately."""
     record = {"step": step}
     for split in ("dev", "test"):
         if split in losses:
@@ -516,7 +511,7 @@ def run_eval_block(
                     deps.compiled_model, train_loader, dev_loader, test_loader,
                     loss_wrapper, deps.cfg.setup.eval_iters,
                     deps.cfg.setup.gradient_accumulation_steps, deps.device, deps.cfg,
-                    eval_train=not deps.cfg.setup.dropout_trial_run,
+                    eval_train=not deps.cfg.setup.aligner_trial_run,
                 )
                 logged = ", ".join(f"{s}={losses[s]['total_loss']:.4f}"
                                    for s in ('train', 'dev', 'test') if s in losses)
@@ -570,8 +565,8 @@ def run_eval_block(
     finally:
         deps.unoptimized_model.train()
 
-    if deps.cfg.setup.dropout_trial_run and losses is not None:
-        _append_dropout_trial_eval(PROJECT_ROOT / deps.cfg.setup.dropout_trial_out, deps.iter_num, losses)
+    if deps.cfg.setup.aligner_trial_run and losses is not None:
+        _append_aligner_trial_eval(PROJECT_ROOT / deps.cfg.setup.aligner_trial_out, deps.iter_num, losses)
 
     eval_payload.update(deps.metrics_out)
 
@@ -634,11 +629,11 @@ def train(cfg: DictConfig):
     setup_file_logger(logger, log_dir / log_name)
 
     # Decoupled eval daemon vs in-process sync eval. Daemon = standard 2-GPU training run only;
-    # single-GPU AND every diagnostic mode (overfit/loss/grad/dropout) keep in-process eval (they
+    # single-GPU AND every diagnostic mode (overfit/loss/grad/aligner) keep in-process eval (they
     # need trainer-local state and run on one card). Requires EMA (best-selection uses the shadow).
     is_diagnostic_run = (
         cfg.setup.overfit_single_batch or cfg.setup.loss_analysis_run
-        or cfg.setup.gradient_analysis_run or cfg.setup.dropout_trial_run
+        or cfg.setup.gradient_analysis_run or cfg.setup.aligner_trial_run
     )
     use_eval_daemon = (
         cfg.setup.eval_daemon.enabled
@@ -870,11 +865,11 @@ def train(cfg: DictConfig):
         loss_analysis_accumulators = {}
         loss_analysis_steps_counted = 0
 
-    if cfg.setup.dropout_trial_run:
+    if cfg.setup.aligner_trial_run:
         # Truncate any stale dump from a prior run.
-        dropout_trial_out_path = PROJECT_ROOT / cfg.setup.dropout_trial_out
-        dropout_trial_out_path.parent.mkdir(parents=True, exist_ok=True)
-        dropout_trial_out_path.write_text("")
+        aligner_trial_out_path = PROJECT_ROOT / cfg.setup.aligner_trial_out
+        aligner_trial_out_path.parent.mkdir(parents=True, exist_ok=True)
+        aligner_trial_out_path.write_text("")
         
     if cfg.setup.gradient_analysis_run:
         grad_analysis_start_iter = int(cfg.setup.max_iters * 0.8)   # last 20% of steps (stable logged values)

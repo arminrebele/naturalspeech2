@@ -14,11 +14,10 @@ lr_decay_iters: ${setup.max_iters}   # cosine decay horizon — tracks max_iters
 overfit_single_batch: False
 loss_analysis_run: False
 gradient_analysis_run: False
-dropout_trial_run: False
+aligner_trial_run: False
 
-# dropout_trial only (inert otherwise): eval the converged tail; dump per-eval held-out losses for the orchestrator.
-dropout_eval_start_frac: 0.8
-dropout_trial_out: "research/dropout_trial_evals.jsonl"
+# aligner_trial only (inert otherwise): dump per-eval held-out aligner losses (fwd_sum+bin) for the Optuna driver.
+aligner_trial_out: "research/aligner_trial_evals.jsonl"
 
 # Frequencies (orthogonal)
 log_interval: 100

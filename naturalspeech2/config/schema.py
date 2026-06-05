@@ -27,9 +27,9 @@ class PhonemeEncoderConfig:
     attention_heads: int = 8
     conv1d_filter_size: int = 2048
     conv1d_kernel_size: int = 9
-    conv_dropout: float = 0.2
-    attn_weights_dropout: float = 0.2
-    attn_out_dropout: float = 0.2
+    conv_dropout: float = 0.0
+    attn_weights_dropout: float = 0.0
+    attn_out_dropout: float = 0.0
 
 
 @dataclass
@@ -37,7 +37,8 @@ class AlignerConfig:
     attn_channels: int = 80
     temperature: float = 5.0
     prior_w: float = 1.0
-    dropout: float = 0.1
+    blank_logit: float = -1.0
+    dropout: float = 0.0
 
 
 @dataclass
@@ -46,9 +47,9 @@ class SpeechPromptEncoderConfig:
     attention_heads: int = 8
     conv1d_filter_size: int = 2048
     conv1d_kernel_size: int = 9
-    conv_dropout: float = 0.2
-    attn_weights_dropout: float = 0.2
-    attn_out_dropout: float = 0.2
+    conv_dropout: float = 0.0
+    attn_weights_dropout: float = 0.0
+    attn_out_dropout: float = 0.0
 
 
 @dataclass
@@ -57,9 +58,9 @@ class DurationPredictorConfig:
     conv1d_kernel_size: int = 3
     attention_layers: int = 10
     attention_heads: int = 8
-    conv_dropout: float = 0.5
-    attn_weights_dropout: float = 0.5
-    attn_out_dropout: float = 0.5
+    conv_dropout: float = 0.0
+    attn_weights_dropout: float = 0.0
+    attn_out_dropout: float = 0.0
 
 
 @dataclass
@@ -68,9 +69,9 @@ class PitchPredictorConfig:
     conv1d_kernel_size: int = 5
     attention_layers: int = 10
     attention_heads: int = 8
-    conv_dropout: float = 0.5
-    attn_weights_dropout: float = 0.5
-    attn_out_dropout: float = 0.5
+    conv_dropout: float = 0.0
+    attn_weights_dropout: float = 0.0
+    attn_out_dropout: float = 0.0
 
 
 @dataclass
@@ -87,11 +88,11 @@ class DiffusionModelConfig:
     wavenet_filter_size: int = 1024
     attention_heads: int = 8
     query_tokens: int = 32
-    attn_weights_dropout: float = 0.2
-    attn_out_dropout: float = 0.2
-    wavenet_attn_weights_dropout: float = 0.2
-    wavenet_attn_out_dropout: float = 0.2
-    wavenet_gate_dropout: float = 0.2
+    attn_weights_dropout: float = 0.0
+    attn_out_dropout: float = 0.0
+    wavenet_attn_weights_dropout: float = 0.0
+    wavenet_attn_out_dropout: float = 0.0
+    wavenet_gate_dropout: float = 0.0
     time_dim: int = 128
     beta_min: float = 0.1
     beta_max: float = 20.0
