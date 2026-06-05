@@ -36,7 +36,11 @@ from naturalspeech2.eval.runner import (
     _mean_skip_nan,
     build_fixed_refs_data,
     generate_ref_audio,
+    generate_random_dev_clips,
     atomic_save_safetensors,
+    EVAL_TEXT_PROMPTS,
+    RANDOM_DEV_TITLE,
+    RANDOM_DEV_COLUMNS,
 )
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper, GradientAnalyzer
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
@@ -123,39 +127,14 @@ class EvalDeps:
 def render_random_dev_table(deps: EvalDeps) -> tuple[str, list, list]:
     """Pick one random ≥10s dev clip, generate audio at 5s + 10s prompt lengths."""
     sr = deps.sampling_rate
-    ten_seconds_samples = int(10.0 * sr)
-    five_seconds_samples = int(5.0 * sr)
-
-    random_indices = list(range(len(deps.dev_dataset)))
-    random.shuffle(random_indices)
-    test_idx = next(i for i in random_indices if deps.dev_dataset.dataset[i]["audio_length"] >= ten_seconds_samples)
-    sample = deps.dev_dataset[test_idx]
-
-    audio_np = sample["audio"].numpy()
-    max_start = sample["audio_length"] - ten_seconds_samples
-    start_idx = random.randint(0, max_start)
-
-    prompt_5s_np = audio_np[start_idx : start_idx + five_seconds_samples]
-    prompt_10s_np = audio_np[start_idx : start_idx + ten_seconds_samples]
-
-    target_text = deps.custom_prompts[random.randint(0, len(deps.custom_prompts) - 1)]
-
-    rows = []
-    for p_len, p_np in [(5.0, prompt_5s_np), (10.0, prompt_10s_np)]:
-        gen_audio_np, length = generate_audio(deps.unoptimized_model, p_np, target_text=target_text)
-        rows.append([
-            deps.iter_num,
-            p_len,
-            target_text,
-            wandb.Audio(p_np, sample_rate=sr),
-            wandb.Audio(gen_audio_np[:length], sample_rate=sr),
-        ])
-
-    return (
-        "Evaluation: Random Generation Examples",
-        ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt", "Speech-Prompt", "Generated Audio"],
-        rows,
-    )
+    target_text, clips = generate_random_dev_clips(
+        deps.unoptimized_model, deps.dev_dataset, sr, deps.custom_prompts)
+    rows = [
+        [deps.iter_num, p_len, target_text,
+         wandb.Audio(prompt_np, sample_rate=sr), wandb.Audio(gen_np, sample_rate=sr)]
+        for p_len, prompt_np, gen_np in clips
+    ]
+    return RANDOM_DEV_TITLE, RANDOM_DEV_COLUMNS, rows
 
 
 def build_fixed_refs(dataset, n_refs, prompt_samples_len, sampling_rate, rng, do_wer):
@@ -672,23 +651,8 @@ def train(cfg: DictConfig):
     )
     token_vocabulary_size = inference_tokenizer.token_vocabulary_size
 
-    # Eval block's static text prompts. generate_audio re-phonemizes per call
-    # (~50 ms × 4 prompts × eval intervals — negligible).
-    custom_prompts = [
-        "Hello, world! This is a test.", # Short (~3s)
-        "The quick brown fox jumps over the lazy dog, while the sun sets.", # Medium (~6s)
-        ("Natural speech synthesis has come a long way in recent years. "
-         "Today, we can generate highly realistic human voices from just a "
-         "few seconds of reference audio, opening up new possibilities for "
-         "accessibility and content creation."), # Long (~15s)
-        ("In the early days of artificial intelligence, text to speech systems "
-         "sounded incredibly robotic and lacked emotional nuance. Researchers "
-         "spent decades studying human phonetics, prosody, and intonation. "
-         "Now, thanks to advanced deep learning techniques, diffusion models, "
-         "and massive datasets, the boundaries between synthesized and natural "
-         "voices are becoming indistinguishable. This marks a paradigm shift "
-         "in how we interact with technology on a daily basis.") # Very long (~30s)
-    ]
+    # Eval block's static text prompts (random_dev table); shared with the daemon via runner.
+    custom_prompts = EVAL_TEXT_PROMPTS
 
     sampling_rate = cfg.dataloader.sampling_rate
     model_cfg_dict = OmegaConf.to_container(cfg.model, resolve=True)

@@ -27,7 +27,7 @@ checkpoint_interval: 5000    # crash-recovery ckpt.pt every 5000 iters
 
 # Eval block contents
 eval_iters: 200
-audio_tables: [fixed_val_refs]  # validation = dev+test combined: one held-out audio table + one combined val-WER
+audio_tables: [fixed_val_refs, random_dev]  # fixed_val_refs: held-out dev+test validation (audio + WER/SIM-o over num_audio_refs); random_dev: 1 random dev clip @ 5s vs 10s prompt + random custom text (generation showcase, 2 rows, no metrics)
 num_audio_refs: 30              # clips per split for held-out refs; fixed_val_refs pools dev+test → 2× (also the WER + SIM-o sample size — more refs = steadier metrics). random_dev + overfit_batch fixed at 2; num_table_rows still caps the rendered wandb rows at 2
 num_table_rows: 2               # how many of those refs to RENDER in each wandb audio table; WER/metrics still use ALL num_audio_refs. Caps table size so it doesn't balloon as num_audio_refs scales (set ≥ num_audio_refs to show all). The dev+test val table interleaves both splits so these rows stay balanced.
 inference_data_loss_sweep: []   # empty by default; overfit_test enables for solver diagnostics

@@ -209,6 +209,56 @@ def generate_ref_audio(model, prompt_tensor, text: str, sampling_rate: int, do_w
 
 
 # ----------------------------------------------------------------------------
+# Random dev-clip showcase (random_dev table) — shared core
+# ----------------------------------------------------------------------------
+
+# Eval-block static text prompts (short → very long, ~3/6/15/30 s) → probe length generalization.
+# generate_audio re-phonemizes per call (~50 ms each — negligible). Shared by both eval paths.
+EVAL_TEXT_PROMPTS = [
+    "Hello, world! This is a test.",
+    "The quick brown fox jumps over the lazy dog, while the sun sets.",
+    ("Natural speech synthesis has come a long way in recent years. "
+     "Today, we can generate highly realistic human voices from just a "
+     "few seconds of reference audio, opening up new possibilities for "
+     "accessibility and content creation."),
+    ("In the early days of artificial intelligence, text to speech systems "
+     "sounded incredibly robotic and lacked emotional nuance. Researchers "
+     "spent decades studying human phonetics, prosody, and intonation. "
+     "Now, thanks to advanced deep learning techniques, diffusion models, "
+     "and massive datasets, the boundaries between synthesized and natural "
+     "voices are becoming indistinguishable. This marks a paradigm shift "
+     "in how we interact with technology on a daily basis."),
+]
+
+RANDOM_DEV_TITLE = "Evaluation: Random Generation Examples"
+RANDOM_DEV_COLUMNS = ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt",
+                      "Speech-Prompt", "Generated Audio"]
+
+
+def generate_random_dev_clips(model, dev_dataset, sampling_rate: int, custom_prompts: list):
+    """One random ≥10 s dev clip + one random custom text → generate at 5 s & 10 s prompt lengths.
+    Returns (target_text, [(prompt_len_s, prompt_np, gen_np), ...]); raw arrays, wandb/AudioClip
+    wrapping at the boundary. Re-picked each eval (advances global RNG) — unlike the fixed refs."""
+    sr = sampling_rate
+    ten, five = int(10.0 * sr), int(5.0 * sr)
+
+    indices = list(range(len(dev_dataset)))
+    random.shuffle(indices)
+    idx = next(i for i in indices if dev_dataset.dataset[i]["audio_length"] >= ten)
+    sample = dev_dataset[idx]
+    audio_np = sample["audio"].numpy()
+    start = random.randint(0, sample["audio_length"] - ten)
+    target_text = custom_prompts[random.randint(0, len(custom_prompts) - 1)]
+
+    clips = []
+    for p_len, n_samples in [(5.0, five), (10.0, ten)]:
+        prompt_np = audio_np[start: start + n_samples]
+        gen_np, length = generate_audio(model, prompt_np, target_text=target_text)
+        clips.append((p_len, prompt_np, gen_np[:length]))
+    return target_text, clips
+
+
+# ----------------------------------------------------------------------------
 # Decoupled-eval orchestration (daemon) → structured report
 # ----------------------------------------------------------------------------
 
@@ -270,6 +320,7 @@ def run_decoupled_eval(
     shadow_trainable: dict,
     dev_refs: list[FixedRef],
     test_refs: list[FixedRef],
+    dev_dataset,
     cfg,
     device: str,
     prompt_seconds: float,
@@ -324,8 +375,18 @@ def run_decoupled_eval(
     val_refs = [r for pair in itertools.zip_longest(dev_refs, test_refs) for r in pair if r is not None]
     refs_by_source = {"dev": dev_refs, "test": test_refs, "val": val_refs}
     for table_name in cfg.setup.audio_tables:
+        if table_name == "random_dev":
+            target_text, clips = generate_random_dev_clips(
+                model, dev_dataset, sampling_rate, EVAL_TEXT_PROMPTS)
+            report.audio_tables[RANDOM_DEV_TITLE] = {
+                "columns": RANDOM_DEV_COLUMNS,
+                "rows": [[snapshot_step, p_len, target_text,
+                          AudioClip(prompt_np, sampling_rate), AudioClip(gen_np, sampling_rate)]
+                         for p_len, prompt_np, gen_np in clips],
+            }
+            continue
         if table_name not in FIXED_REF_TABLES:
-            continue  # random_dev / overfit_batch are in-process-only; skip in the daemon
+            continue  # overfit_batch is in-process-only (needs the cached overfit batch)
         title, split, source = FIXED_REF_TABLES[table_name]
         refs = refs_by_source[source]
         columns = ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt",

@@ -12,8 +12,8 @@
 # Scale: ~70 clips/step ⇒ 100k ≈ 1.4k steps/epoch ⇒ 20k iters ≈ ~14 epochs (NOT <1 epoch — that
 # holds only for the full 10.8M). A rising held-out curve = 100k being memorized → need more data.
 #
-# Deltas vs base only; everything else (eval_iters, checkpoint_interval, audio_tables=[fixed_val_refs],
-# num_audio_refs, eval_metrics=[wer], sweeps, safetensors, drop_last) is inherited.
+# Deltas vs base only; everything else (eval_iters, checkpoint_interval, audio_tables=[fixed_val_refs,
+# random_dev], num_audio_refs, eval_metrics=[wer, sim_o], sweeps, safetensors, drop_last) is inherited.
 
 defaults:
   - override /model: multibatch    # reduced dropout for the data-limited regime (100k « paper's 44k h); matches the dev runs

@@ -98,7 +98,7 @@ def build(run_dir: Path):
         "cfg": cfg, "device": device, "sr": sr,
         "model": model, "loss_model": loss_model, "loss_wrapper": loss_wrapper,
         "train_loader": train_loader, "dev_loader": dev_loader, "test_loader": test_loader,
-        "dev_refs": dev_refs, "test_refs": test_refs,
+        "dev_dataset": dev_dataset, "dev_refs": dev_refs, "test_refs": test_refs,
     }
 
 
@@ -111,7 +111,7 @@ def evaluate_snapshot(ctx: dict, snap: dict, best_dev_loss: float) -> float:
         model=ctx["model"], loss_model=ctx["loss_model"], loss_wrapper=ctx["loss_wrapper"],
         train_loader=ctx["train_loader"], dev_loader=ctx["dev_loader"], test_loader=ctx["test_loader"],
         live_trainable=snap["live"], shadow_trainable=snap["shadow"],
-        dev_refs=ctx["dev_refs"], test_refs=ctx["test_refs"],
+        dev_refs=ctx["dev_refs"], test_refs=ctx["test_refs"], dev_dataset=ctx["dev_dataset"],
         cfg=cfg, device=ctx["device"], prompt_seconds=cfg.model.prompt_seconds,
         sampling_rate=ctx["sr"], snapshot_step=step, prev_best_dev_loss=best_dev_loss,
     )
