@@ -24,7 +24,6 @@ dataset:
 setup:
   max_iters: 20000               # ISR + warmup_ratio (0.11 → 2200) inherited from base — same schedule type as the full run
   log_interval: 25               # finer than base's 100 — watch early generalization
-  eval_interval: 1000            # each eval generates 4 clips (2 dev + 2 test) — keep modest
   audio_tables: [fixed_dev_refs, fixed_test_refs]   # trained-on + held-out, both stable across runs
   inference_data_loss_sweep: []  # overfit-only / teacher-forced; blind to conditioning, unused here
   # num_audio_refs (10) + eval_metrics (["wer"]) inherited from setup/base; WER lands on both dev (trained-on) and held-out test.
