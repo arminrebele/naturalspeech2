@@ -22,7 +22,7 @@ dropout_trial_out: "research/dropout_trial_evals.jsonl"
 
 # Frequencies (orthogonal)
 log_interval: 100
-eval_interval: 1000          # held-out eval (loss + WER + SIM-o + audio) cadence; cheap since eval is decoupled onto GPU1, off the training critical path
+eval_interval: 2000          # held-out eval cadence (decoupled on GPU1, off the training path). 2000 not 1000: a full eval (WER+SIM-o+30 refs) measures ~22.7 min ≈ a 1000-step wall, so 1000 left the daemon no margin (coalescing); 2000 gives ~2x headroom for clean points.
 checkpoint_interval: 5000    # crash-recovery ckpt.pt every 5000 iters
 
 # Eval block contents
