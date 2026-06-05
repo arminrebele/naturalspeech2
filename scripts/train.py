@@ -139,22 +139,23 @@ def render_random_dev_table(deps: EvalDeps) -> tuple[str, list, list]:
     return RANDOM_DEV_TITLE, RANDOM_DEV_COLUMNS, rows
 
 
-def build_fixed_refs(dataset, n_refs, prompt_samples_len, sampling_rate, rng, do_wer):
-    """Trainer-side fixed refs: shared data builder (deterministic selection + GT-floor WER cached
-    once) wrapped with wandb.Audio for the original/prompt clips (reused across evals). Call only
-    when wandb is active."""
+def build_fixed_refs(dataset, n_refs, prompt_samples_len, sampling_rate, rng, do_wer, do_sim_o):
+    """Trainer-side fixed refs: shared data builder (deterministic selection + GT-floor WER and, when
+    SIM-o is on, the prompt speaker embedding cached once) wrapped with wandb.Audio for the
+    original/prompt clips (reused across evals). Call only when wandb is active."""
     return [
         {
             "original_audio": wandb.Audio(r.original_np, sample_rate=sampling_rate),
             "prompt_audio": wandb.Audio(r.prompt_np, sample_rate=sampling_rate),
             "prompt_tensor": r.prompt_tensor,
+            "prompt_embedding": r.prompt_embedding,   # cached WavLM-SV embedding (None if SIM-o off)
             "original_np": r.original_np,
             "text": r.text,
             "gt_wer": r.gt_wer,   # GT-floor WER, computed once at build
         }
         for r in build_fixed_refs_data(
             dataset, n_refs, prompt_samples_len, rng,
-            sampling_rate=sampling_rate, compute_gt_wer=do_wer,
+            sampling_rate=sampling_rate, compute_gt_wer=do_wer, compute_sim_emb=do_sim_o,
         )
     ]
 
@@ -194,7 +195,7 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
             synth_wers.append(synth_wer)
             gt_wers.append(ref["gt_wer"])
         if do_sim_o:
-            sim_os.append(compute_sim_o(gen, ref["prompt_tensor"], src_sr=sr))
+            sim_os.append(compute_sim_o(gen, ref["prompt_embedding"], src_sr=sr))
         if i < num_table_rows:
             row = [
                 deps.iter_num,
@@ -800,8 +801,9 @@ def train(cfg: DictConfig):
             # Dedicated seeded RNGs → eval reference clips identical across runs, decoupled from other
             # global-random usage (cross-run A/B). Training on dev: dev refs = trained-on, test = held-out.
             do_wer = "wer" in cfg.setup.eval_metrics
-            table_2_refs = build_fixed_refs(dev_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed), do_wer)
-            test_refs = build_fixed_refs(test_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed + 1), do_wer)
+            do_sim_o = "sim_o" in cfg.setup.eval_metrics
+            table_2_refs = build_fixed_refs(dev_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed), do_wer, do_sim_o)
+            test_refs = build_fixed_refs(test_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed + 1), do_wer, do_sim_o)
 
     # Spawn the eval daemon (handshake first → daemon reads it at startup). Pinned to GPU1.
     if use_eval_daemon:

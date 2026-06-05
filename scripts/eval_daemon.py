@@ -85,14 +85,15 @@ def build(run_dir: Path):
                     f"(base {base_gas} -> {base_gas * bsd}) -> logical batch + total samples unchanged, "
                     f"~{bsd}x lower forward VRAM.")
 
-    # Fixed refs — same seeds as the trainer → identical clips; GT-floor WER cached once.
+    # Fixed refs — same seeds as the trainer → identical clips; GT-floor WER + prompt SIM-o embedding cached once.
     do_wer = "wer" in cfg.setup.eval_metrics
+    do_sim_o = "sim_o" in cfg.setup.eval_metrics
     n_refs = cfg.setup.num_audio_refs
     prompt_samples_len = int(cfg.model.prompt_seconds * sr)
     dev_refs = build_fixed_refs_data(dev_dataset, n_refs, prompt_samples_len, random.Random(seed),
-                                     sampling_rate=sr, compute_gt_wer=do_wer)
+                                     sampling_rate=sr, compute_gt_wer=do_wer, compute_sim_emb=do_sim_o)
     test_refs = build_fixed_refs_data(test_dataset, n_refs, prompt_samples_len, random.Random(seed + 1),
-                                      sampling_rate=sr, compute_gt_wer=do_wer)
+                                      sampling_rate=sr, compute_gt_wer=do_wer, compute_sim_emb=do_sim_o)
 
     return {
         "cfg": cfg, "device": device, "sr": sr,

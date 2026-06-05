@@ -190,14 +190,19 @@ def _load_sv():
 
 
 @torch.no_grad()
-def compute_sim_o(gen_audio, ref_audio, src_sr: int = 24000) -> float:
+def speaker_embedding(audio, src_sr: int = 24000) -> torch.Tensor:
+    """WavLM-Large-SV speaker embedding for one clip → [1, D] on the metric device. FP32, no
+    autocast. Fixed per reference prompt → cache once (build) instead of re-embedding every eval."""
+    model, device = _load_sv()
+    wav = torch.from_numpy(_prep_16k(audio, src_sr)).to(device).unsqueeze(0)       # [1, T]
+    return model(wav)
+
+
+@torch.no_grad()
+def compute_sim_o(gen_audio, ref_embedding: torch.Tensor, src_sr: int = 24000) -> float:
     """SIM-o = cosine of WavLM-Large-SV speaker embeddings, generated vs. reference prompt.
-    NaN on degenerate generated audio (drops out of the mean). ref_audio = the speaker prompt
-    (numpy or torch); both resampled to 16 kHz. FP32, no autocast (faithful comparable numbers).
-    cosine_similarity normalizes internally — no manual L2-norm (matches F5-TTS)."""
+    ref_embedding = the prompt's cached speaker_embedding() (fixed per ref). NaN on degenerate
+    generated audio (drops out of the mean). cosine_similarity normalizes internally (matches F5-TTS)."""
     if _degenerate(gen_audio):
         return float("nan")
-    model, device = _load_sv()
-    gen = torch.from_numpy(_prep_16k(gen_audio, src_sr)).to(device).unsqueeze(0)   # [1, T]
-    ref = torch.from_numpy(_prep_16k(ref_audio, src_sr)).to(device).unsqueeze(0)   # [1, T]
-    return torch.cosine_similarity(model(gen), model(ref)).item()
+    return torch.cosine_similarity(speaker_embedding(gen_audio, src_sr), ref_embedding).item()

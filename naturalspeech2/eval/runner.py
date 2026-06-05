@@ -20,7 +20,7 @@ import torch
 from torch import nn
 from safetensors.torch import save_file
 
-from naturalspeech2.eval.metrics import compute_sim_o, compute_wer, compute_wer_batch
+from naturalspeech2.eval.metrics import compute_sim_o, compute_wer, compute_wer_batch, speaker_embedding
 from naturalspeech2.inference import generate_audio_batch
 from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 from naturalspeech2.utils.utils import compute_denominators, pack_by_budget
@@ -166,13 +166,14 @@ class FixedRef:
     prompt_tensor: torch.Tensor
     text: str
     gt_wer: Optional[float]  # GT-floor WER (ASR on the real clip), cached once at build; None if WER off
+    prompt_embedding: Optional[torch.Tensor]  # cached WavLM-SV speaker embedding of the prompt; None if SIM-o off
 
 
 def build_fixed_refs_data(dataset, n_refs, prompt_samples_len, rng, *, sampling_rate,
-                          compute_gt_wer: bool) -> list[FixedRef]:
+                          compute_gt_wer: bool, compute_sim_emb: bool) -> list[FixedRef]:
     """Pick a fixed, reproducible set of ≥prompt-length clips. Seeded rng → identical across runs
-    AND across the trainer/daemon processes. GT-floor WER computed ONCE here (was re-run every
-    eval on identical audio).
+    AND across the trainer/daemon processes. Cached ONCE here (was re-run every eval on identical
+    audio): GT-floor WER, and — when SIM-o is on — the prompt's WavLM-SV speaker embedding.
     """
     indices = list(range(len(dataset)))
     rng.shuffle(indices)
@@ -187,12 +188,14 @@ def build_fixed_refs_data(dataset, n_refs, prompt_samples_len, rng, *, sampling_
         start_idx = rng.randint(0, sample["audio_length"] - prompt_samples_len)
         prompt_audio_np = audio_np[start_idx: start_idx + prompt_samples_len]
         gt = compute_wer(audio_np, sample["text"], src_sr=sampling_rate)[0] if compute_gt_wer else None
+        emb = speaker_embedding(prompt_audio_np, src_sr=sampling_rate) if compute_sim_emb else None
         refs.append(FixedRef(
             original_np=audio_np,
             prompt_np=prompt_audio_np,
             prompt_tensor=torch.from_numpy(prompt_audio_np),
             text=sample["text"],
             gt_wer=gt,
+            prompt_embedding=emb,
         ))
     return refs
 
@@ -414,7 +417,7 @@ def run_decoupled_eval(
                 synth_wers.append(synth_wer)
                 gt_wers.append(ref.gt_wer)
             if do_sim_o:
-                sim_os.append(compute_sim_o(gen, ref.prompt_tensor, src_sr=sampling_rate))
+                sim_os.append(compute_sim_o(gen, ref.prompt_embedding, src_sr=sampling_rate))
             if i < num_table_rows:
                 row = [snapshot_step, prompt_seconds, ref.text,
                        AudioClip(ref.original_np, sampling_rate),
