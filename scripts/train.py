@@ -485,6 +485,7 @@ def _drain_and_log(run_dir, incremental_audio_tables, wandb_log):
                     payload[title] = wandb_table
                 payload["eval/snapshot_step"] = rec["step"]
                 wandb.log(payload)
+            logger.info(f"Drained + logged daemon eval for snapshot_step {rec['step']}.")
         except Exception:
             logger.exception(f"Failed to log drained eval (step {rec.get('step')}); skipping.")
         finally:
@@ -926,6 +927,8 @@ def train(cfg: DictConfig):
                 # below. The small clone cost is left in the step-time metric (so it stays visible).
                 live_cpu, shadow_cpu = _clone_trainable_cpu(unoptimized_model, ema)
                 snapshot_writer.submit(iter_num, live_cpu, shadow_cpu)
+                logger.info(f"Submitted eval snapshot (iter {iter_num}) to the GPU1 daemon; "
+                            f"result surfaces at the next log_interval after it finishes.")
             else:
                 eval_deps = EvalDeps(
                     iter_num=iter_num,
