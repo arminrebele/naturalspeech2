@@ -34,19 +34,13 @@ phoneme_encoder:
   attn_weights_dropout: 0.0
   attn_out_dropout: 0.0
 
-# Aligner
-# temperature = cosine-attention scale: features are L2-normalized, so dist ∈ [0,4] and the
-# per-frame softmax logit is 2·temperature·cos → effective cosine scale 2·temperature. At
-# effective ~10 (temp 5) the softmax can't sharpen on multi-speaker data (p=0.5 needs a ~0.5
-# cosine gap vs every competitor) → bin_loss floors near ln2. temp 12 (effective 24) reaches
-# p≈0.9 at a realistic ~0.15–0.25 cosine gap (sharpening regime), below CLIP's learned ~14–20.
-# The old 0.0005 was an NVIDIA constant for un-normalized features; under N(0,0.02) init it
-# collapsed the softmax to ~uniform. See aligner.py AlignerNet.forward.
+# Aligner — raw squared-L2 attention (paper: One-TTS-Alignment / RAD-TTS), no temperature.
+# learned_scores = −‖mel−text‖² on un-normalized features (Glow-TTS Gaussian grounding). Sharpness
+# is set by feature magnitude via the aligner's Xavier init, not a scalar knob. See aligner.py.
 aligner:
-  attn_channels: 80
-  temperature: 12.0
-  prior_w: 1.0
-  blank_logit: -1.0     # ForwardSumLoss pre-softmax blank logit, calibrated vs the learned-score range
+  attn_channels: 80     # distance dim: both encoders project to 80 (mel native; text 512→1024→80)
+  prior_w: 0.05         # Beta-Binomial prior strength ω (paper Eq 12-13; RAD-TTS scaling_factor=0.05)
+  blank_logit: -1.0     # ForwardSumLoss blank, in log_softmax+prior space (metric-scale-invariant)
   dropout: 0.0
 
 # Speech Prompt Encoder — same architecture as the phoneme encoder; dropout 0 (see above).

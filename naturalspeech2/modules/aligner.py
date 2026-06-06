@@ -4,7 +4,6 @@ from einops import rearrange, repeat
 
 from naturalspeech2.modules.layers import Conv1D, RMSNorm
 from naturalspeech2.ops.monotonic_align import maximum_path
-from naturalspeech2.utils.initialization import standard_init
 
 
 
@@ -14,9 +13,8 @@ class Aligner(nn.Module):
         audio_dim: int = 80,
         hidden_dim: int = 512,
         attn_channels: int = 80,
-        temperature: float = 5.0,
-        prior_w: float = 1.0,
-        dropout: float = 0.1,
+        prior_w: float = 0.05,
+        dropout: float = 0.0,
     ):
         super().__init__()
         self.prior_w = prior_w
@@ -25,7 +23,6 @@ class Aligner(nn.Module):
             audio_dim=audio_dim,
             hidden_dim=hidden_dim,
             attn_channels=attn_channels,
-            temperature=temperature,
             dropout=dropout,
         )
 
@@ -65,8 +62,10 @@ class Aligner(nn.Module):
 
         # Per-frame log_softmax of learned scores BEFORE adding the prior. ForwardSumLoss
         # softmaxes over [blank, P labels]; without this, label logits sit at an uncalibrated
-        # scale (feature norm × temperature) → shifts blank-vs-label calibration. Viterbi/bin-loss
-        # unaffected: log_softmax adds a per-frame constant, invariant under the DP.
+        # scale (raw squared-L2 magnitude) → shifts blank-vs-label calibration. This first softmax
+        # is what makes the fixed blank metric-scale-invariant (RAD-TTS pads blank=−1 onto exactly
+        # this log_softmax+prior space). Viterbi/bin-loss unaffected: log_softmax adds a per-frame
+        # constant, invariant under the DP.
         learned_label_logprobs = learned_scores.log_softmax(dim=-1)             # [B, F, P] FP32
         posterior_label_logits = learned_label_logprobs + prior_logprobs        # [B, F, P] FP32
         posterior_label_logprobs = posterior_label_logits.log_softmax(dim=-1)   # [B, F, P] FP32
@@ -100,22 +99,26 @@ class AlignerNet(nn.Module):
         audio_dim: int = 80,
         hidden_dim: int = 512,
         attn_channels: int = 80,
-        temperature: float = 5.0,
-        dropout: float = 0.1,
+        dropout: float = 0.0,
     ):
         super().__init__()
-        self.temperature = temperature
-
         self.audio_norm = RMSNorm(audio_dim)
         self.phoneme_norm = RMSNorm(hidden_dim)
 
-        self.audio_conv1 = Conv1D(audio_dim, audio_dim * 2, kernel_size=3, bias=True)
-        self.audio_conv2 = Conv1D(audio_dim * 2, audio_dim, kernel_size=3, bias=True)
-        self.audio_proj = Conv1D(audio_dim, attn_channels, kernel_size=1, bias=True)
+        # Mel encoder: 3 convs (k3,k1,k1), 80→160→80→80 (RAD-TTS query_proj).
+        self.audio_convs = nn.ModuleList([
+            Conv1D(audio_dim, audio_dim * 2, kernel_size=3, bias=True),   # 80 → 160
+            Conv1D(audio_dim * 2, audio_dim, kernel_size=1, bias=True),   # 160 → 80
+        ])
+        self.audio_proj = Conv1D(audio_dim, attn_channels, kernel_size=1, bias=True)   # 80 → 80
 
-        self.phoneme_conv1 = Conv1D(hidden_dim, hidden_dim * 2, kernel_size=3, bias=True)
-        self.phoneme_conv2 = Conv1D(hidden_dim * 2, hidden_dim, kernel_size=3, bias=True)
-        self.phoneme_proj = Conv1D(hidden_dim, attn_channels, kernel_size=1, bias=True)
+        # Text encoder: 2 convs (k3,k1), 512→1024→80 (RAD-TTS key_proj). Only 2 (vs mel's 3): the
+        # phoneme input is already PhonemeEncoder-encoded (paper: alignment consumes encoded text Φ)
+        # → this branch is a projection head, not a feature extractor.
+        self.phoneme_convs = nn.ModuleList([
+            Conv1D(hidden_dim, hidden_dim * 2, kernel_size=3, bias=True),     # 512 → 1024
+        ])
+        self.phoneme_proj = Conv1D(hidden_dim * 2, attn_channels, kernel_size=1, bias=True)  # 1024 → 80
 
         self.act = nn.SiLU()
         self.dropout = nn.Dropout(dropout)
@@ -123,28 +126,33 @@ class AlignerNet(nn.Module):
         self._init_weights()
 
     def _init_weights(self) -> None:
-        standard_init(self)
+        # Raw squared-L2 attention needs O(1) feature scale so the per-frame score spread is
+        # non-degenerate (N(0,0.02) → ‖Δfeat‖²≈0 → uniform softmax → all-blank). Xavier-uniform
+        # (cf. RAD-TTS ConvNorm) sets the scale; zero biases; RMSNorm γ=1.
+        for m in self.modules():
+            if isinstance(m, nn.Conv1d):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+            elif isinstance(m, RMSNorm):
+                nn.init.ones_(m.weight)
 
     def _encode(
         self,
         x,            # [B, T, D]
         mask,         # [B, T, 1] bool
         norm,
-        conv1,
-        conv2,
+        convs,        # ModuleList of Conv1D (asymmetric: mel 2, text 1)
         proj,
     ):
         m = mask.to(x.dtype)
         x = norm(x) * m
 
         # Conv1D pre-masks; re-mask after each activation (conv bias produces nonzero at padding).
-        x = conv1(x, mask)
-        x = self.act(x) * m
-        x = self.dropout(x)
-
-        x = conv2(x, mask)
-        x = self.act(x) * m
-        x = self.dropout(x)
+        for conv in convs:
+            x = conv(x, mask)
+            x = self.act(x) * m
+            x = self.dropout(x)
 
         x = proj(x, mask) * m
         return x
@@ -158,31 +166,29 @@ class AlignerNet(nn.Module):
     ):
         audio_features = self._encode(
             audio_encodings, frame_mask,
-            self.audio_norm, self.audio_conv1, self.audio_conv2, self.audio_proj,
+            self.audio_norm, self.audio_convs, self.audio_proj,
         )  # [B, F, attn_channels]
 
         phoneme_features = self._encode(
             phoneme_encodings, phoneme_encodings_mask,
-            self.phoneme_norm, self.phoneme_conv1, self.phoneme_conv2, self.phoneme_proj,
+            self.phoneme_norm, self.phoneme_convs, self.phoneme_proj,
         )  # [B, P, attn_channels]
 
-        # L2-normalize features → cosine-similarity attention: dist_sq = 2·(1−cos) ∈ [0,4],
-        # so learned_scores = −temperature·dist_sq ∈ [−2·temperature, 0] — range INDEPENDENT of
-        # feature magnitude. Without it, softmax sharpness is hostage to feature norm (tiny under
-        # N(0,0.02) init → near-uniform softmax → alignment never sharpens). temperature sets the
-        # cosine scale directly (2·temperature on cos; ~10 here, cf. CLIP's learned ~14) and also
-        # scales the gradient reaching the features.
+        # Raw squared-L2 (paper One-TTS-Alignment / RAD-TTS): score = −‖mel−text‖², no temperature,
+        # no normalization. Glow-TTS grounding: log N(mel; μ=text, σ=1) = −½‖·‖²+c (½ dropped per the
+        # paper's softmax(−D)). Sharpness = feature magnitude (set by Xavier init), not a scalar knob;
+        # the downstream first log_softmax normalizes this scale away (keeps the blank calibrated).
         #
         # FP32 GEMM (autocast disabled): torch.bmm is an autocast op, so .float() alone wouldn't keep
         # the cross-term FP32 in the autocast region — cheap insurance for the log_softmax+prior math.
         with torch.autocast(device_type=audio_features.device.type, enabled=False):
-            a = torch.nn.functional.normalize(audio_features.float(), dim=-1)   # unit ‖·‖ over channels
-            p = torch.nn.functional.normalize(phoneme_features.float(), dim=-1)
-            a_sq = a.square().sum(dim=-1, keepdim=True)                      # [B, F, 1] ≈ 1
-            p_sq = rearrange(p.square().sum(dim=-1), 'b p -> b 1 p')         # [B, 1, P] ≈ 1
-            cross = torch.bmm(a, rearrange(p, 'b p c -> b c p'))             # [B, F, P] = cos sim
-            dist_sq = (a_sq + p_sq - 2.0 * cross).clamp_min(0.0)             # = 2·(1 − cos) ∈ [0, 4]
-            learned_scores = -self.temperature * dist_sq                     # [B, F, P] FP32
+            a = audio_features.float()
+            p = phoneme_features.float()
+            a_sq = a.square().sum(dim=-1, keepdim=True)                      # [B, F, 1] ‖mel‖²
+            p_sq = rearrange(p.square().sum(dim=-1), 'b p -> b 1 p')         # [B, 1, P] ‖text‖²
+            cross = torch.bmm(a, rearrange(p, 'b p c -> b c p'))             # [B, F, P] ⟨mel,text⟩
+            dist_sq = (a_sq + p_sq - 2.0 * cross).clamp_min(0.0)             # ‖mel−text‖² ≥ 0
+            learned_scores = -dist_sq                                        # [B, F, P] FP32
         return learned_scores
 
 

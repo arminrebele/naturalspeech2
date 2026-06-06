@@ -194,6 +194,8 @@ where **Biases** are initialized as **0**.
 
 Per default, we initialize the **scale-parameters** of *RMSNorm-Blocks* as **1**. 
 
+> **Exception — aligner encoders.** The aligner's mel/text conv stacks use **Xavier-uniform** init (not the global $\mathcal{N}(0, 0.02)$). Its attention is raw squared-L2 ($-\lVert \text{mel}-\text{text}\rVert^2$), which needs $O(1)$ feature magnitudes for a non-degenerate per-frame softmax; under $\mathcal{N}(0, 0.02)$ the features collapse to ~0, the distances to ~0, the softmax to ~uniform, and the forward-sum CTC to all-blank. RAD-TTS uses the same Xavier init for these encoders.
+
 Additionally, to safely route gradients through the deep predictor and WaveNet stacks, we strictly apply Fixup/ReZero principles. We initialize the final operation of every *Residual-Branch* (and FiLM projection) to exactly **0**, forcing the entire network into a perfect Identity-Function at step 0.
 
 > **Note:** Because we use SiLU activations, which have a non-zero derivative at $x=0$, zeroing the weights of a 1-layer residual branch does not kill the gradient, allowing the branch to safely "wake up" during training.
@@ -230,13 +232,13 @@ python scripts/train.py +experiment=gradient_analysis
 
 For every hyperparameter the original paper [1] states explicitly, we use the declared value. The rest is set to a sensible default or — where the paper is silent and the choice is sensitive — tuned with **Optuna**.
 
-**Aligner scalars.** The alignment paper [3] leaves three scalars unspecified: `temperature` (cosine-attention scale), `prior_w` (Beta-Binomial prior strength), and `blank_logit` (CTC blank-vs-label calibration). Because alignment gates everything downstream, we search them with Optuna (TPE sampler) to **minimize the held-out aligner loss** (`forward_sum + bin`):
+**Aligner scalars.** Following the reference implementation (RAD-TTS), the alignment distance is **raw squared-L2** (`−‖mel−text‖²`, no temperature — sharpness is set by the aligner's Xavier init, see §5.1). That leaves **two** scalars unspecified: `prior_w` (Beta-Binomial prior strength) and `blank_logit` (CTC blank-vs-label calibration). Because alignment gates everything downstream, we search them with Optuna (TPE sampler) to **minimize the held-out aligner loss** (`forward_sum + bin`):
 
 ```bash
 python scripts/tuning/run_aligner_optuna.py --n-trials 30
 ```
 
-Each trial is a fresh `+experiment=aligner_trial` training job (`--max-iters`, default 5000) that dumps per-eval held-out aligner losses; the trial is scored on the mean over its converged tail. Study state persists to SQLite under `research/aligner_optuna/`, so runs are resumable and inspectable. Tune the search ranges in `SEARCH_SPACE` at the top of [the driver](scripts/tuning/run_aligner_optuna.py), and use `--override <hydra.key=value>` to forward extra Hydra overrides to every trial. The best scalars print at the end → paste into [`config/model/base.yaml`](config/model/base.yaml). To probe one setting by hand: `python scripts/train.py +experiment=aligner_trial model.aligner.temperature=10`. The winner still gets a manual `overfit_test` (monotonic durations, intelligible audio) — the loss objective is necessary, not sufficient.
+Each trial is a fresh `+experiment=aligner_trial` training job (`--max-iters`, default 5000) that dumps per-eval held-out aligner losses; the trial is scored on the mean over its converged tail. Study state persists to SQLite under `research/aligner_optuna/`, so runs are resumable and inspectable. Tune the search ranges in `SEARCH_SPACE` at the top of [the driver](scripts/tuning/run_aligner_optuna.py), and use `--override <hydra.key=value>` to forward extra Hydra overrides to every trial. The best scalars print at the end → paste into [`config/model/base.yaml`](config/model/base.yaml). To probe one setting by hand: `python scripts/train.py +experiment=aligner_trial model.aligner.prior_w=0.1`. The winner still gets a manual `overfit_test` (monotonic durations, intelligible audio) — the loss objective is necessary, not sufficient.
 
 **Dropout.** Zero by default: the paper reports the model still underfitting at 300k steps, so regularization is expected net-negative. We reintroduce it locally only if a run shows overfitting (val/train divergence), most likely in the small duration/pitch predictors.
 

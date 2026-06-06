@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Optuna search over the aligner's unreported scalar hyperparameters.
 
-Tunes {temperature, prior_w, blank_logit} — the few alignment scalars the alignment paper leaves
+Tunes {prior_w, blank_logit} — the few alignment scalars the alignment paper leaves
 unspecified — to MINIMIZE the held-out forward_sum + bin loss. A small continuous space, which is
 what makes Optuna (TPE) the right tool here rather than a grid or the per-site screen.
 
@@ -10,7 +10,7 @@ cache) with the sampled scalars overridden via `model.aligner.*`. The trial dump
 aligner losses to a per-trial JSONL (setup.aligner_trial_out); the objective averages forward_sum+bin
 over the converged tail. Study state persists to SQLite so a run is resumable/inspectable.
 
-Run on the LOCKED aligner architecture (after the attn_channels 80->512 distance-dim change), at the
+Run on the LOCKED aligner architecture (raw squared-L2 metric, attn_channels=80), at the
 zero-dropout default. Alignment quality (monotonic durations, intelligible overfit audio) is a manual
 check on the winning scalars — the scalar objective here is necessary, not sufficient.
 
@@ -28,12 +28,11 @@ import optuna
 REPO = Path(__file__).resolve().parents[2]
 TRAIN = REPO / "scripts" / "train.py"
 
-# Aligner scalar search space (edit ranges here). temperature = cosine-attention scale (effective
-# 2x on cos; base.yaml sits at 12); prior_w = Beta-Binomial prior strength (base 1.0); blank_logit =
-# CTC blank-vs-label calibration in ForwardSumLoss (base -1.0).
+# Aligner scalar search space (edit ranges here). prior_w = Beta-Binomial prior strength ω (base
+# 0.05 = RAD-TTS reference; range brackets it); blank_logit = CTC blank-vs-label calibration in
+# ForwardSumLoss, in log_softmax+prior space (base -1.0).
 SEARCH_SPACE = {
-    "temperature": dict(low=4.0, high=24.0, log=False),
-    "prior_w":     dict(low=0.5, high=4.0,  log=True),
+    "prior_w":     dict(low=0.01, high=1.0, log=True),
     "blank_logit": dict(low=-5.0, high=1.0, log=False),
 }
 

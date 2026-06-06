@@ -4,7 +4,7 @@
 # Launched by the Optuna driver (scripts/tuning/run_aligner_optuna.py — one subprocess per config),
 # or manually:
 #   python scripts/train.py +experiment=aligner_trial \
-#       model.aligner.temperature=10 model.aligner.prior_w=1.5 model.aligner.blank_logit=-2
+#       model.aligner.prior_w=0.1 model.aligner.blank_logit=-2
 #
 # Real train split (like loss_analysis — alignment quality must reflect production data). Per-eval
 # held-out forward_sum+bin losses → setup.aligner_trial_out for the driver to minimize over the
