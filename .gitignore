@@ -25,6 +25,7 @@ scratch/
 # aligner Optuna tuning outputs (study DB + per-trial held-out dumps)
 research/aligner_optuna/
 research/aligner_trial_evals.jsonl
+research/
 # wandb run artifacts at repo root (NOT config/wandb/ which holds tracked configs)
 /wandb/
 
@@ -33,6 +34,7 @@ docs/paper/
 docs/paper-tex/
 
 CLAUDE.md
+CLAUDE.local.md
 .claude/
 .codex/
 .vscode/
