@@ -22,6 +22,9 @@ docker-compose.mergerfs.yml
 outputs/
 multirun/
 scratch/
+# aligner Optuna tuning outputs (study DB + per-trial held-out dumps)
+research/aligner_optuna/
+research/aligner_trial_evals.jsonl
 # wandb run artifacts at repo root (NOT config/wandb/ which holds tracked configs)
 /wandb/
 

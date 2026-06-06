@@ -1,6 +1,0 @@
-defaults:
-  - base
-  - _self_
-
-group: "dropout-trial"
-run_name: "dropout_trial"

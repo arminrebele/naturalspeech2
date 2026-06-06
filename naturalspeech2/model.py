@@ -47,13 +47,16 @@ class NaturalSpeech2Model(nn.Module):
             **asdict(cfg.phoneme_encoder),
         )
 
+        # blank_logit belongs to ForwardSumLoss (sibling), not AlignerNet — route it out of the spread.
+        aligner_kwargs = asdict(cfg.aligner)
+        blank_logit = aligner_kwargs.pop("blank_logit")
         self.aligner = Aligner(
             audio_dim=cfg.mel.n_mels,
             hidden_dim=cfg.hidden_dim,
-            **asdict(cfg.aligner),
+            **aligner_kwargs,
         )
 
-        self.forward_sum_loss = ForwardSumLoss()
+        self.forward_sum_loss = ForwardSumLoss(blank_logit=blank_logit)
         self.bin_loss = BinLoss()
 
         self.speech_prompt_encoder = SpeechPromptEncoder(

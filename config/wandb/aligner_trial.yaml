@@ -1,0 +1,6 @@
+defaults:
+  - base
+  - _self_
+
+group: "aligner-trial"
+run_name: "aligner_trial"

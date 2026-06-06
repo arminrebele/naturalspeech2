@@ -28,7 +28,8 @@ dependencies = [
     "s3prl (>=0.4.18,<0.5.0)",           # SIM-o eval metric (WavLM-Large-SV); load via s3prl.upstream.wavlm.hubconf, NOT s3prl.hub
     "matplotlib (>=3.10.8,<4.0.0)",
     "cython (>=3.0.0,<4.0.0)",
-    "setuptools (>=70.0.0)"
+    "setuptools (>=70.0.0)",
+    "optuna (>=4.0.0,<5.0.0)"            # aligner-scalar hyperparameter search (scripts/tuning/run_aligner_optuna.py)
 ]
 
 [build-system]

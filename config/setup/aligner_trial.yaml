@@ -1,0 +1,26 @@
+defaults:
+  - base
+  - _self_
+
+# Deltas on setup/base.yaml. A single aligner-scalar tuning trial: real train split, ISR inherited
+# (mirrors the main run). Decision metric = per-eval dev+test held-out forward_sum+bin loss, averaged
+# over the converged tail by the Optuna driver; dumped to setup.aligner_trial_out (driver overrides
+# that path + wandb.group/run_name per trial). Alignment converges fast → a short run suffices.
+
+max_iters: 5000                  # warmup_ratio (0.11 → 550) + ISR inherited from base
+lr_decay_iters: ${setup.max_iters}
+
+aligner_trial_run: True
+
+# Held-out eval at a fine cadence → tail = decision signal. eval_iters bounds each held-out pass.
+eval_interval: 250
+eval_iters: 100
+
+audio_tables: []                 # no audio generation during tuning
+eval_metrics: []                 # no WER/SIM-o during tuning (no fixed-ref table anyway)
+checkpoint_interval: 0           # no crash-recovery checkpoints for short trials
+best_safetensors: False
+final_safetensors: False         # tuning trials produce no inference artifact
+
+log_subdir: "research"
+log_name: "aligner_trial"

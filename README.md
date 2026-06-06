@@ -76,7 +76,7 @@ python scripts/train.py training.learning_rate=1e-4 +experiment=overfit_test
 
 Running the [training script](scripts/train.py) will automatically initiate our [Preprocessing-Pipeline](naturalspeech2/data/dataset.py) and prepare the dataset, before the Train-Loop starts. 
 
-**Evaluation (decoupled eval daemon).** Every `setup.eval_interval` steps the model is evaluated — held-out loss over the dev+test pool, audio generation on fixed reference clips, and objective metrics (WER intelligibility, SIM-o speaker similarity). With a **second GPU**, this whole eval block is off-loaded to a persistent subprocess pinned to **GPU 1**: the trainer (GPU 0) only does a fast weight-snapshot copy and keeps stepping, so training **never pauses** for evaluation, generation, or metrics. The subprocess is fully isolated — if it crashes it cannot take down training, and the trainer respawns it. It reports held-out loss on **both the live and the EMA weights** (best-checkpoint selection stays on EMA dev loss) and owns the `ema_best.safetensors` write; results stream back to the trainer and are logged to W&B against a dedicated `eval/snapshot_step` x-axis. On a **single-GPU** host — or with `setup.eval_daemon.enabled=false` — evaluation transparently falls back to the original **in-process** path (runs synchronously on the training card between steps, exactly as before). Diagnostic modes (`overfit_test`, `loss_analysis`, `gradient_analysis`, dropout trials) always evaluate in-process.
+**Evaluation (decoupled eval daemon).** Every `setup.eval_interval` steps the model is evaluated — held-out loss over the dev+test pool, audio generation on fixed reference clips, and objective metrics (WER intelligibility, SIM-o speaker similarity). With a **second GPU**, this whole eval block is off-loaded to a persistent subprocess pinned to **GPU 1**: the trainer (GPU 0) only does a fast weight-snapshot copy and keeps stepping, so training **never pauses** for evaluation, generation, or metrics. The subprocess is fully isolated — if it crashes it cannot take down training, and the trainer respawns it. It reports held-out loss on **both the live and the EMA weights** (best-checkpoint selection stays on EMA dev loss) and owns the `ema_best.safetensors` write; results stream back to the trainer and are logged to W&B against a dedicated `eval/snapshot_step` x-axis. On a **single-GPU** host — or with `setup.eval_daemon.enabled=false` — evaluation transparently falls back to the original **in-process** path (runs synchronously on the training card between steps, exactly as before). Diagnostic modes (`overfit_test`, `loss_analysis`, `gradient_analysis`, aligner trials) always evaluate in-process.
 
 | `config/setup/base.yaml` key | Default | Purpose |
 |---|---|---|
@@ -228,9 +228,17 @@ python scripts/train.py +experiment=gradient_analysis
 
 **5. Hyperparameter-Tuning**
 
-For all Hyperparameters that are explicitly stated in the original paper [1], we use the declared values. The rest is tuned by Optuna, or alternatively set to our best guesses, to perform Hyperparameter-Tuning inside a reasonable time frame. 
+For every hyperparameter the original paper [1] states explicitly, we use the declared value. The rest is set to a sensible default or — where the paper is silent and the choice is sensitive — tuned with **Optuna**.
 
-For a detailed breakdown, see **this table**.
+**Aligner scalars.** The alignment paper [3] leaves three scalars unspecified: `temperature` (cosine-attention scale), `prior_w` (Beta-Binomial prior strength), and `blank_logit` (CTC blank-vs-label calibration). Because alignment gates everything downstream, we search them with Optuna (TPE sampler) to **minimize the held-out aligner loss** (`forward_sum + bin`):
+
+```bash
+python scripts/tuning/run_aligner_optuna.py --n-trials 30
+```
+
+Each trial is a fresh `+experiment=aligner_trial` training job (`--max-iters`, default 5000) that dumps per-eval held-out aligner losses; the trial is scored on the mean over its converged tail. Study state persists to SQLite under `research/aligner_optuna/`, so runs are resumable and inspectable. Tune the search ranges in `SEARCH_SPACE` at the top of [the driver](scripts/tuning/run_aligner_optuna.py), and use `--override <hydra.key=value>` to forward extra Hydra overrides to every trial. The best scalars print at the end → paste into [`config/model/base.yaml`](config/model/base.yaml). To probe one setting by hand: `python scripts/train.py +experiment=aligner_trial model.aligner.temperature=10`. The winner still gets a manual `overfit_test` (monotonic durations, intelligible audio) — the loss objective is necessary, not sufficient.
+
+**Dropout.** Zero by default: the paper reports the model still underfitting at 300k steps, so regularization is expected net-negative. We reintroduce it locally only if a run shows overfitting (dev/train divergence), most likely in the small duration/pitch predictors.
 
 ## Hardware: Reference, Assumptions, and Minimum Baseline
 

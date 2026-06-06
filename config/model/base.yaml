@@ -22,18 +22,17 @@ mel:
   f_min: 0.0
   f_max: null
 
-# Phoneme Encoder
-# Dropout: §4.2 says 0.1 here (Table 11's 0.2 conflicts; 0.1 matches FastSpeech2).
-# attn_weights_dropout is on the softmax map (SDPA dropout_p) — unsourced (Vaswani's 0.1 was
-# on sub-layer outputs, not the map) → 0.0.
+# Dropout default 0 everywhere (underfitting regime → regularization expected net-negative).
+# Reintroduce locally only if a run shows overfitting (dev/train divergence); the small predictors
+# are the likeliest place. Set by intuition + literature, not tuned by a pipeline.
 phoneme_encoder:
   transformer_layers: 6
   attention_heads: 8
   conv1d_filter_size: 2048
   conv1d_kernel_size: 9
-  conv_dropout: 0.1
+  conv_dropout: 0.0
   attn_weights_dropout: 0.0
-  attn_out_dropout: 0.1
+  attn_out_dropout: 0.0
 
 # Aligner
 # temperature = cosine-attention scale: features are L2-normalized, so dist ∈ [0,4] and the
@@ -47,48 +46,45 @@ aligner:
   attn_channels: 80
   temperature: 12.0
   prior_w: 1.0
-  dropout: 0.1
+  blank_logit: -1.0     # ForwardSumLoss pre-softmax blank logit, calibrated vs the learned-score range
+  dropout: 0.0
 
-# Speech Prompt Encoder — same architecture and dropout rationale as the phoneme encoder.
+# Speech Prompt Encoder — same architecture as the phoneme encoder; dropout 0 (see above).
 speech_prompt_encoder:
   transformer_layers: 6
   attention_heads: 8
   conv1d_filter_size: 2048
   conv1d_kernel_size: 9
-  conv_dropout: 0.1
+  conv_dropout: 0.0
   attn_weights_dropout: 0.0
-  attn_out_dropout: 0.1
+  attn_out_dropout: 0.0
 
-# Duration Predictor
-# conv_dropout 0.5 = paper (§4.2 / Table 11), tracing to FastSpeech2's conv-path variance-predictor
-# dropout. The prompt cross-attention is NS2's own, unspecified by the paper: attn_weights_dropout
-# on the softmax map is unsourced → 0.0; attn_out keeps Vaswani's 0.1. Don't "restore" attn dropouts to 0.5.
+# Duration Predictor. Dropout 0 (see PhonemeEncoder). FastSpeech2/NS2 ran 0.5 on the conv path;
+# under the underfitting prior we start at 0 — predictors are the first place to reintroduce if
+# overfitting shows (they can overfit scalar targets while the diffusion model still underfits).
 duration_predictor:
   conv1d_layers: 30
   conv1d_kernel_size: 3
   attention_layers: 10
   attention_heads: 8
-  conv_dropout: 0.5
+  conv_dropout: 0.0
   attn_weights_dropout: 0.0
-  attn_out_dropout: 0.1
+  attn_out_dropout: 0.0
 
-# Pitch Predictor — same dropout rationale as the duration predictor above
-# (conv-path 0.5 paper-faithful; NS2-added cross-attention: softmax-map 0.0, output 0.1).
+# Pitch Predictor — same dropout policy as the duration predictor (0 default; likeliest place to
+# reintroduce if overfitting).
 pitch_predictor:
   conv1d_layers: 30
   conv1d_kernel_size: 5
   attention_layers: 10
   attention_heads: 8
-  conv_dropout: 0.5
+  conv_dropout: 0.0
   attn_weights_dropout: 0.0
-  attn_out_dropout: 0.1
+  attn_out_dropout: 0.0
 
-# Diffusion Model
-# Denoiser dropout → 0.0. Diffusion denoisers run dry: DDPM 0.0 off CIFAR-10, ADM/DiT/LDM default
-# 0.0, DiffWave (our WaveNet analog) none. The paper's single 0.2 (Table 11) fans into 5 sites ×
-# 40 blocks; at 0.2 only 0.8^40 ≈ 1e-4 of a conditioning unit survives → guts the FiLM/attention
-# path. Paper also reports "still underfitting" → minimal reg. Small-data probes add a little back
-# at safe sites only (see config/model/multibatch.yaml).
+# Diffusion Model. Dropout 0 (see PhonemeEncoder) — diffusion denoisers run dry (DDPM/ADM/DiT/LDM
+# default 0; the paper reports still-underfitting). Small-data probes add a little back at safe
+# sites only (see config/model/multibatch.yaml).
 diffusion_model:
   wavenet_layers: 40
   wavenet_kernel_size: 3
