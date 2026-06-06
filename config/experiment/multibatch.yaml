@@ -8,15 +8,12 @@
 # than memorizing — the test the single-batch overfit run couldn't give. Both tables use a
 # dedicated seeded RNG → same clips every run for clean cross-run A/B.
 #
-# Uses model/multibatch (mild dropout for the small-data regime; see that file). grad_accum
-# inherits base (= 1).
+# Runs on base (zero dropout — the underfitting-regime default); grad_accum inherits base (= 1).
+# If the probe shows the model overfitting dev, add dropout deliberately, not as a default here.
 #
 # Tune by watching the held-out audio:
 #   setup.max_iters — train longer if held-out still improving; cut if plateaued / overfitting dev.
 #   train size      — currently all of dev (~3807 clips); a smaller-subset ladder needs a sampler change.
-
-defaults:
-  - override /model: multibatch
 
 dataset:
   train_split: "dev"             # train on dev; test is the held-out eval set

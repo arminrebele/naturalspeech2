@@ -83,8 +83,8 @@ pitch_predictor:
   attn_out_dropout: 0.0
 
 # Diffusion Model. Dropout 0 (see PhonemeEncoder) — diffusion denoisers run dry (DDPM/ADM/DiT/LDM
-# default 0; the paper reports still-underfitting). Small-data probes add a little back at safe
-# sites only (see config/model/multibatch.yaml).
+# default 0; the paper reports still-underfitting). Reintroduce dropout only on an observed
+# overfitting signal (CLI field overrides or a dedicated named model override), not by default.
 diffusion_model:
   wavenet_layers: 40
   wavenet_kernel_size: 3
