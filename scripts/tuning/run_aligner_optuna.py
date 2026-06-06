@@ -42,13 +42,13 @@ TAIL_FRAC = 0.4   # average the held-out metric over the last TAIL_FRAC of a tri
 
 def tail_objective(jsonl_path: Path, tail_frac: float = TAIL_FRAC) -> float:
     """Mean held-out (forward_sum + bin) over the converged tail of a trial's eval dump. Trials run
-    on the real train split → estimate_loss chains dev+test into one 'dev' pool per record."""
+    on the real train split → estimate_loss chains dev+test into one pooled 'val' set per record."""
     records = [json.loads(line) for line in jsonl_path.read_text().splitlines() if line.strip()]
     if not records:
         raise ValueError(f"no eval records in {jsonl_path} — did the trial run + eval?")
     records.sort(key=lambda r: r["step"])
     tail = records[int(len(records) * (1.0 - tail_frac)):] or records[-1:]
-    vals = [r["dev"]["forward_sum_loss"] + r["dev"]["bin_loss"] for r in tail]
+    vals = [r["val"]["forward_sum_loss"] + r["val"]["bin_loss"] for r in tail]
     return sum(vals) / len(vals)
 
 

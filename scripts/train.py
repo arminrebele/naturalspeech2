@@ -6,7 +6,6 @@ import math
 import queue
 import signal
 import ctypes
-import itertools
 import random
 import logging
 import threading
@@ -38,11 +37,11 @@ from naturalspeech2.eval.runner import (
     _mean_skip_nan,
     build_fixed_refs_data,
     batch_generate,
-    generate_random_dev_clips,
+    generate_random_val_clips,
     atomic_save_safetensors,
     EVAL_TEXT_PROMPTS,
-    RANDOM_DEV_TITLE,
-    RANDOM_DEV_COLUMNS,
+    RANDOM_VAL_TITLE,
+    RANDOM_VAL_COLUMNS,
 )
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper, GradientAnalyzer
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
@@ -121,31 +120,32 @@ class EvalDeps:
     sampling_rate: int
     device: str
     cfg: DictConfig
-    dev_dataset: Any                   # DatasetWrapper — typed Any to avoid forward-decl noise
-    table_2_refs: list
-    test_refs: list
+    val_datasets: list                 # [dev_dataset, test_dataset] — pooled source for random_val
+    val_refs: list                     # pooled dev+test held-out refs (fixed_val_refs)
+    train_refs: list                   # trained-on refs from the train subset (fixed_train_refs)
     custom_prompts: list
     overfit_ref_batch: Optional[dict]  # cached at iter 0 when overfit_batch is in audio_tables
     metrics_out: dict = field(default_factory=dict)  # per-eval scalar metrics (WER, …) → merged into eval_payload
 
 
-def render_random_dev_table(deps: EvalDeps) -> tuple[str, list, list]:
-    """Pick one random ≥10s dev clip, generate audio at 5s + 10s prompt lengths."""
+def render_random_val_table(deps: EvalDeps) -> tuple[str, list, list]:
+    """Pick one random ≥10s val (dev+test) clip, generate audio at 5s + 10s prompt lengths."""
     sr = deps.sampling_rate
-    target_text, clips = generate_random_dev_clips(
-        deps.unoptimized_model, deps.dev_dataset, sr, deps.custom_prompts)
+    target_text, clips = generate_random_val_clips(
+        deps.unoptimized_model, deps.val_datasets, sr, deps.custom_prompts)
     rows = [
         [deps.iter_num, p_len, target_text,
          wandb.Audio(prompt_np, sample_rate=sr), wandb.Audio(gen_np, sample_rate=sr)]
         for p_len, prompt_np, gen_np in clips
     ]
-    return RANDOM_DEV_TITLE, RANDOM_DEV_COLUMNS, rows
+    return RANDOM_VAL_TITLE, RANDOM_VAL_COLUMNS, rows
 
 
-def build_fixed_refs(dataset, n_refs, prompt_samples_len, sampling_rate, rng, do_wer, do_sim_o):
-    """Trainer-side fixed refs: shared data builder (deterministic selection + GT-floor WER and, when
-    SIM-o is on, the prompt speaker embedding cached once) wrapped with wandb.Audio for the
-    original/prompt clips (reused across evals). Call only when wandb is active."""
+def build_fixed_refs(datasets, n_refs, prompt_samples_len, sampling_rate, rng, do_wer, do_sim_o):
+    """Trainer-side fixed refs: shared data builder (deterministic selection over the pooled
+    `datasets` + GT-floor WER and, when SIM-o is on, the prompt speaker embedding cached once)
+    wrapped with wandb.Audio for the original/prompt clips (reused across evals). Call only when
+    wandb is active."""
     return [
         {
             "original_audio": wandb.Audio(r.original_np, sample_rate=sampling_rate),
@@ -157,7 +157,7 @@ def build_fixed_refs(dataset, n_refs, prompt_samples_len, sampling_rate, rng, do
             "gt_wer": r.gt_wer,   # GT-floor WER, computed once at build
         }
         for r in build_fixed_refs_data(
-            dataset, n_refs, prompt_samples_len, rng,
+            datasets, n_refs, prompt_samples_len, rng,
             sampling_rate=sampling_rate, compute_gt_wer=do_wer, compute_sim_emb=do_sim_o,
         )
     ]
@@ -223,27 +223,20 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
     return (title, columns, rows)
 
 
-def render_fixed_dev_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
-    """Generate audio on the fixed dev references (trained-on when training on dev)."""
-    return _render_fixed_refs_table(deps, deps.table_2_refs, "Eval Audio: dev (trained-on)", "dev")
-
-
-def render_fixed_test_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
-    """Generate audio on the fixed held-out test references (never trained on)."""
-    return _render_fixed_refs_table(deps, deps.test_refs, "Eval Audio: test (held-out)", "test")
+def render_fixed_train_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
+    """Generate audio on the fixed trained-on references (sampled from the train subset)."""
+    return _render_fixed_refs_table(deps, deps.train_refs, "Eval Audio: train (trained-on)", "train")
 
 
 def render_fixed_val_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
     """Generate audio on the combined dev+test held-out VALIDATION references.
 
     dev+test together = validation set (speaker-disjoint from train and each other; paper reports
-    only on external VCTK / LibriSpeech), so one table + one combined val-WER under 'dev' (matches
-    the chained 'dev' loss in estimate_loss)."""
-    val_refs = [r for pair in itertools.zip_longest(deps.table_2_refs, deps.test_refs)
-                for r in pair if r is not None]
+    only on external VCTK / LibriSpeech), so one pooled table + one combined val-WER under 'val'
+    (matches the chained 'val' loss in estimate_loss). Refs arrive pre-pooled in deps.val_refs."""
     return _render_fixed_refs_table(
-        deps, val_refs,
-        "Eval Audio: dev+test (held-out validation)", "dev",
+        deps, deps.val_refs,
+        "Eval Audio: dev+test (held-out validation)", "val",
     )
 
 
@@ -286,9 +279,8 @@ def render_overfit_batch_table(deps: EvalDeps) -> tuple[str, list, list]:
 
 AUDIO_TABLES = {
     "overfit_batch": render_overfit_batch_table,
-    "random_dev": render_random_dev_table,
-    "fixed_dev_refs": render_fixed_dev_refs_table,
-    "fixed_test_refs": render_fixed_test_refs_table,
+    "random_val": render_random_val_table,
+    "fixed_train_refs": render_fixed_train_refs_table,
     "fixed_val_refs": render_fixed_val_refs_table,
 }
 
@@ -365,14 +357,12 @@ def _should_run_eval(iter_num: int, cfg) -> bool:
 
 def _append_aligner_trial_eval(out_path, step: int, losses: dict) -> None:
     """Append one held-out eval point as a JSON line for the aligner Optuna driver: step +
-    per-term (+total) held-out loss(es) (the driver minimizes forward_sum+bin over the tail).
-    Training on train → dev+test chained as one 'dev' record; only when dev IS the train split
-    do dev and test appear separately."""
+    per-term (+total) held-out loss (the driver minimizes forward_sum+bin over the tail).
+    dev+test are chained into one pooled 'val' record."""
     record = {"step": step}
-    for split in ("dev", "test"):
-        if split in losses:
-            record[f"{split}_total"] = losses[split]["total_loss"]
-            record[split] = losses[split]["logged_losses"]
+    if "val" in losses:
+        record["val_total"] = losses["val"]["total_loss"]
+        record["val"] = losses["val"]["logged_losses"]
     with open(out_path, "a") as f:
         f.write(json.dumps(record) + "\n")
 
@@ -480,10 +470,10 @@ def run_eval_block(
     test_loader,
     loss_wrapper: LossWrapper,
     ema: Optional[EMA],
-    best_dev_loss: float,
+    best_val_loss: float,
     incremental_audio_tables: dict,
 ) -> float:
-    """Single eval pass under EMA-swapped weights → possibly-updated best_dev_loss.
+    """Single eval pass under EMA-swapped weights → possibly-updated best_val_loss.
 
     eval() at entry, train() in a finally on exit. Caller must NOT wrap this in ema.swap_in —
     managed internally (EMA.swap_in is non-reentrant).
@@ -504,9 +494,9 @@ def run_eval_block(
                     eval_train=not deps.cfg.setup.aligner_trial_run,
                 )
                 logged = ", ".join(f"{s}={losses[s]['total_loss']:.4f}"
-                                   for s in ('train', 'dev', 'test') if s in losses)
+                                   for s in ('train', 'val') if s in losses)
                 logger.info(f"Step {deps.iter_num}: eval losses  {logged}")
-                for split_name, section in [('train', 'Train'), ('dev', 'Dev'), ('test', 'Test')]:
+                for split_name, section in [('train', 'Train'), ('val', 'Val')]:
                     if split_name not in losses:
                         continue
                     eval_payload[f"Evaluation: Metrics/{section}-Loss"] = losses[split_name]['total_loss']
@@ -546,10 +536,10 @@ def run_eval_block(
             if (
                 deps.cfg.setup.best_safetensors
                 and losses is not None
-                and 'dev' in losses
-                and losses['dev']['total_loss'] < best_dev_loss
+                and 'val' in losses
+                and losses['val']['total_loss'] < best_val_loss
             ):
-                best_dev_loss = losses['dev']['total_loss']
+                best_val_loss = losses['val']['total_loss']
                 logger.info(f"Saving new best model to {CHECKPOINTS_DIR}")
                 atomic_save_safetensors(deps.unoptimized_model, CHECKPOINTS_DIR / 'ema_best.safetensors')
     finally:
@@ -564,7 +554,7 @@ def run_eval_block(
         wandb.log(eval_payload, step=deps.iter_num)
 
     logger.info(f"Eval block done in {time.perf_counter() - eval_start_time:.1f}s")
-    return best_dev_loss
+    return best_val_loss
 
 
 @hydra.main(version_base=None, config_path="../config", config_name="config")
@@ -656,7 +646,7 @@ def train(cfg: DictConfig):
     )
     token_vocabulary_size = inference_tokenizer.token_vocabulary_size
 
-    # Eval block's static text prompts (random_dev table); shared with the daemon via runner.
+    # Eval block's static text prompts (random_val table); shared with the daemon via runner.
     custom_prompts = EVAL_TEXT_PROMPTS
 
     sampling_rate = cfg.dataloader.sampling_rate
@@ -664,7 +654,7 @@ def train(cfg: DictConfig):
 
     # State initialization variables
     start_iter = 0
-    best_dev_loss = 1e9
+    best_val_loss = 1e9
     start_epoch = 0
     start_batch_idx = 0
     # Persistent INCREMENTAL wandb.Tables (keyed by name) → eval audio accumulates across firings.
@@ -674,7 +664,7 @@ def train(cfg: DictConfig):
     if cfg.setup.init_from == 'scratch':
         logger.info("Initializing a new model from scratch...")
         # Fresh run → drop the daemon's persistent best-tracking from a prior run in this dir, so the
-        # ema_best gate restarts from inf (matches the in-process best_dev_loss=1e9 reset). Stale weight
+        # ema_best gate restarts from inf (matches the in-process best_val_loss=1e9 reset). Stale weight
         # files are left untouched (never read on scratch; overwritten as the run progresses).
         (CHECKPOINTS_DIR / "eval_state.json").unlink(missing_ok=True)
         model_cfg = model_cfg_from_omegaconf(cfg.model)
@@ -699,7 +689,7 @@ def train(cfg: DictConfig):
 
         model.load_state_dict(state_dict)
         start_iter = checkpoint['iter_num'] + 1
-        best_dev_loss = checkpoint['best_dev_loss']
+        best_val_loss = checkpoint.get('best_val_loss', 1e9)
         start_epoch = checkpoint['epoch']
 
         # Save the cfg the model was built with, not the (possibly drifted) Hydra cfg.
@@ -770,11 +760,11 @@ def train(cfg: DictConfig):
     unoptimized_model = model
     model = torch.compile(model)
 
-    # Outside the wandb.log gate so render_fixed_dev_refs_table iterates safely on
-    # wandb.log=False debug runs (empty list → no rows). In daemon mode the daemon builds its own
-    # refs → trainer skips them (avoids loading the WER ASR on the training card).
-    table_2_refs = []
-    test_refs = []
+    # Outside the wandb.log gate so the renderers iterate safely on wandb.log=False debug runs
+    # (empty list → no rows). In daemon mode the daemon builds its own refs → trainer skips them
+    # (avoids loading the WER ASR on the training card). Build only the ref sets audio_tables needs.
+    val_refs = []
+    train_refs = []
     if cfg.wandb.log:
         wandb.init(
             project=cfg.wandb.project,
@@ -796,12 +786,14 @@ def train(cfg: DictConfig):
         if not use_eval_daemon:
             num_static_refs = cfg.setup.num_audio_refs
             prompt_samples_len = int(cfg.model.prompt_seconds * sampling_rate)
-            # Dedicated seeded RNGs → eval reference clips identical across runs, decoupled from other
-            # global-random usage (cross-run A/B). Training on dev: dev refs = trained-on, test = held-out.
+            # One seeded RNG over the pooled dev+test candidates → identical across runs (cross-run
+            # A/B) and matching the daemon's draw. val_refs = held-out; train_refs = trained-on subset.
             do_wer = "wer" in cfg.setup.eval_metrics
             do_sim_o = "sim_o" in cfg.setup.eval_metrics
-            table_2_refs = build_fixed_refs(dev_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed), do_wer, do_sim_o)
-            test_refs = build_fixed_refs(test_dataset, num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed + 1), do_wer, do_sim_o)
+            if "fixed_val_refs" in cfg.setup.audio_tables:
+                val_refs = build_fixed_refs([dev_dataset, test_dataset], num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed), do_wer, do_sim_o)
+            if "fixed_train_refs" in cfg.setup.audio_tables:
+                train_refs = build_fixed_refs([train_dataset], num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed), do_wer, do_sim_o)
 
     # Spawn the eval daemon (handshake first → daemon reads it at startup). Pinned to GPU1.
     if use_eval_daemon:
@@ -903,17 +895,17 @@ def train(cfg: DictConfig):
                     sampling_rate=sampling_rate,
                     device=device,
                     cfg=cfg,
-                    dev_dataset=dev_dataset,
-                    table_2_refs=table_2_refs,
-                    test_refs=test_refs,
+                    val_datasets=[dev_dataset, test_dataset],
+                    val_refs=val_refs,
+                    train_refs=train_refs,
                     custom_prompts=custom_prompts,
                     overfit_ref_batch=overfit_ref_batch,
                 )
                 eval_start_time = time.perf_counter()
-                best_dev_loss = run_eval_block(
+                best_val_loss = run_eval_block(
                     eval_deps,
                     train_loader, dev_loader, test_loader,
-                    loss_wrapper, ema, best_dev_loss,
+                    loss_wrapper, ema, best_val_loss,
                     incremental_audio_tables,
                 )
                 last_log_time += time.perf_counter() - eval_start_time
@@ -1155,7 +1147,7 @@ def train(cfg: DictConfig):
                 'token_vocabulary_size': token_vocabulary_size,
                 'sampling_rate': sampling_rate,
                 'iter_num': iter_num,
-                'best_dev_loss': best_dev_loss,
+                'best_val_loss': best_val_loss,
                 'wandb_id': wandb.run.id if cfg.wandb.log else None,
                 'epoch': current_epoch,
                 'batch_idx': current_batch_idx + 1,   # Index of the upcoming batch
@@ -1245,16 +1237,16 @@ def train(cfg: DictConfig):
             sampling_rate=sampling_rate,
             device=device,
             cfg=cfg,
-            dev_dataset=dev_dataset,
-            table_2_refs=table_2_refs,
-            test_refs=test_refs,
+            val_datasets=[dev_dataset, test_dataset],
+            val_refs=val_refs,
+            train_refs=train_refs,
             custom_prompts=custom_prompts,
             overfit_ref_batch=overfit_ref_batch,
         )
-        best_dev_loss = run_eval_block(
+        best_val_loss = run_eval_block(
             final_eval_deps,
             train_loader, dev_loader, test_loader,
-            loss_wrapper, ema, best_dev_loss,
+            loss_wrapper, ema, best_val_loss,
             incremental_audio_tables,
         )
 

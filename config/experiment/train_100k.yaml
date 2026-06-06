@@ -13,7 +13,7 @@
 # holds only for the full 10.8M). A rising held-out curve = 100k being memorized → need more data.
 #
 # Deltas vs base only; everything else (eval_iters, checkpoint_interval, audio_tables=[fixed_val_refs,
-# random_dev], num_audio_refs, eval_metrics=[wer, sim_o], sweeps, safetensors, drop_last) is inherited.
+# random_val], num_audio_refs, eval_metrics=[wer, sim_o], sweeps, safetensors, drop_last) is inherited.
 
 dataset:
   max_train_clips: 100000          # cap train to 100k BEFORE preprocessing; train_split stays "train" (base default)

@@ -76,7 +76,7 @@ def build(run_dir: Path):
     nw = cfg.setup.eval_daemon.num_workers
     bsd = cfg.setup.eval_daemon.batch_size_divisor
     tok_path = init["token_vocabulary_path"]
-    train_loader, _ = create_dataloader(cfg, cfg.dataset.train_split, tok_path, num_workers=nw, batch_size_divisor=bsd)
+    train_loader, train_dataset = create_dataloader(cfg, cfg.dataset.train_split, tok_path, num_workers=nw, batch_size_divisor=bsd)
     dev_loader, dev_dataset = create_dataloader(cfg, cfg.dataset.dev_split, tok_path, num_workers=nw, batch_size_divisor=bsd)
     test_loader, test_dataset = create_dataloader(cfg, cfg.dataset.test_split, tok_path, num_workers=nw, batch_size_divisor=bsd)
     if bsd > 1:
@@ -85,25 +85,30 @@ def build(run_dir: Path):
                     f"(base {base_gas} -> {base_gas * bsd}) -> logical batch + total samples unchanged, "
                     f"~{bsd}x lower forward VRAM.")
 
-    # Fixed refs — same seeds as the trainer → identical clips; GT-floor WER + prompt SIM-o embedding cached once.
+    # Fixed refs — same single seed + dataset order as the trainer → identical pooled draw; GT-floor
+    # WER + prompt SIM-o embedding cached once. Build only the ref sets the configured audio_tables need
+    # (production has no fixed_train_refs → don't sample/ASR/SIM-o over the train slice for nothing).
     do_wer = "wer" in cfg.setup.eval_metrics
     do_sim_o = "sim_o" in cfg.setup.eval_metrics
     n_refs = cfg.setup.num_audio_refs
     prompt_samples_len = int(cfg.model.prompt_seconds * sr)
-    dev_refs = build_fixed_refs_data(dev_dataset, n_refs, prompt_samples_len, random.Random(seed),
-                                     sampling_rate=sr, compute_gt_wer=do_wer, compute_sim_emb=do_sim_o)
-    test_refs = build_fixed_refs_data(test_dataset, n_refs, prompt_samples_len, random.Random(seed + 1),
-                                      sampling_rate=sr, compute_gt_wer=do_wer, compute_sim_emb=do_sim_o)
+    val_refs, train_refs = [], []
+    if "fixed_val_refs" in cfg.setup.audio_tables:
+        val_refs = build_fixed_refs_data([dev_dataset, test_dataset], n_refs, prompt_samples_len, random.Random(seed),
+                                         sampling_rate=sr, compute_gt_wer=do_wer, compute_sim_emb=do_sim_o)
+    if "fixed_train_refs" in cfg.setup.audio_tables:
+        train_refs = build_fixed_refs_data([train_dataset], n_refs, prompt_samples_len, random.Random(seed),
+                                           sampling_rate=sr, compute_gt_wer=do_wer, compute_sim_emb=do_sim_o)
 
     return {
         "cfg": cfg, "device": device, "sr": sr,
         "model": model, "loss_model": loss_model, "loss_wrapper": loss_wrapper,
         "train_loader": train_loader, "dev_loader": dev_loader, "test_loader": test_loader,
-        "dev_dataset": dev_dataset, "dev_refs": dev_refs, "test_refs": test_refs,
+        "val_datasets": [dev_dataset, test_dataset], "val_refs": val_refs, "train_refs": train_refs,
     }
 
 
-def evaluate_snapshot(ctx: dict, snap: dict, best_dev_loss: float) -> float:
+def evaluate_snapshot(ctx: dict, snap: dict, best_val_loss: float) -> float:
     """Eval one snapshot, write results + (if improved) ema_best. Returns the (possibly new) best."""
     cfg, step = ctx["cfg"], snap["step"]
     logger.info(f"Evaluating snapshot step {step} ...")
@@ -112,20 +117,20 @@ def evaluate_snapshot(ctx: dict, snap: dict, best_dev_loss: float) -> float:
         model=ctx["model"], loss_model=ctx["loss_model"], loss_wrapper=ctx["loss_wrapper"],
         train_loader=ctx["train_loader"], dev_loader=ctx["dev_loader"], test_loader=ctx["test_loader"],
         live_trainable=snap["live"], shadow_trainable=snap["shadow"],
-        dev_refs=ctx["dev_refs"], test_refs=ctx["test_refs"], dev_dataset=ctx["dev_dataset"],
+        val_refs=ctx["val_refs"], train_refs=ctx["train_refs"], val_datasets=ctx["val_datasets"],
         cfg=cfg, device=ctx["device"], prompt_seconds=cfg.model.prompt_seconds,
-        sampling_rate=ctx["sr"], snapshot_step=step, prev_best_dev_loss=best_dev_loss,
+        sampling_rate=ctx["sr"], snapshot_step=step, prev_best_val_loss=best_val_loss,
     )
     if report.new_best:
-        best_dev_loss = report.best_dev_loss
+        best_val_loss = report.best_val_loss
         # model currently holds the EMA shadow (loaded last in run_decoupled_eval) → save as ema_best.
         atomic_save_safetensors(ctx["model"], CHECKPOINTS_DIR / "ema_best.safetensors")
         ipc.save_eval_state(CHECKPOINTS_DIR / "eval_state.json",
-                            {"best_dev_loss": best_dev_loss, "best_step": step})
-        logger.info(f"New best dev loss {best_dev_loss:.4f} at step {step} → wrote ema_best.")
+                            {"best_val_loss": best_val_loss, "best_step": step})
+        logger.info(f"New best val loss {best_val_loss:.4f} at step {step} → wrote ema_best.")
     ipc.write_results(run_dir=ctx["run_dir"], report=report)
     logger.info(f"Snapshot step {step} done in {time.perf_counter() - t0:.1f}s.")
-    return best_dev_loss
+    return best_val_loss
 
 
 def main():
@@ -140,9 +145,9 @@ def main():
 
     ctx = build(run_dir)
     ctx["run_dir"] = run_dir
-    best_dev_loss = ipc.load_eval_state(CHECKPOINTS_DIR / "eval_state.json")["best_dev_loss"]
+    best_val_loss = ipc.load_eval_state(CHECKPOINTS_DIR / "eval_state.json").get("best_val_loss", float("inf"))
     poll = ctx["cfg"].setup.eval_daemon.poll_interval_s
-    logger.info(f"Eval daemon ready (best_dev_loss={best_dev_loss}); watching for snapshots.")
+    logger.info(f"Eval daemon ready (best_val_loss={best_val_loss}); watching for snapshots.")
 
     last_step = -1
     while True:
@@ -152,7 +157,7 @@ def main():
         if marker is not None and marker > last_step:
             snap = ipc.read_snapshot(run_dir)
             if snap is not None and snap["step"] > last_step:
-                best_dev_loss = evaluate_snapshot(ctx, snap, best_dev_loss)
+                best_val_loss = evaluate_snapshot(ctx, snap, best_val_loss)
                 last_step = snap["step"]
                 continue   # immediately check for a newer snapshot (coalesce)
 

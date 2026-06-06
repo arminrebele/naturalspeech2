@@ -4,7 +4,7 @@
 #   python scripts/train.py +experiment=overfit_test
 #
 # Single-batch memorization sanity check. Cosine LR over the short run (ISR's warmup>0
-# assert trips with warmup_iters=0); dev split as data source; dropout/halflife/warmups
+# assert trips with warmup_iters=0); a small `train` slice as data source; dropout/halflife/warmups
 # via model/overfit_test.yaml.
 
 defaults:
@@ -16,4 +16,4 @@ training:
   lr_schedule: "cosine"
 
 dataset:
-  train_split: "dev"
+  max_train_clips: 1000          # small `train` slice (≥1 batch; ~12 full batches) — overfit cycles one batch from it

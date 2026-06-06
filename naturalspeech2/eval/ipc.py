@@ -12,7 +12,7 @@ Channels (under one run dir):
   results/         daemon→trainer, /eval  eval_<step>.json (+ eval_<step>/*.wav) → drained+deleted
   control          trainer→daemon, once   {"shutdown": True, "final_step": N}
 eval_state.json lives in the PERSISTENT checkpoints dir (survives /dev/shm wipe on reboot) and
-is daemon-owned: {best_dev_loss, best_step}.
+is daemon-owned: {best_val_loss, best_step}.
 """
 from __future__ import annotations
 
@@ -146,7 +146,7 @@ def write_results(run_dir: Path, report: EvalReport) -> None:
         "scalars": report.scalars,
         "audio_tables": tables,
         "new_best": report.new_best,
-        "best_dev_loss": report.best_dev_loss,
+        "best_val_loss": report.best_val_loss,
     }
     _atomic_json_dump(payload, results_dir / f"eval_{step}.json")
 
@@ -189,11 +189,11 @@ def cleanup_eval_dir(eval_dir) -> None:
 # ----------------------------------------------------------------------------
 
 def load_eval_state(path: Path) -> dict:
-    """{best_dev_loss, best_step}; defaults when absent. Persistent (checkpoints dir) → survives a
+    """{best_val_loss, best_step}; defaults when absent. Persistent (checkpoints dir) → survives a
     /dev/shm wipe on full-run resume."""
     if Path(path).is_file():
         return json.loads(Path(path).read_text())
-    return {"best_dev_loss": float("inf"), "best_step": -1}
+    return {"best_val_loss": float("inf"), "best_step": -1}
 
 
 def save_eval_state(path: Path, state: dict) -> None:

@@ -2,7 +2,7 @@
 daemon. Pure compute → plain data; no wandb, no IPC, no process assumptions.
 
 Contents:
-  - estimate_loss: held-out loss over dev/test (+train subset), denominator-normalized.
+  - estimate_loss: held-out loss over the pooled val set (dev+test) (+train subset), denominator-normalized.
   - build_fixed_refs_data / FixedRef: deterministic reference clips, GT-floor WER cached once.
   - batch_generate: length-sorted, frame-budget-packed batched generation (packer: utils.pack_by_budget).
   - run_decoupled_eval: daemon orchestration — both live + EMA losses, EMA audio/WER, best-pick.
@@ -73,17 +73,17 @@ def atomic_save_safetensors(model: nn.Module, path, *, tmp_suffix=".tmp", bak_su
 @torch.no_grad()
 def estimate_loss(model, train_loader, dev_loader, test_loader, loss_wrapper, eval_iters,
                   grad_accum_steps, device, cfg, eval_train: bool = True):
-    """Denominator-normalized held-out loss. dev+test chained as one 'dev' pool (separate only
-    when dev IS the train split). train subset (random, eval_iters cap) gated behind eval_train.
-    Returns {split: {total_loss, logged_losses}}. Toggles model.eval()/train() around the pass.
+    """Denominator-normalized held-out loss. dev+test are always chained into one pooled 'val' set
+    (the project's real test set is external — VCTK + LibriSpeech). train subset (random, eval_iters
+    cap) gated behind eval_train. Returns {split: {total_loss, logged_losses}} with
+    split ∈ {'train','val'}. Toggles model.eval()/train() around the pass.
     """
     out = {}
     model.eval()
 
-    if cfg.dataset.train_split != cfg.dataset.dev_split:
-        held_out_splits = [('dev', itertools.chain(dev_loader, test_loader))]
-    else:
-        held_out_splits = [('dev', dev_loader), ('test', test_loader)]
+    # dev+test = one pooled 'val' held-out set. Chaining two loaders == one concat for a
+    # denominator-normalized sum (batch boundaries / per-loader bucketing don't change the number).
+    held_out_splits = [('val', itertools.chain(dev_loader, test_loader))]
 
     if eval_train:
         # Store the (shared) train sampler state; perturb to a random subset from 0; restore after.
@@ -169,21 +169,24 @@ class FixedRef:
     prompt_embedding: Optional[torch.Tensor]  # cached WavLM-SV speaker embedding of the prompt; None if SIM-o off
 
 
-def build_fixed_refs_data(dataset, n_refs, prompt_samples_len, rng, *, sampling_rate,
+def build_fixed_refs_data(datasets, n_refs, prompt_samples_len, rng, *, sampling_rate,
                           compute_gt_wer: bool, compute_sim_emb: bool) -> list[FixedRef]:
-    """Pick a fixed, reproducible set of ≥prompt-length clips. Seeded rng → identical across runs
-    AND across the trainer/daemon processes. Cached ONCE here (was re-run every eval on identical
-    audio): GT-floor WER, and — when SIM-o is on — the prompt's WavLM-SV speaker embedding.
+    """Pick a fixed, reproducible set of ≥prompt-length clips, pooled across `datasets` (a list of
+    DatasetWrapper — e.g. [dev, test] → the held-out 'val' set, or [train_subset] → trained-on).
+    ONE seeded rng over the union of (dataset, idx) candidates → a uniform draw, identical across
+    runs AND across the trainer/daemon processes (same dataset order + seed). Cached ONCE here
+    (was re-run every eval on identical audio): GT-floor WER, and — when SIM-o is on — the prompt's
+    WavLM-SV speaker embedding.
     """
-    indices = list(range(len(dataset)))
-    rng.shuffle(indices)
+    candidates = [(ds, i) for ds in datasets for i in range(len(ds))]
+    rng.shuffle(candidates)
     refs: list[FixedRef] = []
-    for idx in indices:
+    for ds, idx in candidates:
         if len(refs) == n_refs:
             break
-        if dataset.dataset[idx]["audio_length"] < prompt_samples_len:
+        if ds.dataset[idx]["audio_length"] < prompt_samples_len:
             continue
-        sample = dataset[idx]
+        sample = ds[idx]
         audio_np = sample["audio"].numpy()
         start_idx = rng.randint(0, sample["audio_length"] - prompt_samples_len)
         prompt_audio_np = audio_np[start_idx: start_idx + prompt_samples_len]
@@ -215,7 +218,7 @@ def batch_generate(model, prompts, texts, frame_proxies, frame_budget):
 
 
 # ----------------------------------------------------------------------------
-# Random dev-clip showcase (random_dev table) — shared core
+# Random val-clip showcase (random_val table) — shared core
 # ----------------------------------------------------------------------------
 
 # Eval-block static text prompts (short → very long, ~3/6/15/30 s) → probe length generalization.
@@ -236,22 +239,23 @@ EVAL_TEXT_PROMPTS = [
      "in how we interact with technology on a daily basis."),
 ]
 
-RANDOM_DEV_TITLE = "Evaluation: Random Generation Examples"
-RANDOM_DEV_COLUMNS = ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt",
+RANDOM_VAL_TITLE = "Evaluation: Random Generation Examples"
+RANDOM_VAL_COLUMNS = ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt",
                       "Speech-Prompt", "Generated Audio"]
 
 
-def generate_random_dev_clips(model, dev_dataset, sampling_rate: int, custom_prompts: list):
-    """One random ≥10 s dev clip + one random custom text → generate at 5 s & 10 s prompt lengths.
-    Returns (target_text, [(prompt_len_s, prompt_np, gen_np), ...]); raw arrays, wandb/AudioClip
-    wrapping at the boundary. Re-picked each eval (advances global RNG) — unlike the fixed refs."""
+def generate_random_val_clips(model, val_datasets, sampling_rate: int, custom_prompts: list):
+    """One random ≥10 s clip from the pooled val set (dev+test) + one random custom text → generate
+    at 5 s & 10 s prompt lengths. Returns (target_text, [(prompt_len_s, prompt_np, gen_np), ...]);
+    raw arrays, wandb/AudioClip wrapping at the boundary. Re-picked each eval (advances global RNG)
+    — unlike the fixed refs."""
     sr = sampling_rate
     ten, five = int(10.0 * sr), int(5.0 * sr)
 
-    indices = list(range(len(dev_dataset)))
-    random.shuffle(indices)
-    idx = next(i for i in indices if dev_dataset.dataset[i]["audio_length"] >= ten)
-    sample = dev_dataset[idx]
+    candidates = [(ds, i) for ds in val_datasets for i in range(len(ds))]
+    random.shuffle(candidates)
+    ds, idx = next((d, i) for d, i in candidates if d.dataset[i]["audio_length"] >= ten)
+    sample = ds[idx]
     audio_np = sample["audio"].numpy()
     start = random.randint(0, sample["audio_length"] - ten)
     target_text = custom_prompts[random.randint(0, len(custom_prompts) - 1)]
@@ -281,14 +285,13 @@ class EvalReport:
     scalars: dict = field(default_factory=dict)          # final wandb metric name -> float
     audio_tables: dict = field(default_factory=dict)     # table_key -> {"columns": [...], "rows": [[cell|AudioClip,...]]}
     new_best: bool = False
-    best_dev_loss: float = float("inf")
+    best_val_loss: float = float("inf")
 
 
-# table_name -> (wandb title, split label for metric keys, ref source: 'dev' | 'test' | 'val')
+# table_name -> (wandb title, split label for metric keys, ref source: 'train' | 'val')
 FIXED_REF_TABLES = {
-    "fixed_dev_refs":  ("Eval Audio: dev (trained-on)", "dev", "dev"),
-    "fixed_test_refs": ("Eval Audio: test (held-out)", "test", "test"),
-    "fixed_val_refs":  ("Eval Audio: dev+test (held-out validation)", "dev", "val"),
+    "fixed_train_refs": ("Eval Audio: train (trained-on)", "train", "train"),
+    "fixed_val_refs":   ("Eval Audio: dev+test (held-out validation)", "val", "val"),
 }
 
 
@@ -304,7 +307,7 @@ def _load_trainable(model: nn.Module, state: dict) -> None:
 def _record_losses(scalars: dict, losses: dict, suffix: str = "") -> None:
     """Flatten estimate_loss output into wandb-keyed scalars. EMA → suffix='' (primary);
     live → suffix='-live'."""
-    for split_name, section in [('train', 'Train'), ('dev', 'Dev'), ('test', 'Test')]:
+    for split_name, section in [('train', 'Train'), ('val', 'Val')]:
         if split_name not in losses:
             continue
         scalars[f"Evaluation: Metrics/{section}-Loss{suffix}"] = losses[split_name]['total_loss']
@@ -322,25 +325,25 @@ def run_decoupled_eval(
     test_loader,
     live_trainable: dict,
     shadow_trainable: dict,
-    dev_refs: list[FixedRef],
-    test_refs: list[FixedRef],
-    dev_dataset,
+    val_refs: list[FixedRef],
+    train_refs: list[FixedRef],
+    val_datasets: list,
     cfg,
     device: str,
     prompt_seconds: float,
     sampling_rate: int,
     snapshot_step: int,
-    prev_best_dev_loss: float,
+    prev_best_val_loss: float,
 ) -> EvalReport:
     """Daemon eval over one weight snapshot, on a single resident model:
       1. load LIVE trainable → losses ('-live').
       2. load EMA shadow → losses (primary) + audio/WER (shipped model).
-      3. best-ckpt gate on EMA dev loss.
+      3. best-ckpt gate on EMA val loss.
     `model` is the eager handle (clean param names — used for weight-load + audio gen);
     `loss_model` is the handle for estimate_loss (compiled if enabled; shares the same params).
     Returns an EvalReport (scalars + audio rows + best flag) — caller handles IO/wandb.
     """
-    report = EvalReport(snapshot_step=snapshot_step, best_dev_loss=prev_best_dev_loss)
+    report = EvalReport(snapshot_step=snapshot_step, best_val_loss=prev_best_val_loss)
     eval_iters = cfg.setup.eval_iters
     # Daemon eval runs a divisor-shrunk batch (lower VRAM on the 2nd GPU); multiply grad_accum by the
     # same divisor so the logical batch (gas × batch) and total samples (eval_iters × gas × batch) are
@@ -375,15 +378,13 @@ def run_decoupled_eval(
     do_wer = "wer" in cfg.setup.eval_metrics
     do_sim_o = "sim_o" in cfg.setup.eval_metrics
     num_table_rows = cfg.setup.num_table_rows
-    # val = dev+test interleaved → the first num_table_rows stay balanced across both splits.
-    val_refs = [r for pair in itertools.zip_longest(dev_refs, test_refs) for r in pair if r is not None]
-    refs_by_source = {"dev": dev_refs, "test": test_refs, "val": val_refs}
+    refs_by_source = {"train": train_refs, "val": val_refs}
     for table_name in cfg.setup.audio_tables:
-        if table_name == "random_dev":
-            target_text, clips = generate_random_dev_clips(
-                model, dev_dataset, sampling_rate, EVAL_TEXT_PROMPTS)
-            report.audio_tables[RANDOM_DEV_TITLE] = {
-                "columns": RANDOM_DEV_COLUMNS,
+        if table_name == "random_val":
+            target_text, clips = generate_random_val_clips(
+                model, val_datasets, sampling_rate, EVAL_TEXT_PROMPTS)
+            report.audio_tables[RANDOM_VAL_TITLE] = {
+                "columns": RANDOM_VAL_COLUMNS,
                 "rows": [[snapshot_step, p_len, target_text,
                           AudioClip(prompt_np, sampling_rate), AudioClip(gen_np, sampling_rate)]
                          for p_len, prompt_np, gen_np in clips],
@@ -435,10 +436,10 @@ def run_decoupled_eval(
             report.scalars[f"Evaluation: Metrics/{split}-SIM-o"] = _mean_skip_nan(sim_os)
         report.audio_tables[title] = {"columns": columns, "rows": rows}
 
-    # --- 3. best-ckpt decision (EMA dev loss) ---
-    if (cfg.setup.best_safetensors and ema_losses is not None and 'dev' in ema_losses
-            and ema_losses['dev']['total_loss'] < prev_best_dev_loss):
+    # --- 3. best-ckpt decision (EMA val loss) ---
+    if (cfg.setup.best_safetensors and ema_losses is not None and 'val' in ema_losses
+            and ema_losses['val']['total_loss'] < prev_best_val_loss):
         report.new_best = True
-        report.best_dev_loss = ema_losses['dev']['total_loss']
+        report.best_val_loss = ema_losses['val']['total_loss']
 
     return report

@@ -2,31 +2,33 @@
 #
 # Multi-batch generalization probe — python scripts/train.py +experiment=multibatch
 #
-# Trains on the FULL dev split; every eval generates FREE-RUNNING audio on the held-out TEST
-# split (fixed_test_refs, never trained on) beside the trained-on dev clips (fixed_dev_refs).
-# Held-out clips becoming intelligible = the model learns the phoneme/pitch conditioning rather
-# than memorizing — the test the single-batch overfit run couldn't give. Both tables use a
-# dedicated seeded RNG → same clips every run for clean cross-run A/B.
+# Trains on a SMALL slice of the real `train` split (max_train_clips); every eval generates
+# FREE-RUNNING audio on the held-out pooled `val` set (dev+test, fixed_val_refs, never trained on)
+# beside the trained-on `train`-slice clips (fixed_train_refs). Held-out clips becoming intelligible
+# = the model learns the phoneme/pitch conditioning rather than memorizing — the test the
+# single-batch overfit run couldn't give. This is the SAME wiring as the full run (train → val),
+# just smaller, so it's a faithful scaled-down replica. Both tables use a dedicated seeded RNG →
+# same clips every run for clean cross-run A/B.
 #
 # Runs on base (zero dropout — the underfitting-regime default); grad_accum inherits base (= 1).
-# If the probe shows the model overfitting dev, add dropout deliberately, not as a default here.
+# If the probe shows the model overfitting the train slice, add dropout deliberately, not here.
 #
 # Tune by watching the held-out audio:
-#   setup.max_iters — train longer if held-out still improving; cut if plateaued / overfitting dev.
-#   train size      — currently all of dev (~3807 clips); a smaller-subset ladder needs a sampler change.
+#   setup.max_iters         — train longer if held-out still improving; cut if plateaued / overfitting.
+#   dataset.max_train_clips — the train-size ladder (free knob): raise/lower the slice size.
 
 dataset:
-  train_split: "dev"             # train on dev; test is the held-out eval set
+  max_train_clips: 4000          # small `train` slice (~56 full batches); the generalization-probe size knob
 
 setup:
   max_iters: 20000               # ISR + warmup_ratio (0.11 → 2200) inherited from base — same schedule type as the full run
   log_interval: 25               # finer than base's 100 — watch early generalization
-  audio_tables: [fixed_dev_refs, fixed_test_refs]   # trained-on + held-out, both stable across runs
+  audio_tables: [fixed_train_refs, fixed_val_refs]   # trained-on (train slice) + held-out (dev+test pooled), both stable across runs
   inference_data_loss_sweep: []  # overfit-only / teacher-forced; blind to conditioning, unused here
-  # num_audio_refs (10) + eval_metrics (["wer"]) inherited from setup/base; WER lands on both dev (trained-on) and held-out test.
+  # num_audio_refs (60) + eval_metrics (["wer","sim_o"]) inherited from setup/base; WER/SIM-o land on both train (trained-on) and val (held-out).
   log_subdir: "research"
   log_name: "multibatch"
 
 wandb:
   group: "generalization"
-  run_name: "multibatch_dev"
+  run_name: "multibatch_train"
