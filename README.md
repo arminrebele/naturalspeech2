@@ -148,15 +148,17 @@ python scripts/benchmarks/dataloader/find_max_batch_sizes.py
 
 > **Note:** Paste the bucket-boundaries into the respective [config-files](config/dataloader/) again, to override your values from the previous step. These will represent the *(almost)* final bucket-mapping, since it now includes the found maximum batch-size as well.
 
-**3. Stress-Testing Memory Fragmentation**
+**3. Stress-Test + Compile-Mode Selection**
 
-Even though batch sizes might be stable individually, dynamically jumping between different shapes during training could trigger memory fragmentation. This [stress-test](scripts/benchmarks/dataloader/stress_test_fragmentation.py) makes sure the batch sizes don't lead to an OOM deep into training when specific shapes/buckets follow each other.
+This [harness](scripts/benchmarks/dataloader/stress_test_fragmentation.py) cycles every bucket through a real forward+backward step (dummy batches), doing two jobs at once: it (a) **stress-tests the allocator** against back-to-back shape jumps — catching an OOM deep into training that the per-bucket sizing missed — and (b) **A/B-compares `torch.compile` modes** for the training step.
 
 ```bash
 python scripts/benchmarks/dataloader/stress_test_fragmentation.py
 ```
 
-*If it passes, the output will yield a safe bucket mapping configuration that you should paste directly into your Hydra [config](config/dataloader/), in case the setting from the previous step led to an OOM during the stress-test.*
+For each `(dynamic, mode)` it reports steady-state **ms/step**, **peak VRAM**, the **unique-graph count**, warmup wall-time, and a **plateau check** (a full extra bucket pass must add *no* new graphs = no shape leak). Use the table to choose `setup.compile.{dynamic,mode}` (step 5). Env knobs: `COMPILE_SWEEP=auto|fast|all` (default `all`, including both cudagraph autotune modes), `COMPILE_TIMED_ROUNDS`, `COMPILE_MAX_WARMUP_PASSES`.
+
+> **Note:** `dynamic=False` (a static graph per bucket) and `max-autotune` trade a longer one-off warmup for a faster steady-state step — usually worth it over a 400–600k-step run, but **benchmark it**: the win is hardware-dependent (the big channel dims are already static, so only the batch/length dims are at play). The cudagraph modes (`reduce-overhead`, `max-autotune`) reserve a static memory pool per shape → **higher peak VRAM**; if the mode you pick raises peak VRAM, **re-run step 2** — the bucket batch sizes were tuned against the old peak. An OOM here on the default (`auto`) mode means the bucket batch sizes themselves are over budget and need lowering.
 
 **4. Dataloader Optimization**  
 
@@ -172,6 +174,25 @@ python scripts/benchmarks/dataloader/run_benchmark_dataloader.sh
 ```
 
 > **Note:** Technically, resampling always happens during pre-processing, since this is necessary to determine the pitch, but the option to resample on-the-fly discards the resampled audio and therefore saves disk space.
+
+**5. `torch.compile` Configuration and Tracking**
+
+The compile call is configured under `setup.compile` (the defaults reproduce a bare `torch.compile(model)`):
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `compile.enabled` | `true` | Compile the training model. `false` runs eager (debugging). |
+| `compile.dynamic` | `null` | `null` = automatic (one static graph for a bucket's first shape, then one symbolic graph generalizing the rest); `false` = a static graph per bucket (more graphs, no symbolic-shape overhead); `true` = fully symbolic. |
+| `compile.mode` | `default` | `default` / `reduce-overhead` / `max-autotune-no-cudagraphs` / `max-autotune`. The latter two autotune kernels; `reduce-overhead` and both `max-autotune` modes enable CUDA graphs (lower launch overhead, **higher peak VRAM**). |
+
+The daemon's eval forward reuses `compile.{dynamic,mode}` (its on/off is `eval_daemon.compile`), so eval stays consistent with training. Pick the values from the step-3 A/B; changing `mode` to a cudagraph mode can shift peak VRAM (re-run step 2 if so).
+
+**What's tracked at runtime.** Bucketing makes the input shapes airtight, so the compiled graphs should reach a steady state and then stay there. Training logs a per-`log_interval` wandb series — the two signals to watch:
+
+- `Compile/unique_graphs` **must plateau** after warmup. A staircase that keeps climbing at non-eval steps means shapes are *leaking* (recompiling past the *K* buckets); training also prints a `⚠️ LEAKING` warning in that case. (The first in-process eval adds a one-time eval-mode graph family — recognized and logged as benign, not a leak. The 2-GPU daemon evals in a separate process, so it never perturbs the trainer's count.)
+- `Compile/n_break_reasons` **must stay flat** at the two intended `@torch.compiler.disable` sites (`encodec.get_latents`, `aligner.maximum_path_indices`); a new break reason is logged the moment it appears. `Compile/cache_size_limit` is logged as a canary.
+
+The daemon reports the same signals independently under `Evaluation: Compile/*` (and pre-warms all eval graphs at startup so the first snapshot isn't slowed). Absolute counts differ between train (forward+backward) and the daemon (forward-only) — only the *plateau*, never the raw number, is the health signal.
 
 ---
 
