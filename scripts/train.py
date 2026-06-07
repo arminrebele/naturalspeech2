@@ -20,7 +20,6 @@ load_dotenv()
 
 import torch
 import torch.nn as nn
-import torch._dynamo
 import wandb
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -48,13 +47,12 @@ from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.paths import CHECKPOINTS_DIR, PROJECT_ROOT
 from naturalspeech2.utils.ema import EMA
 from naturalspeech2.utils.utils import setup_file_logger, compute_denominators
-from naturalspeech2.utils.compile_tracking import compile_kwargs
+from naturalspeech2.utils.compile_tracking import compile_kwargs, read_compile_stats, format_break_reasons
 
 logger = logging.getLogger(__name__)
 
-# rel-to-start: step 1 = compile-happened sanity; 250 + 2000 = post-warmup leak check
-# (unique_graphs must PLATEAU once all buckets have compiled — see the Dynamo block in the loop).
-COMPILE_MILESTONES = [1, 250, 2000]
+# Compile telemetry: unique_graphs must PLATEAU after warmup (the leak signal). Logged as a
+# per-log_interval wandb series + an eval-aware leak check (see the log block in the loop).
 COMPILE_WARMUP_STEP = 250  # by here all buckets + their dynamic-shape promotions have compiled
 
 def get_lr(it, cfg):
@@ -853,7 +851,9 @@ def train(cfg: DictConfig):
     logger.info("Starting training loop...")
     last_log_time = time.perf_counter()
     last_log_iter = start_iter - 1
-    prev_unique_graphs = None  # post-warmup recompile-leak check across COMPILE_MILESTONES
+    prev_unique_graphs = None           # eval-aware recompile-leak check (None until warmup baseline)
+    prev_break_reasons = set()          # text-log break reasons only when the SET changes
+    eval_ran_since_graph_check = False  # in-process eval compiles eval-mode graphs once → not a leak
 
     # Filled on the first loop iter when overfit_batch table is active. Overfit cycling yields
     # the same 5 objects forever, so caching lookahead_queue[0] once gives a stable ref batch.
@@ -915,6 +915,7 @@ def train(cfg: DictConfig):
                     incremental_audio_tables,
                 )
                 last_log_time += time.perf_counter() - eval_start_time
+                eval_ran_since_graph_check = True  # a unique_graphs bump at the next check is eval-mode, not a leak
 
         # -----------------------------
         # Forward & Backward Pass
@@ -1009,43 +1010,6 @@ def train(cfg: DictConfig):
         cur_kimg += examples_this_step / 1000.0
 
         # -----------------------------
-        # Dynamo Compilation Verdict
-        # -----------------------------
-        if (iter_num - start_iter) in COMPILE_MILESTONES:
-            rel_step = iter_num - start_iter
-            counters = torch._dynamo.utils.counters
-            # unique_graphs increments once per FX graph (re)compiled; guard-passing cache hits do NOT
-            # advance it. THIS is the shape-leak signal — it must plateau once all buckets have compiled.
-            unique_graphs = counters["stats"]["unique_graphs"]
-            frames_compiled = counters["frames"]["total"]
-            # graph breaks are STRUCTURAL: one per @torch.compiler.disable site reached
-            # (encodec.get_latents ×2 + aligner.maximum_path_indices). They saturate on the first trace
-            # and do NOT scale with buckets/recompiles — shown for transparency, NOT a leak signal.
-            graph_breaks = dict(counters.get("graph_break", {}))
-            total_breaks = sum(graph_breaks.values())
-            num_buckets = len(cfg.dataloader.bucket_mapping)
-
-            logger.info(f"\n========== TORCH.COMPILE STATUS (Step {rel_step}) ==========")
-            logger.info(f"Unique compiled graphs: {unique_graphs}  |  frames compiled: {frames_compiled}")
-            logger.info(f"Structural graph breaks (fixed, not a leak signal): {total_breaks}")
-            for reason, n in sorted(graph_breaks.items(), key=lambda kv: -kv[1]):
-                logger.info(f"    {n:>4}× {reason}")
-            # Leak = unique_graphs still growing AFTER warmup (recompiling beyond the K buckets).
-            if rel_step >= COMPILE_WARMUP_STEP:
-                if prev_unique_graphs is None:
-                    logger.info(f"✅ Post-warmup baseline: {unique_graphs} graphs. Leak check fires at the next milestone.")
-                elif unique_graphs > prev_unique_graphs:
-                    logger.warning(
-                        f"⚠️ unique_graphs grew {prev_unique_graphs} → {unique_graphs} after warmup — batch shapes "
-                        f"are LEAKING (recompiling beyond the {num_buckets} buckets). Re-run with "
-                        f"TORCH_LOGS=recompiles to see the guard failure."
-                    )
-                else:
-                    logger.info(f"✅ Stable at {unique_graphs} graphs since the last milestone — bucketing healthy, no shape leaking.")
-                prev_unique_graphs = unique_graphs
-            logger.info("==========================================\n")
-
-        # -----------------------------
         # Timing & Logging
         # -----------------------------
         
@@ -1062,6 +1026,41 @@ def train(cfg: DictConfig):
             last_log_time = current_time
             last_log_iter = iter_num
 
+            # --- torch.compile telemetry (CPU-only counter reads → free; Dynamo maintains them
+            # regardless). unique_graphs must PLATEAU after warmup; a grow at a NON-eval step = shape
+            # leak. The first in-process eval compiles a one-time eval-mode graph family (benign).
+            cstats = None
+            if cfg.setup.compile.enabled:
+                cstats = read_compile_stats()
+                rel_step = iter_num - start_iter
+                # Verbose status: first log (compile-happened) + first post-warmup log (all buckets in).
+                if rel_step <= 1 or (prev_unique_graphs is None and rel_step >= COMPILE_WARMUP_STEP):
+                    logger.info(f"torch.compile: {cstats['unique_graphs']} graphs | {cstats['graph_breaks_total']} "
+                                f"breaks [{format_break_reasons(cstats['break_reasons'])}] | "
+                                f"cache_size_limit={cstats['cache_size_limit']}")
+                # Intended-breaks tripwire: log only when the reason SET changes (no per-step strings).
+                reason_set = set(cstats["break_reasons"])
+                if reason_set != prev_break_reasons:
+                    added = reason_set - prev_break_reasons
+                    if added and prev_break_reasons:
+                        logger.warning(f"⚠️ New torch.compile graph-break reason(s): {sorted(added)} — "
+                                       f"expected only the 2 intended @torch.compiler.disable sites.")
+                    prev_break_reasons = reason_set
+                # Eval-aware leak check: a unique_graphs grow at a non-eval step past warmup = real leak.
+                ug = cstats["unique_graphs"]
+                if rel_step >= COMPILE_WARMUP_STEP:
+                    if prev_unique_graphs is not None and ug > prev_unique_graphs:
+                        if eval_ran_since_graph_check:
+                            logger.info(f"unique_graphs {prev_unique_graphs}→{ug} after an eval — one-time "
+                                        f"eval-mode graph compilation, not a leak.")
+                        else:
+                            logger.warning(f"⚠️ unique_graphs grew {prev_unique_graphs}→{ug} at a non-eval step after "
+                                           f"warmup — batch shapes are LEAKING (recompiling beyond the "
+                                           f"{len(cfg.dataloader.bucket_mapping)} buckets). Re-run with "
+                                           f"TORCH_LOGS=recompiles to see the failing guard.")
+                    prev_unique_graphs = ug
+                eval_ran_since_graph_check = False
+
             if cfg.wandb.log:
                 log_payload = {
                     "Train: Metrics/Loss": lossf,
@@ -1069,6 +1068,11 @@ def train(cfg: DictConfig):
                     "Train: Metrics/Learning Rate": lr,
                     "Train: Metrics/Gradient Norm": grad_norm.item(),
                 }
+                if cstats is not None:
+                    log_payload["Compile/unique_graphs"] = cstats["unique_graphs"]
+                    log_payload["Compile/graph_breaks_total"] = cstats["graph_breaks_total"]
+                    log_payload["Compile/n_break_reasons"] = cstats["n_break_reasons"]
+                    log_payload["Compile/cache_size_limit"] = cstats["cache_size_limit"]
                 # Balanced loss components; .item() inside log_interval → no per-step GPU sync.
                 for k, v in accum_logged_losses.items():
                     log_payload[f"{get_loss_section(k, 'Train')}/{k}"] = v.item()
