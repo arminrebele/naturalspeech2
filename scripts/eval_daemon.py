@@ -20,7 +20,7 @@ from naturalspeech2.config.schema import model_cfg_from_omegaconf
 from naturalspeech2.data.loaders import create_dataloader
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper
-from naturalspeech2.utils.compile_tracking import compile_kwargs
+from naturalspeech2.utils.compile_tracking import compile_kwargs, read_compile_stats, format_break_reasons
 from naturalspeech2.eval import set_metric_device
 from naturalspeech2.eval import ipc
 from naturalspeech2.eval.runner import (
@@ -29,7 +29,7 @@ from naturalspeech2.eval.runner import (
     atomic_save_safetensors,
 )
 from naturalspeech2.paths import CHECKPOINTS_DIR
-from naturalspeech2.utils.utils import setup_file_logger
+from naturalspeech2.utils.utils import setup_file_logger, generate_dummy_batch
 
 logger = logging.getLogger("eval_daemon")
 
@@ -67,6 +67,7 @@ def build(run_dir: Path):
         logger.info(f"Compiling daemon eval model (this takes a minute)... "
                     f"[dynamic={cfg.setup.compile.dynamic}, mode={cfg.setup.compile.mode}]")
         loss_model = torch.compile(model, **compile_kwargs(cfg.setup.compile))
+        _prewarm_eval_compile(loss_model, cfg, init["token_vocabulary_size"], device)
     else:
         loss_model = model
 
@@ -110,6 +111,29 @@ def build(run_dir: Path):
     }
 
 
+def _prewarm_eval_compile(loss_model, cfg, vocab_size, device):
+    """Compile every eval-mode graph up front (one no_grad dummy fwd per bucket, B shrunk by the
+    daemon's batch_size_divisor to match the real eval). torch.compile is lazy → without this the
+    FIRST snapshot pays the ~1-min compile, and since the snapshot writer keeps only the newest step,
+    a slow first eval can make the daemon SKIP the next snapshot(s). Model is already in eval mode (set
+    in build) → this compiles exactly the graphs estimate_loss reuses (later snapshots = cache hits)."""
+    bsd = cfg.setup.eval_daemon.batch_size_divisor
+    t0 = time.perf_counter()
+    lo = 1
+    with torch.no_grad():
+        for b in sorted(cfg.dataloader.bucket_mapping, key=lambda x: x.audio_length):
+            batch = generate_dummy_batch(
+                batch_size=max(1, b.batch_size // bsd), audio_samples=b.audio_length,
+                phoneme_samples=b.phoneme_length, min_audio_samples=lo,
+                vocab_size=vocab_size, device=device)
+            with torch.autocast(device_type=device.split(":")[0], dtype=torch.bfloat16):
+                loss_model(**batch)
+            lo = b.audio_length + 1
+    s = read_compile_stats()
+    logger.info(f"Daemon eval pre-warm: {s['unique_graphs']} graphs, {s['graph_breaks_total']} breaks "
+                f"[{format_break_reasons(s['break_reasons'])}] in {time.perf_counter() - t0:.0f}s.")
+
+
 def evaluate_snapshot(ctx: dict, snap: dict, best_val_loss: float) -> float:
     """Eval one snapshot, write results + (if improved) ema_best. Returns the (possibly new) best."""
     cfg, step = ctx["cfg"], snap["step"]
@@ -123,6 +147,24 @@ def evaluate_snapshot(ctx: dict, snap: dict, best_val_loss: float) -> float:
         cfg=cfg, device=ctx["device"], prompt_seconds=cfg.model.prompt_seconds,
         sampling_rate=ctx["sr"], snapshot_step=step, prev_best_val_loss=best_val_loss,
     )
+    # Independent daemon compile telemetry (separate process → own Dynamo counters). Scalars ride the
+    # existing results→wandb drain (snapshot_step x-axis); reasons + cross-snapshot leak → daemon log.
+    if cfg.setup.eval_daemon.compile:
+        cstats = read_compile_stats()
+        for key in ("unique_graphs", "graph_breaks_total", "n_break_reasons", "cache_size_limit"):
+            report.scalars[f"Evaluation: Compile/{key}"] = cstats[key]
+        reasons = set(cstats["break_reasons"])
+        if reasons != ctx.get("_compile_reasons"):
+            added = reasons - (ctx.get("_compile_reasons") or set())
+            if added and ctx.get("_compile_reasons"):
+                logger.warning(f"⚠️ New daemon graph-break reason(s): {sorted(added)} — "
+                               f"expected only the 2 intended disable sites.")
+            ctx["_compile_reasons"] = reasons
+        prev_ug = ctx.get("_compile_ug")
+        if prev_ug is not None and cstats["unique_graphs"] > prev_ug:
+            logger.warning(f"⚠️ Daemon unique_graphs grew {prev_ug}→{cstats['unique_graphs']} across "
+                           f"snapshots — eval shapes leaking (recompiling beyond the eval buckets).")
+        ctx["_compile_ug"] = cstats["unique_graphs"]
     if report.new_best:
         best_val_loss = report.best_val_loss
         # model currently holds the EMA shadow (loaded last in run_decoupled_eval) → save as ema_best.
