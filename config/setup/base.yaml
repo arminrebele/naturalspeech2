@@ -5,6 +5,18 @@ device: "cuda"
 init_from: "scratch"     # 'scratch' or 'resume'
 gradient_accumulation_steps: 1
 
+# torch.compile — applies to the training model (and, via dynamic/mode, the daemon eval forward).
+# Defaults reproduce a bare torch.compile(model). dynamic: null=auto (one static graph for a bucket's
+# first shape, then one symbolic graph generalizing the rest) / false=static graph per bucket (more
+# graphs, no symbolic-shape overhead) / true=fully symbolic. mode: default | reduce-overhead |
+# max-autotune-no-cudagraphs | max-autotune (the last two autotune kernels; reduce-overhead + both
+# cudagraph modes RAISE peak VRAM → re-run find_max_batch_sizes if adopted). A/B with
+# scripts/benchmarks/dataloader/stress_test_fragmentation.py before flipping a real run.
+compile:
+  enabled: true
+  dynamic: null
+  mode: default
+
 max_iters: 300000
 warmup_ratio: 0.11                   # warmup length as a fraction of max_iters (0.11·300k ≈ 33k; paper: 32k). Canonical knob.
 warmup_iters: null                   # absolute override; null → round(warmup_ratio · max_iters), resolved at train() entry
@@ -40,7 +52,7 @@ metric_device: auto             # WER ASR device. auto → cuda:1 if ≥2 GPUs e
 # all diagnostic modes fall back to today's in-process synchronous eval.
 eval_daemon:
   enabled: true
-  compile: true                 # torch.compile the daemon's eval forward (the in-process eval forward was already compiled); set false to debug the daemon in eager mode
+  compile: true                 # torch.compile the daemon's eval forward (uses setup.compile.{dynamic,mode}); set false to debug the daemon in eager mode
   snapshot_dir: null            # null → /dev/shm/ns2_eval/<wandb-run-or-pid>; RAM-backed weight handoff
   num_workers: 4                # dataloader workers for EACH of the daemon's own dev/test/train loaders (independent of dataloader.num_workers so the main run isn't slowed)
   batch_size_divisor: 2         # daemon eval only: divide each bucket's batch_size by this on the 2nd GPU (lower forward VRAM); grad_accum is multiplied by the same factor so the logical batch + total sample count match the in-process eval. 1 = full batch.

@@ -48,6 +48,7 @@ from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.paths import CHECKPOINTS_DIR, PROJECT_ROOT
 from naturalspeech2.utils.ema import EMA
 from naturalspeech2.utils.utils import setup_file_logger, compute_denominators
+from naturalspeech2.utils.compile_tracking import compile_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -756,9 +757,14 @@ def train(cfg: DictConfig):
             "the shadow will need to re-converge."
         )
 
-    logger.info("Compiling the model... (this takes a minute)")
     unoptimized_model = model
-    model = torch.compile(model)
+    if cfg.setup.compile.enabled:
+        kwargs = compile_kwargs(cfg.setup.compile)
+        logger.info(f"Compiling the model... (this takes a minute) "
+                    f"[dynamic={cfg.setup.compile.dynamic}, mode={cfg.setup.compile.mode}]")
+        model = torch.compile(model, **kwargs)
+    else:
+        logger.info("torch.compile disabled (setup.compile.enabled=false) — running eager.")
 
     # Outside the wandb.log gate so the renderers iterate safely on wandb.log=False debug runs
     # (empty list → no rows). In daemon mode the daemon builds its own refs → trainer skips them

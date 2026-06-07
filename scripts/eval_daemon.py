@@ -20,6 +20,7 @@ from naturalspeech2.config.schema import model_cfg_from_omegaconf
 from naturalspeech2.data.loaders import create_dataloader
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper
+from naturalspeech2.utils.compile_tracking import compile_kwargs
 from naturalspeech2.eval import set_metric_device
 from naturalspeech2.eval import ipc
 from naturalspeech2.eval.runner import (
@@ -63,8 +64,9 @@ def build(run_dir: Path):
     # estimate_loss handle: compiled (faster forwards) or the eager model itself. Weight-load +
     # audio gen always go through the eager `model` (clean param names; compile prefixes them).
     if cfg.setup.eval_daemon.compile:
-        logger.info("Compiling daemon eval model (this takes a minute)...")
-        loss_model = torch.compile(model)
+        logger.info(f"Compiling daemon eval model (this takes a minute)... "
+                    f"[dynamic={cfg.setup.compile.dynamic}, mode={cfg.setup.compile.mode}]")
+        loss_model = torch.compile(model, **compile_kwargs(cfg.setup.compile))
     else:
         loss_model = model
 
