@@ -211,7 +211,9 @@ def batch_generate(model, prompts, texts, frame_proxies, frame_budget):
         return []
     gens = [None] * n
     for group in pack_by_budget(frame_proxies, frame_budget):
-        out = generate_audio_batch(model, [prompts[i] for i in group], [texts[i] for i in group])
+        # on_overflow="warn": an under-trained predictor mustn't OOM-kill a multi-day run → clamp + log.
+        out = generate_audio_batch(model, [prompts[i] for i in group], [texts[i] for i in group],
+                                   on_overflow="warn")
         for pos, i in enumerate(group):
             gens[i] = out[pos]
     return gens
@@ -261,7 +263,7 @@ def generate_random_val_clips(model, val_datasets, sampling_rate: int, custom_pr
     target_text = custom_prompts[random.randint(0, len(custom_prompts) - 1)]
 
     prompts = [audio_np[start: start + n] for n in (five, ten)]
-    gens = generate_audio_batch(model, prompts, [target_text, target_text])
+    gens = generate_audio_batch(model, prompts, [target_text, target_text], on_overflow="warn")
     clips = [(p_len, prompts[j], gens[j]) for j, p_len in enumerate((5.0, 10.0))]
     return target_text, clips
 

@@ -294,7 +294,7 @@ The reference models were trained on the configuration below — but it is our *
 
 ## Inference and Pre-trained Models
 
-> **Note:** This section is a placeholder. Pre-trained weights and generation scripts will be made available upon the completion of the training runs.
+> **Note:** Pre-trained weights are not yet published — the Hugging Face repo id below is a placeholder, filled in once the training runs complete. The generation code and workflow are in place and usable today with your own checkpoints.
 
 ### Inference Architecture
 
@@ -306,7 +306,40 @@ During inference, the model takes a text transcript and a short speech prompt, p
 
 ### Generating Audio
 
-*(Instructions on downloading huggingface weights and running the `model.generate()` function will be added here)*
+Both workflows funnel through `generate_audio()` — the Layer-3 wrapper that phonemizes the text, resamples the reference, validates inputs, and calls `model.generate()`. Pass text and a reference clip; never raw phonemes.
+
+**Local weights** — your own training run, or anyone who followed the recipe. The CLI is the quickest path:
+
+```bash
+python scripts/inference.py \
+    --checkpoint models/checkpoints/ema_best.safetensors \
+    --prompt path/to/reference.wav \
+    --text "Hello world." \
+    --prompt-seconds 10        # optional: slice the reference to a 10 s window
+```
+
+…or call the library directly (e.g. from a notebook):
+
+```python
+import soundfile as sf
+from naturalspeech2.inference import load_inference_model, generate_audio
+from naturalspeech2.modules.encodec import SAMPLING_RATE
+
+model = load_inference_model("models/checkpoints/ema_best.safetensors", device="cuda")
+audio, length = generate_audio(model, "path/to/reference.wav", "Hello world.", prompt_seconds=10)
+sf.write("out.wav", audio[:length], samplerate=SAMPLING_RATE)
+```
+
+**From Hugging Face** — once weights are published, pass a repo id instead of a path; the weights, config, and token vocabulary are downloaded and cached automatically:
+
+```python
+from naturalspeech2.inference import load_inference_model, generate_audio
+
+model = load_inference_model("<org>/<model-repo>", device="cuda")   # downloads on first use
+audio, length = generate_audio(model, "path/to/reference.wav", "Hello world.")
+```
+
+**Reference length & limits.** Training uses 3 s prompts, but longer references at inference (≈5–15 s) tend to improve speaker similarity [1]; `prompt_seconds` keeps a leading window of the chosen length (default: the full clip). Inputs are validated at the boundary — empty text, sub-frame audio, and sequences beyond the model's `rope_max_seq_len` ceiling (≈40 s of reference, or its phoneme equivalent) raise a clear error instead of failing deep in the model. A per-phoneme duration cap (`--max-seconds-per-phoneme`, default 4 s) guards against runaway synthesis from an under-trained or out-of-distribution duration prediction.
 
 ---
 

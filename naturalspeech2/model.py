@@ -1,3 +1,4 @@
+import logging
 from dataclasses import asdict
 
 import torch
@@ -19,6 +20,8 @@ from naturalspeech2.modules.layers import Conv1D
 from naturalspeech2.utils.utils import create_mask_from_lengths
 from naturalspeech2.utils.initialization import standard_init
 
+logger = logging.getLogger(__name__)
+
 
 class NaturalSpeech2Model(nn.Module):
     def __init__(
@@ -31,6 +34,7 @@ class NaturalSpeech2Model(nn.Module):
         super().__init__()
         self.prompt_frames = int(cfg.prompt_seconds * sampling_rate / ENCODER_HOP_LENGTH)
         self.min_target_frames = int(cfg.min_target_seconds * sampling_rate / ENCODER_HOP_LENGTH)
+        self.rope_max_seq_len = cfg.rope_max_seq_len   # phoneme/prompt seq ceiling (RoPE cache) — inference-boundary guard
 
         self.encodec = EncodecWrapper(latent_stats_path=cfg.encodec.latent_stats_path)
 
@@ -367,6 +371,26 @@ class NaturalSpeech2Model(nn.Module):
             return loss_dict, diffusion_inputs
         return loss_dict
 
+    @staticmethod
+    def _cap_durations(durations: torch.Tensor, max_frames_per_phoneme: int | None,
+                       on_overflow: str) -> torch.Tensor:
+        """Bound per-phoneme predicted durations → catches duration-predictor blow-ups (expm1 →
+        runaway frame count → OOM). None = off. Overflow → 'raise' (abort) | 'warn' (clamp + log).
+        Per-phoneme cap means total output is bounded by P·cap (scales with input, no magic number).
+        One CPU sync — fine in generate() (eager, not the compiled forward)."""
+        if max_frames_per_phoneme is None:
+            return durations
+        assert on_overflow in ("raise", "warn"), f"on_overflow must be 'raise'|'warn', got {on_overflow!r}"
+        worst = int(durations.max().item())
+        if worst > max_frames_per_phoneme:
+            msg = (f"Duration predictor emitted {worst} frames for a single phoneme "
+                   f"(cap {max_frames_per_phoneme}) — under-trained predictor or out-of-distribution text.")
+            if on_overflow == "raise":
+                raise RuntimeError(msg + " Aborting generation.")
+            logger.warning(msg + " Clamping to cap and continuing.")
+            durations = durations.clamp(max=max_frames_per_phoneme)
+        return durations
+
     @torch.no_grad()
     def generate(
         self,
@@ -380,6 +404,9 @@ class NaturalSpeech2Model(nn.Module):
 
         durations: torch.Tensor | None = None,   # [B, P] teacher-forced GT durations — skips the duration predictor
         pitch: torch.Tensor | None = None,        # [B, F'] teacher-forced GT pitch in Hz — skips the pitch predictor
+
+        max_frames_per_phoneme: int | None = None,  # cap each predicted duration (frames); None = no cap
+        on_overflow: str = "raise",                 # cap exceeded → "raise" (abort) | "warn" (clamp + log)
     ):
         # Teacher-forcing contract: pitch lives on the duration-set frame grid (F' = Σ durations),
         # so a caller may supply pitch only alongside durations.
@@ -425,6 +452,7 @@ class NaturalSpeech2Model(nn.Module):
             phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').long()
             durations = torch.expm1(predicted_log_durations).round().long().clamp(min=1)
             durations = durations * phoneme_mask_flat                             # [B, P]
+            durations = self._cap_durations(durations, max_frames_per_phoneme, on_overflow)
         else:
             durations = durations.long()
 

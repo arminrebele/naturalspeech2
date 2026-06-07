@@ -255,7 +255,9 @@ def render_overfit_batch_table(deps: EvalDeps) -> tuple[str, list, list]:
         prompt_T = min(prompt_samples, T_i)
         ref_audio_slice = audio_full[i, :prompt_T]
 
-        gen_audio_np, length = generate_audio(deps.unoptimized_model, ref_audio_slice, target_text=batch["text"][i])
+        # on_overflow="warn": training-eval generation must survive an early under-trained predictor.
+        gen_audio_np, length = generate_audio(deps.unoptimized_model, ref_audio_slice,
+                                              target_text=batch["text"][i], on_overflow="warn")
 
         original_np = audio_full[i, :T_i].detach().cpu().to(torch.float32).numpy()
         prompt_np = ref_audio_slice.detach().cpu().to(torch.float32).numpy()
