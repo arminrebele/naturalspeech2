@@ -7,7 +7,7 @@ import torch
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from naturalspeech2.paths import DATA_DIR
+from naturalspeech2.paths import DATA_DIR, PROJECT_ROOT
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.model import LossWrapper
 from naturalspeech2.utils.utils import setup_file_logger, compute_denominators, generate_dummy_batch
@@ -118,8 +118,7 @@ def main(cfg: DictConfig) -> None:
         return
         
     # Setup Orchestrator Logging to File
-    log_file = Path("research/benchmarks/max_batch_sizes.log")
-    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file = PROJECT_ROOT / "logs" / "benchmarks" / "max_batch_sizes.log"
     setup_file_logger(logger, log_file, mode="w", format_str="%(message)s")
         
     vocab_path = cfg.dataset.token_vocabulary_path

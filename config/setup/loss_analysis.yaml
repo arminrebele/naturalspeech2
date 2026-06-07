@@ -6,5 +6,5 @@ max_iters: 30000
 
 loss_analysis_run: True
 
-log_subdir: "research"
+log_subdir: "logs/scratch"
 log_name: "loss_analysis"

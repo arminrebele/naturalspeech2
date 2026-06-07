@@ -63,5 +63,5 @@ best_safetensors: True
 final_safetensors: True
 
 # Log file location (under PROJECT_ROOT)
-log_subdir: "models/checkpoints"
+log_subdir: "logs/main"
 log_name: "main_training"

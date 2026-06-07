@@ -180,11 +180,14 @@ def evaluate_snapshot(ctx: dict, snap: dict, best_val_loss: float) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", required=True, help="RAM-backed IPC dir (from the trainer)")
+    ap.add_argument("--log-dir", required=True, help="run's log dir (scratch vs main) for eval_daemon.log")
     args = ap.parse_args()
     run_dir = Path(args.run_dir)
+    log_dir = Path(args.log_dir)
 
-    CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
-    setup_file_logger(logger, CHECKPOINTS_DIR / "eval_daemon.log")
+    CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)   # eval_state.json (best-tracking) still lives here
+    setup_file_logger(logger, log_dir / "eval_daemon.log", root=True)
+    logging.captureWarnings(True)   # warnings.warn → logging → eval_daemon.log (matches console/wandb)
     logger.info(f"Eval daemon starting; run_dir={run_dir}")
 
     ctx = build(run_dir)

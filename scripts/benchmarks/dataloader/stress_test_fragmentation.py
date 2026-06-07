@@ -27,7 +27,7 @@ import hydra
 from omegaconf import DictConfig, OmegaConf
 import torch._dynamo
 
-from naturalspeech2.paths import DATA_DIR
+from naturalspeech2.paths import DATA_DIR, PROJECT_ROOT
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.model import LossWrapper, NaturalSpeech2Model
 from naturalspeech2.config.schema import model_cfg_from_omegaconf
@@ -170,8 +170,7 @@ def _bench_mode(label, dynamic, mode, cfg, buckets, vocab_size, device) -> dict:
 
 @hydra.main(version_base=None, config_path="../../../config", config_name="config")
 def stress_test(cfg: DictConfig):
-    log_file = Path("research/benchmarks/stress_test_fragmentation.log")
-    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_file = PROJECT_ROOT / "logs" / "benchmarks" / "stress_test_fragmentation.log"
     setup_file_logger(logger, log_file, mode="w", format_str="%(message)s")
 
     if not torch.cuda.is_available():

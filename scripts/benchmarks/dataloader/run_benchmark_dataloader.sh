@@ -15,7 +15,7 @@ while [[ "$#" -gt 0 ]]; do
 done
 
 # Output log file
-LOG_FILE="research/benchmarks/dataloader_benchmark.log"
+LOG_FILE="logs/benchmarks/dataloader_benchmark.log"
 mkdir -p "$(dirname "$LOG_FILE")"
 
 # Benchmark Parameters for Dataset Sizing

@@ -19,5 +19,5 @@ audio_tables: []
 best_safetensors: False
 final_safetensors: False
 
-log_subdir: "research"
+log_subdir: "logs/scratch"
 log_name: "gradient_analysis"

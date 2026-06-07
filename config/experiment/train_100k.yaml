@@ -20,7 +20,7 @@ dataset:
 
 setup:
   max_iters: 20000                 # ISR + warmup_ratio (0.11 → 2200) inherited from base — same schedule type as the full run
-  log_subdir: "research"
+  log_subdir: "logs/scratch"
   log_name: "train_100k"
 
 wandb:

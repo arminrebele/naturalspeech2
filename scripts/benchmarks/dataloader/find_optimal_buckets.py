@@ -6,6 +6,7 @@ import logging
 
 from naturalspeech2.data.dataset import DatasetWrapper
 from naturalspeech2.utils.utils import setup_file_logger
+from naturalspeech2.paths import PROJECT_ROOT
 from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 
 logger = logging.getLogger(__name__)
@@ -67,7 +68,7 @@ def compute_optimal_buckets_dp(lengths: np.ndarray, max_buckets: int):
 @hydra.main(version_base=None, config_path="../../../config", config_name="config")
 def benchmark_buckets(cfg: DictConfig):
     # File logging to save optimal buckets
-    log_file = Path(__file__).parent / "optimal_buckets_output.log"
+    log_file = PROJECT_ROOT / "logs" / "benchmarks" / "optimal_buckets_output.log"
     setup_file_logger(logger, log_file, mode="w", format_str="%(message)s")
 
     logger.info("Initializing Dataset Pipeline (This will prepopulate the cache for training)...")

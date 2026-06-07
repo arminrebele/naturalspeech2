@@ -14,15 +14,52 @@ def setup_file_logger(
     logger: logging.Logger,
     log_file: Union[str, Path],
     mode: str = "a",
-    format_str: str = "%(asctime)s - %(levelname)s - %(message)s"
+    format_str: str = "%(asctime)s - %(levelname)s - %(message)s",
+    root: bool = False,
 ) -> None:
-    """Configures a file handler for the given logger."""
-    logger.setLevel(logging.INFO)
+    """File handler for `logger`, or the root logger if root=True → captures submodule logs too
+    (not just this module's). root=True for a complete run log; False for an isolated one."""
+    target = logging.getLogger() if root else logger
+    target.setLevel(logging.INFO)
+    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
     file_handler = logging.FileHandler(log_file, mode=mode)
     file_handler.setLevel(logging.INFO)
-    formatter = logging.Formatter(format_str)
-    file_handler.setFormatter(formatter)
-    logger.addHandler(file_handler)
+    file_handler.setFormatter(logging.Formatter(format_str))
+    target.addHandler(file_handler)
+
+
+class _PreInitLogBuffer(logging.Handler):
+    """Root handler retaining records (no target) for later replay → wandb Logs tab."""
+    def __init__(self):
+        super().__init__(level=logging.INFO)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def install_prewandb_log_buffer() -> _PreInitLogBuffer:
+    """Buffer all pre-wandb-init logs (this script + submodules) on the root logger for later replay
+    into the wandb Logs tab. Pair with flush_prewandb_log_buffer after wandb.init()."""
+    handler = _PreInitLogBuffer()
+    logging.getLogger().addHandler(handler)
+    return handler
+
+
+def flush_prewandb_log_buffer(handler: _PreInitLogBuffer, stream=None) -> None:
+    """Detach buffer from root. With `stream` (wandb-hooked stdout) replay records → wandb Logs tab,
+    fenced by a header/footer: the replay also echoes to the terminal (stdout is the only channel into
+    the Logs tab), so the fence marks it as a one-time recap, not new output. Without `stream`, drop
+    them (wandb off). One-shot; format mirrors Hydra's console so the block matches the live stream."""
+    logging.getLogger().removeHandler(handler)
+    if stream is not None and handler.records:
+        formatter = logging.Formatter("[%(asctime)s][%(name)s][%(levelname)s] - %(message)s")
+        stream.write(f"===== replaying {len(handler.records)} pre-wandb-init log line(s) for the wandb Logs tab =====\n")
+        for record in handler.records:
+            stream.write(formatter.format(record) + "\n")
+        stream.write("===== end pre-wandb-init log replay =====\n")
+        stream.flush()
+    handler.records.clear()
 
 
 def create_mask_from_lengths(

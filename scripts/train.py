@@ -46,7 +46,10 @@ from naturalspeech2.model import NaturalSpeech2Model, LossWrapper, GradientAnaly
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.paths import CHECKPOINTS_DIR, PROJECT_ROOT
 from naturalspeech2.utils.ema import EMA
-from naturalspeech2.utils.utils import setup_file_logger, compute_denominators
+from naturalspeech2.utils.utils import (
+    setup_file_logger, compute_denominators,
+    install_prewandb_log_buffer, flush_prewandb_log_buffer,
+)
 from naturalspeech2.utils.compile_tracking import compile_kwargs, read_compile_stats, format_break_reasons
 
 logger = logging.getLogger(__name__)
@@ -422,11 +425,12 @@ def _pdeathsig_preexec():
         pass
 
 
-def _spawn_eval_daemon(run_dir):
-    """Launch the eval daemon as a fresh subprocess pinned to GPU1 (clean CUDA context, no fork)."""
+def _spawn_eval_daemon(run_dir, log_dir):
+    """Launch the eval daemon as a fresh subprocess pinned to GPU1 (clean CUDA context, no fork).
+    log_dir = the run's log dir (scratch vs main) → daemon writes eval_daemon.log alongside the run log."""
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": "1"}
     proc = subprocess.Popen(
-        [sys.executable, str(EVAL_DAEMON_SCRIPT), "--run-dir", str(run_dir)],
+        [sys.executable, str(EVAL_DAEMON_SCRIPT), "--run-dir", str(run_dir), "--log-dir", str(log_dir)],
         env=env, cwd=str(PROJECT_ROOT), preexec_fn=_pdeathsig_preexec,
     )
     logger.info(f"Spawned eval daemon (pid {proc.pid}) on GPU1; run_dir={run_dir}")
@@ -561,6 +565,15 @@ def run_eval_block(
 @hydra.main(version_base=None, config_path="../config", config_name="config")
 def train(cfg: DictConfig):
 
+    # Route warnings.warn (torch TF32/Inductor notices, etc.) through logging → they land in the log
+    # files too, matching console + wandb (Python's "once per location" filter still dedups them).
+    logging.captureWarnings(True)
+
+    # Buffer every log emitted before wandb.init() (dataloaders, dataset preprocessing, model/param/
+    # compile/daemon lines) so they can be replayed into the wandb Logs tab — wandb only hooks stdout
+    # at init, so without this they'd never reach wandb. Replayed (wandb on) or dropped (off) below.
+    prewandb_log_buffer = install_prewandb_log_buffer()
+
     if not torch.cuda.is_available():
         raise RuntimeError("This script requires an NVIDIA GPU and CUDA installed, but none were detected.")
 
@@ -607,7 +620,7 @@ def train(cfg: DictConfig):
     # Ensure save targets exist before any write. CHECKPOINTS_DIR may be absent on fresh
     # containers (models/ from encodec setup, no checkpoints subdir yet).
     CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
-    setup_file_logger(logger, log_dir / log_name)
+    setup_file_logger(logger, log_dir / log_name, root=True)
 
     # Daemon offloads eval to GPU1. overfit/gradient_analysis/aligner_trial need trainer-local eval
     # state so they stay in-process; loss_analysis's eval is plain held-out loss → daemon-compatible.
@@ -783,6 +796,10 @@ def train(cfg: DictConfig):
             resume="allow" if resume_wandb_id else None
         )
 
+        # Replay the buffered pre-init logs into the now-hooked stdout → wandb Logs tab, in original
+        # order, just ahead of the live stream (sys.stdout read here to catch wandb's wrapped stream).
+        flush_prewandb_log_buffer(prewandb_log_buffer, sys.stdout)
+
         if use_eval_daemon:
             # Eval logged from drained daemon results against a custom x-axis (the true snapshot
             # step) → eval curves don't collapse when the trainer is many steps ahead of a stale eval.
@@ -800,6 +817,9 @@ def train(cfg: DictConfig):
                 val_refs = build_fixed_refs([dev_dataset, test_dataset], num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed), do_wer, do_sim_o)
             if "fixed_train_refs" in cfg.setup.audio_tables:
                 train_refs = build_fixed_refs([train_dataset], num_static_refs, prompt_samples_len, sampling_rate, random.Random(cfg.seed), do_wer, do_sim_o)
+    else:
+        # wandb off → no Logs tab to replay into; drop the buffer so it stops accumulating.
+        flush_prewandb_log_buffer(prewandb_log_buffer)
 
     # Spawn the eval daemon (handshake first → daemon reads it at startup). Pinned to GPU1.
     if use_eval_daemon:
@@ -814,7 +834,7 @@ def train(cfg: DictConfig):
             "cfg": OmegaConf.to_container(cfg, resolve=True),
         })
         snapshot_writer = SnapshotWriter(eval_run_dir)
-        daemon_proc = _spawn_eval_daemon(eval_run_dir)
+        daemon_proc = _spawn_eval_daemon(eval_run_dir, log_dir)
 
     batch_generator = get_infinite_batches(
         train_loader, 
@@ -1138,7 +1158,7 @@ def train(cfg: DictConfig):
                     if daemon_respawn_count <= EVAL_DAEMON_MAX_RESPAWNS:
                         logger.warning(f"Eval daemon exited (code {daemon_proc.returncode}); "
                                        f"respawning ({daemon_respawn_count}/{EVAL_DAEMON_MAX_RESPAWNS}).")
-                        daemon_proc = _spawn_eval_daemon(eval_run_dir)
+                        daemon_proc = _spawn_eval_daemon(eval_run_dir, log_dir)
                     elif daemon_respawn_count == EVAL_DAEMON_MAX_RESPAWNS + 1:
                         logger.error("Eval daemon exceeded max respawns; leaving it down "
                                      "(training continues, eval paused).")
