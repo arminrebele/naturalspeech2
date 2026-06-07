@@ -6,7 +6,6 @@ import numpy as np
 from torch.utils.data import DataLoader
 import hydra
 from omegaconf import DictConfig, OmegaConf
-import torch._dynamo
 import wandb
 
 from naturalspeech2.config.schema import model_cfg_from_omegaconf
@@ -14,6 +13,7 @@ from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, Dynam
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.utils.utils import compute_denominators
+from naturalspeech2.utils.compile_tracking import read_compile_stats
 
 logger = logging.getLogger(__name__)
 
@@ -116,8 +116,8 @@ def benchmark(cfg: DictConfig):
     gpu_end = torch.cuda.Event(enable_timing=True)
 
     for i in range(NUM_BENCHMARK_STEPS + WARMUP_STEPS):
-        # Snapshot Dynamo compile counters pre-forward
-        compile_count_before = sum(torch._dynamo.utils.counters["frames"].values())
+        # Snapshot Dynamo compile counter pre-forward (unique_graphs = recompile signal)
+        compile_count_before = read_compile_stats()["unique_graphs"]
 
         start_iter = time.perf_counter()
 
@@ -171,7 +171,7 @@ def benchmark(cfg: DictConfig):
                 continue
 
             # Detect Dynamo recompile this step
-            compile_count_after = sum(torch._dynamo.utils.counters["frames"].values())
+            compile_count_after = read_compile_stats()["unique_graphs"]
             if compile_count_after > compile_count_before:
                 logger.warning(f"Step {i}: Detected graph recompile ({it:.2f}s). Skipping metrics.")
                 continue
