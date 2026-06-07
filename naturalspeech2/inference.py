@@ -320,11 +320,11 @@ def generate_audio_batch(
 
     refs, ref_lens, tok_lists = [], [], []
     for ref, text in zip(reference_audios, target_texts):
-        audio, length = _load_audio(ref, target_sr=sampling_rate, device=device,
-                                    prompt_seconds_warning_threshold=trained_prompt_seconds,
-                                    slice_seconds=prompt_seconds)
+        audio, _ = _load_audio(ref, target_sr=sampling_rate, device=device,
+                               prompt_seconds_warning_threshold=trained_prompt_seconds,
+                               slice_seconds=prompt_seconds)
         refs.append(audio[0])
-        ref_lens.append(int(length.item()))
+        ref_lens.append(audio.shape[-1])   # == length.item(), but from shape → no CPU↔GPU sync
         tok_lists.append(tokenizer(text))
 
     for toks, ref_len in zip(tok_lists, ref_lens):

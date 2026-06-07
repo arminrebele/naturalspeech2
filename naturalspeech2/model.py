@@ -373,23 +373,15 @@ class NaturalSpeech2Model(nn.Module):
 
     @staticmethod
     def _cap_durations(durations: torch.Tensor, max_frames_per_phoneme: int | None,
-                       on_overflow: str) -> torch.Tensor:
-        """Bound per-phoneme predicted durations → catches duration-predictor blow-ups (expm1 →
-        runaway frame count → OOM). None = off. Overflow → 'raise' (abort) | 'warn' (clamp + log).
-        Per-phoneme cap means total output is bounded by P·cap (scales with input, no magic number).
-        One CPU sync — fine in generate() (eager, not the compiled forward)."""
+                       on_overflow: str) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Sync-free per-phoneme duration clamp → guards duration-predictor blow-ups (expm1 → runaway
+        frames → OOM). Returns (clamped, worst_pre_clamp | None). Clamp is unconditional (no-op below
+        cap) so it needs NO sync; the caller reads `worst` folded into the existing max_frames sync and
+        then raises/warns. Per-phoneme cap → total bounded by P·cap (no magic number). None = off."""
         if max_frames_per_phoneme is None:
-            return durations
+            return durations, None
         assert on_overflow in ("raise", "warn"), f"on_overflow must be 'raise'|'warn', got {on_overflow!r}"
-        worst = int(durations.max().item())
-        if worst > max_frames_per_phoneme:
-            msg = (f"Duration predictor emitted {worst} frames for a single phoneme "
-                   f"(cap {max_frames_per_phoneme}) — under-trained predictor or out-of-distribution text.")
-            if on_overflow == "raise":
-                raise RuntimeError(msg + " Aborting generation.")
-            logger.warning(msg + " Clamping to cap and continuing.")
-            durations = durations.clamp(max=max_frames_per_phoneme)
-        return durations
+        return durations.clamp(max=max_frames_per_phoneme), durations.max()
 
     @torch.no_grad()
     def generate(
@@ -452,14 +444,25 @@ class NaturalSpeech2Model(nn.Module):
             phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').long()
             durations = torch.expm1(predicted_log_durations).round().long().clamp(min=1)
             durations = durations * phoneme_mask_flat                             # [B, P]
-            durations = self._cap_durations(durations, max_frames_per_phoneme, on_overflow)
+            durations, worst_frames = self._cap_durations(durations, max_frames_per_phoneme, on_overflow)
         else:
             durations = durations.long()
+            worst_frames = None
 
-        # max_frames as Python int forces one CPU↔GPU sync — fine in generate() (not forward()).
-        # _expand_phoneme_encodings needs a Python int for torch.arange.
+        # One CPU↔GPU sync — fine in generate() (eager, not the compiled forward). max_frames as a
+        # Python int feeds torch.arange in _expand_phoneme_encodings; the duration-cap check reads
+        # `worst` from the SAME sync (one fused .tolist()), so the guard adds no extra drain.
         frame_lengths = durations.sum(dim=1)                                      # [B]
-        max_frames = int(frame_lengths.max().item())
+        if worst_frames is None:
+            max_frames = int(frame_lengths.max().item())
+        else:
+            max_frames, worst = torch.stack([frame_lengths.max(), worst_frames]).tolist()
+            if worst > max_frames_per_phoneme:
+                msg = (f"Duration predictor emitted {worst} frames for a single phoneme (cap "
+                       f"{max_frames_per_phoneme}) — under-trained predictor or out-of-distribution text.")
+                if on_overflow == "raise":
+                    raise RuntimeError(msg + " Aborting generation.")
+                logger.warning(msg + " Clamping to cap and continuing.")
 
         (expanded_phoneme_encodings,                                              # [B, F', D]
          frame_mask,                                                              # [B, F', 1]
