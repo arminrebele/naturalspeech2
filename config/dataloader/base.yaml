@@ -13,9 +13,9 @@ drop_last: True             # Warning: False can cause graph recompiles for inco
 # (batch×frames below) = equal effective batch + uniform per-frame weighting. Don't trim it to save VRAM;
 # if larger caps ever force it, re-derive the whole mapping with find_max.
 bucket_mapping:
-  - { audio_length: 281600, phoneme_length: 260, batch_size: 91 }   # 11.7s · 880 fr · batch×fr ≈ 80.1k
-  - { audio_length: 320000, phoneme_length: 350, batch_size: 80 }   # 13.3s · 1000 fr · batch×fr ≈ 80.0k
-  - { audio_length: 358400, phoneme_length: 360, batch_size: 72 }   # 14.9s · 1120 fr · batch×fr ≈ 80.6k
-  - { audio_length: 396800, phoneme_length: 380, batch_size: 64 }   # 16.5s · 1240 fr · batch×fr ≈ 79.4k
-  - { audio_length: 437760, phoneme_length: 500, batch_size: 58 }   # 18.2s · 1368 fr · batch×fr ≈ 79.3k
-  - { audio_length: 481280, phoneme_length: 440, batch_size: 53 }   # 20.1s · 1504 fr · batch×fr ≈ 79.7k
+  - { audio_length: 281600, phoneme_length: 317, batch_size: 91 }   # 11.7s · 880 fr · batch×fr ≈ 80.1k
+  - { audio_length: 320000, phoneme_length: 366, batch_size: 80 }   # 13.3s · 1000 fr · batch×fr ≈ 80.0k
+  - { audio_length: 358400, phoneme_length: 440, batch_size: 72 }   # 14.9s · 1120 fr · batch×fr ≈ 80.6k
+  - { audio_length: 396800, phoneme_length: 448, batch_size: 64 }   # 16.5s · 1240 fr · batch×fr ≈ 79.4k
+  - { audio_length: 437760, phoneme_length: 489, batch_size: 58 }   # 18.2s · 1368 fr · batch×fr ≈ 79.3k
+  - { audio_length: 481280, phoneme_length: 547, batch_size: 53 }   # 20.1s · 1504 fr · batch×fr ≈ 79.7k
