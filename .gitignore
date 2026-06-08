@@ -22,7 +22,7 @@ docker-compose.mergerfs.yml
 outputs/
 multirun/
 scratch/
-# run logs: logs/main/ (main run + eval daemon), logs/scratch/ (diagnostic/experiment runs), logs/benchmarks/
+# run logs: logs/main/ (main run + eval daemon), logs/experiments/ (diagnostic/experiment runs), logs/benchmarks/
 /logs/
 # aligner Optuna tuning outputs (study DB + per-trial held-out dumps)
 research/aligner_optuna/

@@ -26,7 +26,7 @@ setup:
   audio_tables: [fixed_train_refs, fixed_val_refs]   # trained-on (train slice) + held-out (dev+test pooled), both stable across runs
   inference_data_loss_sweep: []  # overfit-only / teacher-forced; blind to conditioning, unused here
   # num_audio_refs (60) + eval_metrics (["wer","sim_o"]) inherited from setup/base; WER/SIM-o land on both train (trained-on) and val (held-out).
-  log_subdir: "logs/scratch"
+  log_subdir: "logs/experiments"
   log_name: "multibatch"
 
 wandb:

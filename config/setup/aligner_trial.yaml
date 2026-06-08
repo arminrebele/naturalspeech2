@@ -22,5 +22,5 @@ checkpoint_interval: 0           # no crash-recovery checkpoints for short trial
 best_safetensors: False
 final_safetensors: False         # tuning trials produce no inference artifact
 
-log_subdir: "logs/scratch"
+log_subdir: "logs/experiments"
 log_name: "aligner_trial"

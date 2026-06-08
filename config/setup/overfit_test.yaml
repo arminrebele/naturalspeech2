@@ -20,5 +20,5 @@ inference_data_loss_sweep: [150, 300, 600, 1000]
 
 best_safetensors: False          # no dev_loss gating on overfit
 
-log_subdir: "logs/scratch"
+log_subdir: "logs/experiments"
 log_name: "overfit_test"
