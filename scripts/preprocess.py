@@ -5,8 +5,8 @@ Reuses the SAME config composition + create_dataloader path as training, so
 future experiment. `max_train_clips` is a cumulative target: existing train shards are reused,
 only missing ones are F0'd (pay-as-you-go). CPU + disk bound (pyworld + espeak); no GPU.
 
-    python scripts/preprocess.py +experiment=train_100k         # build train shards up to 100k (+ dev/test)
-    python scripts/preprocess.py dataset.max_train_clips=200000  # grow the train store to 200k
+    python scripts/preprocess.py +experiment=train_5M
+    python scripts/preprocess.py dataset.max_train_clips=200000  # arbitrary row-count target (cumulative)
     python scripts/preprocess.py preprocess_splits='[train]'     # train shards only
 """
 import logging
