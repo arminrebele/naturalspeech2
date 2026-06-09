@@ -112,6 +112,40 @@ def get_infinite_batches(loader, start_epoch=0, start_batch_idx=0, overfit_singl
         sampler.set_epoch(epoch)
         sampler.set_start_batch_idx(0)
 
+
+def save_resume_checkpoint(unoptimized_model, optimizer, ema, *, model_cfg_dict,
+                           token_vocabulary_size, sampling_rate, iter_num, best_val_loss,
+                           epoch, batch_idx, cur_kimg, wandb_log):
+    """Atomic full-state checkpoint (model + optimizer + EMA + data position) for crash-recovery
+    and resume — the single source of truth for the ckpt.pt format. Written by both the periodic
+    in-loop save AND the end-of-run final save (callers pass the already-incremented `batch_idx`,
+    i.e. the index of the upcoming batch)."""
+    checkpoint_data = {
+        'model': unoptimized_model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'model_cfg': model_cfg_dict,
+        'token_vocabulary_size': token_vocabulary_size,
+        'sampling_rate': sampling_rate,
+        'iter_num': iter_num,
+        'best_val_loss': best_val_loss,
+        'wandb_id': wandb.run.id if wandb_log else None,
+        'epoch': epoch,
+        'batch_idx': batch_idx,
+        'cur_kimg': cur_kimg,
+    }
+    if ema is not None:
+        checkpoint_data['ema'] = ema.state_dict()
+
+    ckpt_path = CHECKPOINTS_DIR / 'ckpt.pt'
+    ckpt_tmp_path = CHECKPOINTS_DIR / 'ckpt.pt.tmp'
+    ckpt_bak_path = CHECKPOINTS_DIR / 'ckpt_bak.pt'
+
+    torch.save(checkpoint_data, ckpt_tmp_path)
+    if ckpt_path.exists():
+        ckpt_path.replace(ckpt_bak_path)
+    ckpt_tmp_path.replace(ckpt_path)
+    return ckpt_path
+
 @dataclass
 class EvalDeps:
     """Dependencies for run_eval_block + audio-table renderers. Built once per eval firing;
@@ -881,6 +915,11 @@ def train(cfg: DictConfig):
     # the same 5 objects forever, so caching lookahead_queue[0] once gives a stable ref batch.
     overfit_ref_batch = None
 
+    # Seed the loop-locals so the end-of-run final checkpoint is still coherent if the loop body
+    # never executes (a resume with start_iter >= max_iters, e.g. re-resuming a completed run
+    # without raising max_iters) instead of reading unbound names.
+    current_epoch, current_batch_idx = start_epoch, start_batch_idx
+
     for iter_num in range(start_iter, cfg.setup.max_iters):
 
         # Apply LR scheduling
@@ -1172,30 +1211,13 @@ def train(cfg: DictConfig):
             and iter_num > 0
             and iter_num % cfg.setup.checkpoint_interval == 0
         ):
-            checkpoint_data = {
-                'model': unoptimized_model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'model_cfg': model_cfg_dict,
-                'token_vocabulary_size': token_vocabulary_size,
-                'sampling_rate': sampling_rate,
-                'iter_num': iter_num,
-                'best_val_loss': best_val_loss,
-                'wandb_id': wandb.run.id if cfg.wandb.log else None,
-                'epoch': current_epoch,
-                'batch_idx': current_batch_idx + 1,   # Index of the upcoming batch
-                'cur_kimg': cur_kimg,
-            }
-            if ema is not None:
-                checkpoint_data['ema'] = ema.state_dict()
-
-            ckpt_path = CHECKPOINTS_DIR / 'ckpt.pt'
-            ckpt_tmp_path = CHECKPOINTS_DIR / 'ckpt.pt.tmp'
-            ckpt_bak_path = CHECKPOINTS_DIR / 'ckpt_bak.pt'
-
-            torch.save(checkpoint_data, ckpt_tmp_path)
-            if ckpt_path.exists():
-                ckpt_path.replace(ckpt_bak_path)
-            ckpt_tmp_path.replace(ckpt_path)
+            save_resume_checkpoint(
+                unoptimized_model, optimizer, ema,
+                model_cfg_dict=model_cfg_dict, token_vocabulary_size=token_vocabulary_size,
+                sampling_rate=sampling_rate, iter_num=iter_num, best_val_loss=best_val_loss,
+                epoch=current_epoch, batch_idx=current_batch_idx + 1,   # upcoming batch
+                cur_kimg=cur_kimg, wandb_log=cfg.wandb.log,
+            )
 
     # -----------------------------
     # Loss Analysis Summary Dump
@@ -1281,6 +1303,21 @@ def train(cfg: DictConfig):
             loss_wrapper, ema, best_val_loss,
             incremental_audio_tables,
         )
+
+    # Final full-state checkpoint at the endpoint. The periodic save only fires on
+    # checkpoint_interval multiples, so without this a COMPLETED run could only resume from the
+    # last multiple — losing up to checkpoint_interval steps of model+optimizer+EMA+data state
+    # (e.g. a 40000-step run last checkpointed at 35000). Resume from here by raising max_iters to
+    # continue training. Gated like the periodic save so diagnostic modes (interval=0) stay write-free.
+    if cfg.setup.checkpoint_interval > 0:
+        final_ckpt_path = save_resume_checkpoint(
+            unoptimized_model, optimizer, ema,
+            model_cfg_dict=model_cfg_dict, token_vocabulary_size=token_vocabulary_size,
+            sampling_rate=sampling_rate, iter_num=cfg.setup.max_iters - 1, best_val_loss=best_val_loss,
+            epoch=current_epoch, batch_idx=current_batch_idx + 1, cur_kimg=cur_kimg,
+            wandb_log=cfg.wandb.log,
+        )
+        logger.info(f"Saved final crash-recovery checkpoint (iter {cfg.setup.max_iters - 1}) to {final_ckpt_path}")
 
     if cfg.setup.final_safetensors:
         final_path = CHECKPOINTS_DIR / 'ema_final.safetensors'
