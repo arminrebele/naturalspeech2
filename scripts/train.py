@@ -899,7 +899,11 @@ def train(cfg: DictConfig):
         aligner_trial_out_path.write_text("")
         
     if cfg.setup.gradient_analysis_run:
-        grad_analysis_start_iter = int(cfg.setup.max_iters * 0.8)   # last 20% of steps (stable logged values)
+        # Last 20% (stable logged values), but capped to ~200 analyzed steps (window ÷ log_interval)
+        # so layering gradient_analysis onto a LONG productive run (e.g. a train_5M continuation)
+        # doesn't balloon the 9×-cost per-term passes over thousands of steps. Identical to 0.8× for
+        # the standalone 10k run (log_interval=10 → 200·10=2000 = the last 20%).
+        grad_analysis_start_iter = max(int(cfg.setup.max_iters * 0.8), cfg.setup.max_iters - 200 * cfg.setup.log_interval)
         grad_norm_accumulators = {}
         cos_sim_accumulators = {}
         grad_analysis_steps_counted = 0
@@ -1122,6 +1126,19 @@ def train(cfg: DictConfig):
                     prev_unique_graphs = ug
                 eval_ran_since_graph_check = False
 
+            # Gradient-analysis metrics: compute ONCE + accumulate here, OUTSIDE the wandb block.
+            # This mode REQUIRES wandb.log=false (resume re-opens the train_5M run, already at its
+            # last step → live logs would be dropped as non-monotonic), so the end-of-run summary
+            # must NOT depend on the wandb path. `analyzer is not None` ⟹ already in the window.
+            grad_norms = cos_sims = None
+            if analyzer is not None:
+                grad_norms, cos_sims = analyzer.compute_metrics()
+                grad_analysis_steps_counted += 1
+                for k, v in grad_norms.items():
+                    grad_norm_accumulators[k] = grad_norm_accumulators.get(k, 0.0) + v
+                for k, v in cos_sims.items():
+                    cos_sim_accumulators[k] = cos_sim_accumulators.get(k, 0.0) + v
+
             if cfg.wandb.log:
                 log_payload = {
                     "Train: Metrics/Loss": lossf,
@@ -1145,9 +1162,8 @@ def train(cfg: DictConfig):
                 for k, v in raw_terms.items():
                     log_payload[f"Train: Loss Composition (Raw Fraction)/{k}"] = (v / raw_total).item()
 
-                # Gradient analysis only when logging (expensive)
+                # Gradient analysis (computed + accumulated above, wandb-independent); log it.
                 if analyzer is not None:
-                    grad_norms, cos_sims = analyzer.compute_metrics()
                     for k, v in grad_norms.items():
                         if k.endswith("_total"):
                             log_payload[f"Gradient Analysis: L2-Norms (Total)/{k}"] = v
@@ -1155,13 +1171,6 @@ def train(cfg: DictConfig):
                             log_payload[f"Gradient Analysis: L2-Norms (Shared)/{k}"] = v
                     for k, v in cos_sims.items():
                         log_payload[f"Gradient Analysis: Cosine-Similarity (Shared)/{k}"] = v
-
-                    if iter_num >= grad_analysis_start_iter:
-                        grad_analysis_steps_counted += 1
-                        for k, v in grad_norms.items():
-                            grad_norm_accumulators[k] = grad_norm_accumulators.get(k, 0.0) + v
-                        for k, v in cos_sims.items():
-                            cos_sim_accumulators[k] = cos_sim_accumulators.get(k, 0.0) + v
 
                 if ema is not None:
                     log_payload["EMA/effective_decay"] = ema._effective_decay(
