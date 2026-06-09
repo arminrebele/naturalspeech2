@@ -1,11 +1,10 @@
 # @package _global_
 #
-# Hydra experiment pattern: additive overrides on config.yaml's defaults.
-#   python scripts/train.py +experiment=gradient_analysis
-#
-# ISR + train split, same rationale as loss_analysis (dev runs out before max_iters).
-# No per-mode model config: uses model/base.yaml unchanged.
+# Per-loss-term gradient diagnostic — python scripts/train.py +experiment=gradient_analysis
 
 defaults:
   - override /setup: gradient_analysis
   - override /wandb: gradient_analysis
+
+dataset:
+  max_train_clips: 5000000
