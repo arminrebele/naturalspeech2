@@ -39,7 +39,10 @@ def read_compile_stats() -> dict:
 
 
 def format_break_reasons(break_reasons: dict) -> str:
-    """One-line 'N× reason; ...' breakdown, descending by count."""
+    """One-line 'N× reason; ...' breakdown, descending by count. Dynamo's reason keys are multi-line
+    blobs (Explanation/Hint/docs URL), so keep only each key's first line — otherwise this "one-liner"
+    spans ~40 lines. Full per-break detail is reproducible via TORCH_LOGS=graph_breaks."""
     if not break_reasons:
         return "(none)"
-    return "; ".join(f"{n}× {r}" for r, n in sorted(break_reasons.items(), key=lambda kv: -kv[1]))
+    first_line = lambda r: r.split("\n", 1)[0].strip()
+    return "; ".join(f"{n}× {first_line(r)}" for r, n in sorted(break_reasons.items(), key=lambda kv: -kv[1]))
