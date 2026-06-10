@@ -115,6 +115,7 @@ def get_infinite_batches(loader, start_epoch=0, start_batch_idx=0, overfit_singl
 
 def save_resume_checkpoint(unoptimized_model, optimizer, ema, *, model_cfg_dict,
                            token_vocabulary_size, sampling_rate, iter_num, best_val_loss,
+                           warmup_iters, lr_decay_iters,
                            epoch, batch_idx, cur_kimg, wandb_log):
     """Atomic full-state checkpoint (model + optimizer + EMA + data position) for crash-recovery
     and resume — the single source of truth for the ckpt.pt format. Written by both the periodic
@@ -128,6 +129,9 @@ def save_resume_checkpoint(unoptimized_model, optimizer, ema, *, model_cfg_dict,
         'sampling_rate': sampling_rate,
         'iter_num': iter_num,
         'best_val_loss': best_val_loss,
+        # LR-schedule horizon, resolved from max_iters at entry; pinned so resume+extend doesn't rescale the LR.
+        'warmup_iters': warmup_iters,
+        'lr_decay_iters': lr_decay_iters,
         'wandb_id': wandb.run.id if wandb_log else None,
         'epoch': epoch,
         'batch_idx': batch_idx,
@@ -744,6 +748,19 @@ def train(cfg: DictConfig):
         model_cfg_dict = checkpoint['model_cfg']
         start_batch_idx = checkpoint['batch_idx'] # Already points to the next batch due to pre-fetch
 
+        # warmup_iters/lr_decay_iters resolve from max_iters at entry; resume raises max_iters to extend the
+        # run, which would rescale + step-jump the LR (ISR: peak·√(warmup/it)). Pin to the checkpoint's values
+        # for seamless continuation. Pre-fix ckpts lack the keys → warn, keep cfg value.
+        for k in ('warmup_iters', 'lr_decay_iters'):
+            if k in checkpoint:
+                cfg.setup[k] = checkpoint[k]
+            else:
+                logger.warning(
+                    f"Checkpoint has no '{k}' (pre-dates LR-schedule pinning); using cfg setup.{k}="
+                    f"{cfg.setup[k]}. For a continuous LR curve on resume, pass setup.{k}=<original "
+                    f"run's value> on the CLI."
+                )
+
         logger.info(f"Resuming training at iteration {start_iter} from checkpoint in {CHECKPOINTS_DIR}...")
 
     # Resume endpoint = max_iters; start_iter == max_iters ⇒ run already finished. An empty range does
@@ -1227,6 +1244,7 @@ def train(cfg: DictConfig):
                 unoptimized_model, optimizer, ema,
                 model_cfg_dict=model_cfg_dict, token_vocabulary_size=token_vocabulary_size,
                 sampling_rate=sampling_rate, iter_num=iter_num, best_val_loss=best_val_loss,
+                warmup_iters=cfg.setup.warmup_iters, lr_decay_iters=cfg.setup.lr_decay_iters,
                 epoch=current_epoch, batch_idx=current_batch_idx + 1,   # upcoming batch
                 cur_kimg=cur_kimg, wandb_log=cfg.wandb.log,
             )
@@ -1326,6 +1344,7 @@ def train(cfg: DictConfig):
             unoptimized_model, optimizer, ema,
             model_cfg_dict=model_cfg_dict, token_vocabulary_size=token_vocabulary_size,
             sampling_rate=sampling_rate, iter_num=cfg.setup.max_iters - 1, best_val_loss=best_val_loss,
+            warmup_iters=cfg.setup.warmup_iters, lr_decay_iters=cfg.setup.lr_decay_iters,
             epoch=current_epoch, batch_idx=current_batch_idx + 1, cur_kimg=cur_kimg,
             wandb_log=cfg.wandb.log,
         )
