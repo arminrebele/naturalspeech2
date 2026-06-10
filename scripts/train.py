@@ -746,6 +746,14 @@ def train(cfg: DictConfig):
 
         logger.info(f"Resuming training at iteration {start_iter} from checkpoint in {CHECKPOINTS_DIR}...")
 
+    # Resume endpoint = max_iters; start_iter == max_iters ⇒ run already finished. An empty range does
+    # no training, only a redundant re-save → assert loudly (no known use for a zero-iteration run).
+    assert start_iter < cfg.setup.max_iters, (
+        f"Nothing to train: start_iter={start_iter} >= setup.max_iters={cfg.setup.max_iters}; "
+        f"on resume, raise setup.max_iters above the checkpoint's iteration to continue. To "
+        f"regenerate ema_final.safetensors from a finished/partial run instead, use scripts/export_ema.py."
+    )
+
     model.to(device)
 
     # Attach inference helpers for eval-block generate_audio(). Plain attributes (not
@@ -918,11 +926,6 @@ def train(cfg: DictConfig):
     # Filled on the first loop iter when overfit_batch table is active. Overfit cycling yields
     # the same 5 objects forever, so caching lookahead_queue[0] once gives a stable ref batch.
     overfit_ref_batch = None
-
-    # Seed the loop-locals so the end-of-run final checkpoint is still coherent if the loop body
-    # never executes (a resume with start_iter >= max_iters, e.g. re-resuming a completed run
-    # without raising max_iters) instead of reading unbound names.
-    current_epoch, current_batch_idx = start_epoch, start_batch_idx
 
     for iter_num in range(start_iter, cfg.setup.max_iters):
 

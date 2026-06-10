@@ -330,6 +330,14 @@ audio, length = generate_audio(model, "path/to/reference.wav", "Hello world.", p
 sf.write("out.wav", audio[:length], samplerate=SAMPLING_RATE)
 ```
 
+**Recovering `ema_final` from a partial run.** A completed run writes both `ema_best.safetensors` (best dev loss) and `ema_final.safetensors` (final EMA weights). A run that crashed or was stopped early leaves only `ema_best` — it is written in-loop, whereas `ema_final` is a post-loop step that never ran. The final EMA weights are still inside `ckpt.pt`, so re-serialize them into the inference format without retraining:
+
+```bash
+python scripts/export_ema.py \
+    --checkpoint models/checkpoints/ckpt.pt \
+    --output models/checkpoints/ema_final.safetensors
+```
+
 **From Hugging Face** — once weights are published, pass a repo id instead of a path; the weights, config, and token vocabulary are downloaded and cached automatically:
 
 ```python
