@@ -252,7 +252,7 @@ class DiffusionModel(nn.Module):
         #   ∇ log p_t(z_t|z₀) = −ε / √(1 − α̅)                 (true conditional score)
         #   L_score           = ‖ŝ − ∇ log p_t‖²
         # Algebraically = (α̅/σ²)·‖ẑ₀ − z₀‖²,  σ = 1 − α̅. The α̅/σ² weight blows up as t→0
-        # (~1.3k at t=0.05, ~2.8e8 at t=1e-3) → spikes gradients, biases toward low-t modes.
+        # (~1.1e3 at t=0.05, ~8.3e7 at t=1e-3 for β_min=0.1) → spikes gradients, biases toward low-t modes.
         # Stabilization:
         #   - Min-SNR(γ) clip (Hang et al. 2023): factor min(γ·σ²/α̅, 1) caps weight at γ; γ=5
         #     bounds low-t, leaves high-t (σ²/α̅ ≥ 1) unchanged.
