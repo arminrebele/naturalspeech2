@@ -1123,13 +1123,17 @@ def train(cfg: DictConfig):
                     logger.info(f"torch.compile: {cstats['unique_graphs']} graphs | {cstats['graph_breaks_total']} "
                                 f"breaks [{format_break_reasons(cstats['break_reasons'])}] | "
                                 f"cache_size_limit={cstats['cache_size_limit']}")
-                # Intended-breaks tripwire: log only when the reason SET changes (no per-step strings).
+                # Structural-breaks tripwire: log only when the reason SET changes (no per-step strings).
+                # Baseline = 5 fixed reasons: 2 intended @torch.compiler.disable sites, torchaudio-
+                # MelSpectrogram torch.jit.isinstance skips, CTC loss dynamic-shape + fake-tensor probe.
                 reason_set = set(cstats["break_reasons"])
                 if reason_set != prev_break_reasons:
                     added = reason_set - prev_break_reasons
                     if added and prev_break_reasons:
                         logger.warning(f"⚠️ New torch.compile graph-break reason(s): {sorted(added)} — "
-                                       f"expected only the 2 intended @torch.compiler.disable sites.")
+                                       f"beyond the 5-reason structural baseline (2 intended "
+                                       f"@torch.compiler.disable sites, torchaudio isinstance skips, "
+                                       f"CTC-loss dynamic-shape + fake-tensor).")
                     prev_break_reasons = reason_set
                 # Eval-aware leak check: a unique_graphs grow at a non-eval step past warmup = real leak.
                 ug = cstats["unique_graphs"]
