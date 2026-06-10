@@ -8,6 +8,7 @@ shared ref/hyp normalization. SIM-o (speaker similarity) = WavLM-Large-SV embedd
 cosine (s3prl WavLM frontend + vendored ECAPA head; see `compute_sim_o`).
 """
 import re
+import logging
 from functools import lru_cache
 
 import numpy as np
@@ -15,6 +16,8 @@ import torch
 import torchaudio.functional as taF
 
 from naturalspeech2.utils.utils import pack_by_budget
+
+logger = logging.getLogger(__name__)
 
 _ASR_NAME = "facebook/hubert-large-ls960-ft"
 _ASR_SR = 16000
@@ -179,8 +182,12 @@ def _load_sv():
     ckpt_path = hf_hub_download(_SV_CKPT_REPO, _SV_CKPT_FILE)
     state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     missing, unexpected = model.load_state_dict(state["model"], strict=False)
-    # Print once (first load) to pin expectations against the silent-skip bug.
-    print(f"[sim_o load] missing={len(missing)} unexpected={len(unexpected)}; missing[:8]={missing[:8]}")
+    # Log once (first load) to pin expectations against the silent-skip bug. unexpected keys are
+    # IGNORED by load_state_dict (they never enter the forward), so with no backbone key missing
+    # (asserted below) they're harmless fine-tune leftovers — names logged so the one-off is
+    # self-documenting rather than an opaque count.
+    logger.info(f"[sim_o] WavLM-SV loaded: {len(missing)} missing, {len(unexpected)} unexpected "
+                f"(unexpected={unexpected}; missing[:8]={missing[:8]}).")
     backbone_missing = [k for k in missing if k.startswith(_SV_BACKBONE_PREFIXES)]
     assert not backbone_missing, (
         f"WavLM-SV backbone weights did not load — frontend/checkpoint mismatch. "

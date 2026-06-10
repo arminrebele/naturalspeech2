@@ -174,6 +174,12 @@ def drain_results(run_dir: Path) -> list[dict]:
     return drained
 
 
+def result_exists(run_dir: Path, step: int) -> bool:
+    """True once the daemon has written (and the trainer hasn't yet drained) the eval result for
+    `step`. Lets shutdown detect final-eval completion by the durable work product, not a blind timer."""
+    return (run_dir / _RESULTS / f"eval_{step}.json").is_file()
+
+
 def cleanup_eval_dir(eval_dir) -> None:
     """Delete a drained eval's wav dir (bounds /dev/shm). Call AFTER consuming the wav paths —
     wandb.Audio reads the file at construction, so deleting earlier FileNotFounds it."""

@@ -417,8 +417,14 @@ def _append_aligner_trial_eval(out_path, step: int, losses: dict) -> None:
 # ----------------------------------------------------------------------------
 
 EVAL_DAEMON_SCRIPT = PROJECT_ROOT / "scripts" / "eval_daemon.py"
-EVAL_DAEMON_SHUTDOWN_TIMEOUT_S = 1200   # allow a slow final dev+test pass + audio at run end
 EVAL_DAEMON_MAX_RESPAWNS = 5            # persistent crash → stop respawning (training continues, eval paused)
+# Final-eval shutdown waits on the daemon's RESULT file, not a blind timer (a full final eval runs
+# ~20+ min — longer than any safe fixed timeout, which would guillotine it mid-eval). CAP = backstop
+# for a genuinely wedged daemon so train.py can't hang forever; GRACE = clean-exit window once the
+# result has landed before terminating a teardown hang; POLL = check cadence.
+EVAL_DAEMON_FINAL_EVAL_CAP_S = 3600
+EVAL_DAEMON_EXIT_GRACE_S = 60
+EVAL_DAEMON_SHUTDOWN_POLL_S = 5
 
 
 def _clone_trainable_cpu(model, ema):
@@ -507,6 +513,35 @@ def _drain_and_log(run_dir, incremental_audio_tables, wandb_log):
             logger.exception(f"Failed to log drained eval (step {rec.get('step')}); skipping.")
         finally:
             ipc.cleanup_eval_dir(rec["_eval_dir"])
+
+
+def _await_daemon_final_eval(daemon_proc, run_dir, final_step):
+    """Block at run end until the daemon finishes the final eval, then let it exit. Polls for the
+    final RESULT file (the durable work product) rather than blind-waiting a fixed timeout: a full
+    final eval runs longer than any safe fixed wait (~20+ min), so a short timer would terminate it
+    mid-eval. Once the result lands the work is saved → allow a short grace for a clean process exit,
+    else terminate (covers a post-eval teardown hang). The CAP only bounds a genuinely wedged daemon
+    so trainer exit can't block forever; the trainer still writes ema_final itself afterwards."""
+    deadline = time.monotonic() + EVAL_DAEMON_FINAL_EVAL_CAP_S
+    while True:
+        try:
+            daemon_proc.wait(timeout=EVAL_DAEMON_SHUTDOWN_POLL_S)
+            return                                    # exited on its own — the normal clean path
+        except subprocess.TimeoutExpired:
+            pass
+        if ipc.result_exists(run_dir, final_step):
+            try:
+                daemon_proc.wait(timeout=EVAL_DAEMON_EXIT_GRACE_S)
+            except subprocess.TimeoutExpired:
+                logger.warning("Eval daemon wrote the final eval but didn't exit within the grace "
+                               "window; terminating (teardown hang — the final result is saved).")
+                daemon_proc.terminate()
+            return
+        if time.monotonic() >= deadline:
+            logger.warning(f"Eval daemon produced no final eval within {EVAL_DAEMON_FINAL_EVAL_CAP_S}s; "
+                           f"terminating (likely wedged). The trainer still writes ema_final itself.")
+            daemon_proc.terminate()
+            return
 
 
 def run_eval_block(
@@ -1364,11 +1399,7 @@ def train(cfg: DictConfig):
         snapshot_writer.submit(cfg.setup.max_iters, live_cpu, shadow_cpu)
         snapshot_writer.close()                       # flush the final snapshot to disk first
         ipc.signal_shutdown(eval_run_dir, cfg.setup.max_iters)
-        try:
-            daemon_proc.wait(timeout=EVAL_DAEMON_SHUTDOWN_TIMEOUT_S)
-        except subprocess.TimeoutExpired:
-            logger.warning("Eval daemon did not exit within timeout; terminating.")
-            daemon_proc.terminate()
+        _await_daemon_final_eval(daemon_proc, eval_run_dir, cfg.setup.max_iters)
         _drain_and_log(eval_run_dir, incremental_audio_tables, cfg.wandb.log)
     else:
         # swap_in writes the final safetensors below separately (non-reentrant → can't nest the two).

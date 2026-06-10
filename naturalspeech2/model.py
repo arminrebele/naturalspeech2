@@ -110,8 +110,10 @@ class NaturalSpeech2Model(nn.Module):
         # duration_ends[b,p] = first frame NOT in phoneme p; non-decreasing → valid for searchsorted.
         duration_ends = durations.cumsum(dim=1)  # [B, P]
 
-        # Frame f belongs to the smallest p with f < duration_ends[b, p].
-        frame_positions = repeat(torch.arange(max_frames, device=durations.device), 'f -> b f', b=durations.shape[0])  # [B, F]
+        # Frame f belongs to the smallest p with f < duration_ends[b, p]. .contiguous(): einops
+        # repeat returns an expanded (broadcast) view → searchsorted warns + copies internally on a
+        # non-contiguous value tensor; materialize once here instead.
+        frame_positions = repeat(torch.arange(max_frames, device=durations.device), 'f -> b f', b=durations.shape[0]).contiguous()  # [B, F]
         phoneme_idx = torch.searchsorted(duration_ends, frame_positions, right=True).clamp(max=P - 1)  # [B, F]
 
         expanded_phoneme_encodings = torch.gather(phoneme_encodings, 1, repeat(phoneme_idx, 'b f -> b f d', d=D))  # [B, F, D]
