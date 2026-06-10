@@ -140,6 +140,9 @@ class DiffusionModel(nn.Module):
             sampling_temperature: float = 1.44,
             timestep_eps: float = 1e-3,
             min_snr_gamma: float = 5.0,         # min-SNR(γ) clip on the implicit α̅/σ² weight in score loss (Hang et al. 2023); see forward()
+            t_sampling: str = "uniform",        # training-time t distribution: "uniform" | "logit_normal"; see forward()
+            t_logit_mean: float = 0.0,
+            t_logit_std: float = 1.0,
     ):
         super().__init__()
         self.latent_dim = latent_dim
@@ -150,6 +153,11 @@ class DiffusionModel(nn.Module):
         self.sampling_temperature = sampling_temperature
         self.timestep_eps = timestep_eps
         self.min_snr_gamma = min_snr_gamma
+        if t_sampling not in ("uniform", "logit_normal"):
+            raise ValueError(f"t_sampling must be 'uniform' or 'logit_normal', got {t_sampling!r}")
+        self.t_sampling = t_sampling
+        self.t_logit_mean = t_logit_mean
+        self.t_logit_std = t_logit_std
 
         self.input_projection = nn.Linear(latent_dim, hidden_dim, bias=False)
         self.timestep_embedding = TimestepEmbedding(hidden_dim=hidden_dim, time_dim=time_dim)
@@ -204,11 +212,22 @@ class DiffusionModel(nn.Module):
             latent_std,                     # [latent_dim] | per-channel std
     ):
         batch_size = target_latents.shape[0]
-        t = (         #  t ∈ [ε, 1−ε]; eps avoids exact 0/1 (singular noise-schedule math)
-            torch.rand(batch_size, device=target_latents.device)
-            * (1.0 - 2.0 * self.timestep_eps)
-            + self.timestep_eps
-        )
+        # t ∈ [ε, 1−ε]; eps avoids exact 0/1 (singular noise-schedule math). Distribution is a
+        # train-mode behavior (like dropout): "logit_normal" (SD3, Esser et al. ICML 2024)
+        # concentrates training draws in the mid-noise band; eval mode always draws uniform so
+        # held-out losses stay comparable across runs and sampling schemes.
+        if self.training and self.t_sampling == "logit_normal":
+            u = (
+                torch.randn(batch_size, device=target_latents.device)
+                * self.t_logit_std + self.t_logit_mean
+            )
+            t = torch.sigmoid(u).clamp(self.timestep_eps, 1.0 - self.timestep_eps)
+        else:
+            t = (
+                torch.rand(batch_size, device=target_latents.device)
+                * (1.0 - 2.0 * self.timestep_eps)
+                + self.timestep_eps
+            )
 
         z_t, epsilon = self._forward_diffusion(target_latents, t)       # [B, Ft, latent_dim]       noisy latents
         prompt_summary_tokens = self._compute_prompt_summary_tokens(
@@ -382,28 +401,31 @@ class DiffusionModel(nn.Module):
         # Static Python loop over Q=32, vectorized over (B, Ft, K). Running cumsum avoids a full
         # [Q, B, Ft, latent_dim] residual tensor. Unnormalize ẑ₀ to raw codebook space first
         # (codebook embeds are raw Encodec; the residual interpretation only holds there).
-        z0_hat = z0_hat.float() * latent_std + latent_mean
-        Q = target_codebook_indices.shape[2]
-        codebooks = codebook_embeddings[:Q].float()                         # [Q, K, latent_dim]
-        codebook_sq_norms = codebooks.pow(2).sum(dim=-1)                    # [Q, K]
+        # autocast-disabled bracket: einsum is an autocast op, so .float() inputs alone would still
+        # run the logits GEMM in BF16 under training autocast (same hazard as the aligner bmm).
+        with torch.autocast(device_type=z0_hat.device.type, enabled=False):
+            z0_hat = z0_hat.float() * latent_std + latent_mean
+            Q = target_codebook_indices.shape[2]
+            codebooks = codebook_embeddings[:Q].float()                         # [Q, K, latent_dim]
+            codebook_sq_norms = codebooks.pow(2).sum(dim=-1)                    # [Q, K]
 
-        flat_mask = rearrange(target_latents_mask, 'b ft 1 -> (b ft)').float()
+            flat_mask = rearrange(target_latents_mask, 'b ft 1 -> (b ft)').float()
 
-        running_cum = torch.zeros_like(z0_hat)                              # [B, Ft, latent_dim]   Σᵢ<ⱼ eᵢ
-        total_ce = z0_hat.new_zeros(())
+            running_cum = torch.zeros_like(z0_hat)                              # [B, Ft, latent_dim]   Σᵢ<ⱼ eᵢ
+            total_ce = z0_hat.new_zeros(())
 
-        for j in range(Q):
-            gt_embed_j = codebooks[j][target_codebook_indices[:, :, j]]     # [B, Ft, latent_dim]
-            residual_j = z0_hat - running_cum                               # [B, Ft, latent_dim]
-            running_cum = running_cum + gt_embed_j
+            for j in range(Q):
+                gt_embed_j = codebooks[j][target_codebook_indices[:, :, j]]     # [B, Ft, latent_dim]
+                residual_j = z0_hat - running_cum                               # [B, Ft, latent_dim]
+                running_cum = running_cum + gt_embed_j
 
-            logits = 2.0 * torch.einsum('btd,kd->btk', residual_j, codebooks[j])  # [B, Ft, K]
-            logits = logits - codebook_sq_norms[j]
+                logits = 2.0 * torch.einsum('btd,kd->btk', residual_j, codebooks[j])  # [B, Ft, K]
+                logits = logits - codebook_sq_norms[j]
 
-            logits_flat = rearrange(logits, 'b ft k -> (b ft) k')
-            targets_flat = rearrange(target_codebook_indices[:, :, j], 'b ft -> (b ft)')
-            ce_per_scalar = F.cross_entropy(logits_flat, targets_flat, reduction='none')
-            total_ce = total_ce + (ce_per_scalar * flat_mask).sum()
+                logits_flat = rearrange(logits, 'b ft k -> (b ft) k')
+                targets_flat = rearrange(target_codebook_indices[:, :, j], 'b ft -> (b ft)')
+                ce_per_scalar = F.cross_entropy(logits_flat, targets_flat, reduction='none')
+                total_ce = total_ce + (ce_per_scalar * flat_mask).sum()
 
         return total_ce
 

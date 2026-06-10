@@ -99,6 +99,9 @@ class DiffusionModelConfig:
     sampling_temperature: float = 1.44
     timestep_eps: float = 1e-3
     min_snr_gamma: float = 5.0
+    t_sampling: str = "uniform"       # training-time t distribution: "uniform" | "logit_normal"
+    t_logit_mean: float = 0.0
+    t_logit_std: float = 1.0
 
 
 @dataclass

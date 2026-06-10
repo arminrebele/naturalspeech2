@@ -98,6 +98,12 @@ diffusion_model:
   sampling_temperature: 1.44     # τ = 1.2² — initial noise ~ N(0, τ⁻¹·I)
   timestep_eps: 0.001
   min_snr_gamma: 5.0
+  # Training-time t distribution: "uniform" | "logit_normal" (paper is silent on t-sampling;
+  # logit-normal per SD3, Esser et al. ICML 2024, concentrates draws in the mid-noise band).
+  # Eval always draws uniform regardless → held-out losses stay comparable across schemes.
+  t_sampling: "logit_normal"
+  t_logit_mean: 0.0
+  t_logit_std: 1.0
 
 # EMA of model weights for sampling. halflife_kimg = halflife in thousands of training examples
 # (Karras EDM Appendix B.4); rampup at cur_kimg < halflife_kimg keeps the early shadow off the random init.

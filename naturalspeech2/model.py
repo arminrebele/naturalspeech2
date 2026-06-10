@@ -367,6 +367,7 @@ class NaturalSpeech2Model(nn.Module):
                 "condition_target": condition_target,            # [B, Ft, D]
                 "prompt_encodings": prompt_encodings,            # [B, Fp, D]
                 "prompt_encodings_mask": prompt_encodings_mask,  # [B, Fp, 1] bool
+                "target_codebook_indices": target_codebook_indices,  # [B, Ft, Q] — not re-derivable (random prompt/target split)
             }
             return loss_dict, diffusion_inputs
         return loss_dict
