@@ -9,6 +9,8 @@ defaults:
 
 max_iters: 10000
 
+allow_ckpt_overwrite: True       # diagnostic: freely re-run its own subdir (inert here — saves all off)
+
 gradient_analysis_run: True
 
 log_interval: 10                 # log norms every 10 steps (not too spammy)

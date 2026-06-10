@@ -3,6 +3,18 @@
 
 device: "cuda"
 init_from: "scratch"     # 'scratch' or 'resume'
+# Anti-clobber guard for init_from=scratch: refuse to overwrite an existing ckpt.pt / ema_*.safetensors
+# in this run's checkpoint subdir (models/checkpoints/<log_name>/) unless true. base.yaml defaults
+# init_from=scratch, so a bare re-run of a crashed run would otherwise silently destroy its resume
+# point. Main run = false (protect it); diagnostic modes set true (they own + freely re-run their dir).
+allow_ckpt_overwrite: false
+# wandb behavior on init_from=resume (inert on scratch). A prior session logs every log_interval but
+# checkpoints only every checkpoint_interval, so wandb's run.step is usually AHEAD of the resumed ckpt
+# → those re-logged steps would be dropped as non-monotonic. Branch the run at the ckpt step instead:
+#   rewind: truncate the orphaned tail in-place, one continuous run (default)
+#   fork:   start a NEW run branched at the ckpt step (original run preserved)
+#   allow:  legacy reattach (drops the overlap; logs a warning)
+wandb_resume_mode: rewind
 gradient_accumulation_steps: 1
 
 # torch.compile — applies to the training model (and, via dynamic/mode, the daemon eval forward).

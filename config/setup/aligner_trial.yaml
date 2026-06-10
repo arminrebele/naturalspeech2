@@ -10,6 +10,8 @@ defaults:
 max_iters: 5000                  # warmup_ratio (0.11 → 550) + ISR inherited from base
 lr_decay_iters: ${setup.max_iters}
 
+allow_ckpt_overwrite: True       # diagnostic: freely re-run its own subdir (inert here — saves all off)
+
 aligner_trial_run: True
 
 # Held-out eval at a fine cadence → tail = decision signal. eval_iters bounds each held-out pass.

@@ -310,9 +310,11 @@ Both workflows funnel through `generate_audio()` — the Layer-3 wrapper that ph
 
 **Local weights** — your own training run, or anyone who followed the recipe. The CLI is the quickest path:
 
+Checkpoints are written per run under `models/checkpoints/<setup.log_name>/` (e.g. `main_training/`) so a diagnostic run can never clobber the main run's resume point; adjust the paths below to your run's subdir.
+
 ```bash
 python scripts/inference.py \
-    --checkpoint models/checkpoints/ema_best.safetensors \
+    --checkpoint models/checkpoints/main_training/ema_best.safetensors \
     --prompt path/to/reference.wav \
     --text "Hello world." \
     --prompt-seconds 10        # optional: slice the reference to a 10 s window
@@ -325,7 +327,7 @@ import soundfile as sf
 from naturalspeech2.inference import load_inference_model, generate_audio
 from naturalspeech2.modules.encodec import SAMPLING_RATE
 
-model = load_inference_model("models/checkpoints/ema_best.safetensors", device="cuda")
+model = load_inference_model("models/checkpoints/main_training/ema_best.safetensors", device="cuda")
 audio, length = generate_audio(model, "path/to/reference.wav", "Hello world.", prompt_seconds=10)
 sf.write("out.wav", audio[:length], samplerate=SAMPLING_RATE)
 ```
@@ -334,8 +336,8 @@ sf.write("out.wav", audio[:length], samplerate=SAMPLING_RATE)
 
 ```bash
 python scripts/export_ema.py \
-    --checkpoint models/checkpoints/ckpt.pt \
-    --output models/checkpoints/ema_final.safetensors
+    --checkpoint models/checkpoints/main_training/ckpt.pt \
+    --output models/checkpoints/main_training/ema_final.safetensors
 ```
 
 **From Hugging Face** — once weights are published, pass a repo id instead of a path; the weights, config, and token vocabulary are downloaded and cached automatically:

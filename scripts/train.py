@@ -10,6 +10,7 @@ import random
 import logging
 import threading
 import subprocess
+from pathlib import Path
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -44,12 +45,13 @@ from naturalspeech2.eval.runner import (
 )
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper, GradientAnalyzer
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
-from naturalspeech2.paths import CHECKPOINTS_DIR, PROJECT_ROOT
+from naturalspeech2.paths import PROJECT_ROOT, run_checkpoint_dir
 from naturalspeech2.utils.ema import EMA
 from naturalspeech2.utils.utils import (
     setup_file_logger, compute_denominators,
     install_prewandb_log_buffer, flush_prewandb_log_buffer,
 )
+from naturalspeech2.utils.warning_filters import install_warning_filters
 from naturalspeech2.utils.compile_tracking import compile_kwargs, read_compile_stats, format_break_reasons
 
 logger = logging.getLogger(__name__)
@@ -113,14 +115,14 @@ def get_infinite_batches(loader, start_epoch=0, start_batch_idx=0, overfit_singl
         sampler.set_start_batch_idx(0)
 
 
-def save_resume_checkpoint(unoptimized_model, optimizer, ema, *, model_cfg_dict,
+def save_resume_checkpoint(unoptimized_model, optimizer, ema, *, ckpt_dir, model_cfg_dict,
                            token_vocabulary_size, sampling_rate, iter_num, best_val_loss,
                            warmup_iters, lr_decay_iters,
                            epoch, batch_idx, cur_kimg, wandb_log):
     """Atomic full-state checkpoint (model + optimizer + EMA + data position) for crash-recovery
-    and resume — the single source of truth for the ckpt.pt format. Written by both the periodic
-    in-loop save AND the end-of-run final save (callers pass the already-incremented `batch_idx`,
-    i.e. the index of the upcoming batch)."""
+    and resume — the single source of truth for the ckpt.pt format. Written into the run's per-
+    lineage `ckpt_dir`. Written by both the periodic in-loop save AND the end-of-run final save
+    (callers pass the already-incremented `batch_idx`, i.e. the index of the upcoming batch)."""
     checkpoint_data = {
         'model': unoptimized_model.state_dict(),
         'optimizer': optimizer.state_dict(),
@@ -140,9 +142,9 @@ def save_resume_checkpoint(unoptimized_model, optimizer, ema, *, model_cfg_dict,
     if ema is not None:
         checkpoint_data['ema'] = ema.state_dict()
 
-    ckpt_path = CHECKPOINTS_DIR / 'ckpt.pt'
-    ckpt_tmp_path = CHECKPOINTS_DIR / 'ckpt.pt.tmp'
-    ckpt_bak_path = CHECKPOINTS_DIR / 'ckpt_bak.pt'
+    ckpt_path = ckpt_dir / 'ckpt.pt'
+    ckpt_tmp_path = ckpt_dir / 'ckpt.pt.tmp'
+    ckpt_bak_path = ckpt_dir / 'ckpt_bak.pt'
 
     torch.save(checkpoint_data, ckpt_tmp_path)
     if ckpt_path.exists():
@@ -160,6 +162,7 @@ class EvalDeps:
     sampling_rate: int
     device: str
     cfg: DictConfig
+    ckpt_dir: Path                     # per-run checkpoint subdir (ema_best.safetensors write target)
     val_datasets: list                 # [dev_dataset, test_dataset] — pooled source for random_val
     val_refs: list                     # pooled dev+test held-out refs (fixed_val_refs)
     train_refs: list                   # trained-on refs from the train subset (fixed_train_refs)
@@ -583,8 +586,8 @@ def run_eval_block(
                 and losses['val']['total_loss'] < best_val_loss
             ):
                 best_val_loss = losses['val']['total_loss']
-                logger.info(f"Saving new best model to {CHECKPOINTS_DIR}")
-                atomic_save_safetensors(deps.unoptimized_model, CHECKPOINTS_DIR / 'ema_best.safetensors')
+                logger.info(f"Saving new best model to {deps.ckpt_dir}")
+                atomic_save_safetensors(deps.unoptimized_model, deps.ckpt_dir / 'ema_best.safetensors')
     finally:
         deps.unoptimized_model.train()
 
@@ -603,9 +606,12 @@ def run_eval_block(
 @hydra.main(version_base=None, config_path="../config", config_name="config")
 def train(cfg: DictConfig):
 
-    # Route warnings.warn (torch TF32/Inductor notices, etc.) through logging → they land in the log
-    # files too, matching console + wandb (Python's "once per location" filter still dedups them).
+    # Route warnings.warn through logging → anything not filtered lands in the log files too, matching
+    # console + wandb (Python's "once per location" filter still dedups). install_warning_filters drops
+    # the known-benign spam (TF32 hint, Inductor complex-op fallback, symbolic_shapes _maybe_guard_rel,
+    # phonemizer/s3prl deprecations) message-scoped → new/unknown warnings stay visible.
     logging.captureWarnings(True)
+    install_warning_filters()
 
     # Buffer every log emitted before wandb.init() (dataloaders, dataset preprocessing, model/param/
     # compile/daemon lines) so they can be replayed into the wandb Logs tab — wandb only hooks stdout
@@ -655,9 +661,11 @@ def train(cfg: DictConfig):
     log_dir = PROJECT_ROOT / cfg.setup.log_subdir
     log_name = f"{cfg.setup.log_name}.log"
     log_dir.mkdir(parents=True, exist_ok=True)
-    # Ensure save targets exist before any write. CHECKPOINTS_DIR may be absent on fresh
-    # containers (models/ from encodec setup, no checkpoints subdir yet).
-    CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)
+    # Per-lineage checkpoint subdir (CHECKPOINTS_DIR/<log_name>) — isolates this run's ckpt.pt +
+    # ema_* from every other run so a diagnostic can't clobber the main run's resume point. Created
+    # before any write (parent CHECKPOINTS_DIR may be absent on fresh containers).
+    ckpt_dir = run_checkpoint_dir(cfg.setup.log_name)
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
     setup_file_logger(logger, log_dir / log_name, root=True)
 
     # Daemon offloads eval to GPU1. overfit/gradient_analysis/aligner_trial need trainer-local eval
@@ -714,11 +722,22 @@ def train(cfg: DictConfig):
 
     # Instantiate Model
     if cfg.setup.init_from == 'scratch':
+        # Anti-clobber: refuse to overwrite a prior run's saved weights unless explicitly allowed.
+        # base.yaml defaults init_from='scratch', so a bare re-run of a crashed run (which meant to
+        # resume) would otherwise silently destroy its ckpt.pt. Diagnostic modes set
+        # allow_ckpt_overwrite=true (they own + freely re-run their isolated subdir).
+        existing = [f for f in ("ckpt.pt", "ema_best.safetensors", "ema_final.safetensors")
+                    if (ckpt_dir / f).exists()]
+        assert cfg.setup.allow_ckpt_overwrite or not existing, (
+            f"init_from='scratch' but {ckpt_dir} already holds {existing}. Refusing to clobber a "
+            f"prior run's checkpoints. To continue it, set setup.init_from=resume; to discard and "
+            f"restart from scratch, pass setup.allow_ckpt_overwrite=true (or clear the directory)."
+        )
         logger.info("Initializing a new model from scratch...")
         # Fresh run → drop the daemon's persistent best-tracking from a prior run in this dir, so the
         # ema_best gate restarts from inf (matches the in-process best_val_loss=1e9 reset). Stale weight
         # files are left untouched (never read on scratch; overwritten as the run progresses).
-        (CHECKPOINTS_DIR / "eval_state.json").unlink(missing_ok=True)
+        (ckpt_dir / "eval_state.json").unlink(missing_ok=True)
         model_cfg = model_cfg_from_omegaconf(cfg.model)
         model = NaturalSpeech2Model(
             model_cfg,
@@ -726,7 +745,7 @@ def train(cfg: DictConfig):
             sampling_rate=sampling_rate,
         )
     elif cfg.setup.init_from == 'resume':
-        ckpt_path = CHECKPOINTS_DIR / 'ckpt.pt'
+        ckpt_path = ckpt_dir / 'ckpt.pt'
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
 
         # Rebuild from the checkpoint's own cfg → architecture matches even if base.yaml drifted.
@@ -761,7 +780,7 @@ def train(cfg: DictConfig):
                     f"run's value> on the CLI."
                 )
 
-        logger.info(f"Resuming training at iteration {start_iter} from checkpoint in {CHECKPOINTS_DIR}...")
+        logger.info(f"Resuming training at iteration {start_iter} from checkpoint in {ckpt_dir}...")
 
     # Resume endpoint = max_iters; start_iter == max_iters ⇒ run already finished. An empty range does
     # no training, only a redundant re-save → assert loudly (no known use for a zero-iteration run).
@@ -844,16 +863,49 @@ def train(cfg: DictConfig):
     val_refs = []
     train_refs = []
     if cfg.wandb.log:
-        wandb.init(
+        init_kwargs = dict(
             project=cfg.wandb.project,
             name=cfg.wandb.run_name,
             group=cfg.wandb.group,
             notes=cfg.wandb.notes,
             tags=list(cfg.wandb.tags),
             config=OmegaConf.to_container(cfg, resolve=True),
-            id=resume_wandb_id,
-            resume="allow" if resume_wandb_id else None
         )
+        # Resume-overlap handling. A prior session logs every log_interval but checkpoints only every
+        # checkpoint_interval, so wandb's run.step is almost always AHEAD of the ckpt we resume from;
+        # those extra steps were logged from weights we just discarded. Plain resume='allow' silently
+        # DROPS every re-logged step <= run.step. Branch the run at the ckpt iter instead (step ==
+        # iter_num since every wandb.log passes step=iter_num):
+        #   rewind → resume_from truncates the orphaned tail in-place (one continuous run; default)
+        #   fork   → fork_from starts a NEW run branched at the ckpt (original preserved)
+        #   allow  → legacy reattach (keeps the drop) + a loud guard below
+        if resume_wandb_id:
+            branch = f"{resume_wandb_id}?_step={start_iter - 1}"
+            mode = cfg.setup.wandb_resume_mode
+            if mode == "rewind":
+                init_kwargs["resume_from"] = branch
+                logger.info(f"wandb resume mode 'rewind': truncating run {resume_wandb_id} history "
+                            f"after step {start_iter - 1} and re-logging from there.")
+            elif mode == "fork":
+                init_kwargs["fork_from"] = branch
+                logger.info(f"wandb resume mode 'fork': forking a new run from {resume_wandb_id} at "
+                            f"step {start_iter - 1} (original run preserved).")
+            elif mode == "allow":
+                init_kwargs["id"] = resume_wandb_id
+                init_kwargs["resume"] = "allow"
+            else:
+                raise ValueError(
+                    f"Unknown setup.wandb_resume_mode={mode!r}; expected 'rewind', 'fork', or 'allow'.")
+
+        wandb.init(**init_kwargs)
+
+        # Legacy reattach can't overwrite the orphaned tail → warn loudly which steps will be dropped.
+        if resume_wandb_id and cfg.setup.wandb_resume_mode == "allow" and wandb.run.step >= start_iter:
+            logger.warning(
+                f"⚠️ wandb run {resume_wandb_id} is at step {wandb.run.step} but resuming from ckpt "
+                f"iter {start_iter - 1}: re-logged steps {start_iter}..{wandb.run.step} will be DROPPED "
+                f"client-side (non-monotonic). Set setup.wandb_resume_mode=rewind to overwrite them."
+            )
 
         # Replay the buffered pre-init logs into the now-hooked stdout → wandb Logs tab, in original
         # order, just ahead of the live stream (sys.stdout read here to catch wandb's wrapped stream).
@@ -986,6 +1038,7 @@ def train(cfg: DictConfig):
                     sampling_rate=sampling_rate,
                     device=device,
                     cfg=cfg,
+                    ckpt_dir=ckpt_dir,
                     val_datasets=[dev_dataset, test_dataset],
                     val_refs=val_refs,
                     train_refs=train_refs,
@@ -1150,10 +1203,11 @@ def train(cfg: DictConfig):
                     prev_unique_graphs = ug
                 eval_ran_since_graph_check = False
 
-            # Gradient-analysis metrics: compute ONCE + accumulate here, OUTSIDE the wandb block.
-            # This mode REQUIRES wandb.log=false (resume re-opens the train_5M run, already at its
-            # last step → live logs would be dropped as non-monotonic), so the end-of-run summary
-            # must NOT depend on the wandb path. `analyzer is not None` ⟹ already in the window.
+            # Gradient-analysis metrics: compute ONCE + accumulate here, OUTSIDE the wandb block, so
+            # the end-of-run summary survives regardless of wandb (it's printed via logger). When this
+            # mode is bolted onto a resumed run, setup.wandb_resume_mode (default 'rewind') now keeps
+            # live logs from being dropped, but the summary stays wandb-independent on principle.
+            # `analyzer is not None` ⟹ already in the window.
             grad_norms = cos_sims = None
             if analyzer is not None:
                 grad_norms, cos_sims = analyzer.compute_metrics()
@@ -1245,7 +1299,7 @@ def train(cfg: DictConfig):
             and iter_num % cfg.setup.checkpoint_interval == 0
         ):
             save_resume_checkpoint(
-                unoptimized_model, optimizer, ema,
+                unoptimized_model, optimizer, ema, ckpt_dir=ckpt_dir,
                 model_cfg_dict=model_cfg_dict, token_vocabulary_size=token_vocabulary_size,
                 sampling_rate=sampling_rate, iter_num=iter_num, best_val_loss=best_val_loss,
                 warmup_iters=cfg.setup.warmup_iters, lr_decay_iters=cfg.setup.lr_decay_iters,
@@ -1325,6 +1379,7 @@ def train(cfg: DictConfig):
             sampling_rate=sampling_rate,
             device=device,
             cfg=cfg,
+            ckpt_dir=ckpt_dir,
             val_datasets=[dev_dataset, test_dataset],
             val_refs=val_refs,
             train_refs=train_refs,
@@ -1345,7 +1400,7 @@ def train(cfg: DictConfig):
     # continue training. Gated like the periodic save so diagnostic modes (interval=0) stay write-free.
     if cfg.setup.checkpoint_interval > 0:
         final_ckpt_path = save_resume_checkpoint(
-            unoptimized_model, optimizer, ema,
+            unoptimized_model, optimizer, ema, ckpt_dir=ckpt_dir,
             model_cfg_dict=model_cfg_dict, token_vocabulary_size=token_vocabulary_size,
             sampling_rate=sampling_rate, iter_num=cfg.setup.max_iters - 1, best_val_loss=best_val_loss,
             warmup_iters=cfg.setup.warmup_iters, lr_decay_iters=cfg.setup.lr_decay_iters,
@@ -1355,7 +1410,7 @@ def train(cfg: DictConfig):
         logger.info(f"Saved final crash-recovery checkpoint (iter {cfg.setup.max_iters - 1}) to {final_ckpt_path}")
 
     if cfg.setup.final_safetensors:
-        final_path = CHECKPOINTS_DIR / 'ema_final.safetensors'
+        final_path = ckpt_dir / 'ema_final.safetensors'
         with ema.swap_in(unoptimized_model) if ema is not None else nullcontext():
             atomic_save_safetensors(unoptimized_model, final_path)
         logger.info(f"Saved final EMA weights for offline inference to {final_path}")

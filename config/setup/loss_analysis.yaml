@@ -4,6 +4,8 @@ defaults:
 
 max_iters: 30000
 
+allow_ckpt_overwrite: True       # diagnostic: freely re-run + overwrite its own checkpoint subdir
+
 loss_analysis_run: True
 
 log_subdir: "logs/experiments"

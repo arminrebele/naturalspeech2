@@ -28,8 +28,9 @@ from naturalspeech2.eval.runner import (
     run_decoupled_eval,
     atomic_save_safetensors,
 )
-from naturalspeech2.paths import CHECKPOINTS_DIR
+from naturalspeech2.paths import run_checkpoint_dir
 from naturalspeech2.utils.utils import setup_file_logger, generate_dummy_batch
+from naturalspeech2.utils.warning_filters import install_warning_filters
 
 logger = logging.getLogger("eval_daemon")
 
@@ -105,6 +106,9 @@ def build(run_dir: Path):
 
     return {
         "cfg": cfg, "device": device, "sr": sr,
+        # Per-run checkpoint subdir — same derivation as the trainer (run_checkpoint_dir(log_name))
+        # so both write ema_best + eval_state into the same lineage dir.
+        "ckpt_dir": run_checkpoint_dir(cfg.setup.log_name),
         "model": model, "loss_model": loss_model, "loss_wrapper": loss_wrapper,
         "train_loader": train_loader, "dev_loader": dev_loader, "test_loader": test_loader,
         "val_datasets": [dev_dataset, test_dataset], "val_refs": val_refs, "train_refs": train_refs,
@@ -168,8 +172,8 @@ def evaluate_snapshot(ctx: dict, snap: dict, best_val_loss: float) -> float:
     if report.new_best:
         best_val_loss = report.best_val_loss
         # model currently holds the EMA shadow (loaded last in run_decoupled_eval) → save as ema_best.
-        atomic_save_safetensors(ctx["model"], CHECKPOINTS_DIR / "ema_best.safetensors")
-        ipc.save_eval_state(CHECKPOINTS_DIR / "eval_state.json",
+        atomic_save_safetensors(ctx["model"], ctx["ckpt_dir"] / "ema_best.safetensors")
+        ipc.save_eval_state(ctx["ckpt_dir"] / "eval_state.json",
                             {"best_val_loss": best_val_loss, "best_step": step})
         logger.info(f"New best val loss {best_val_loss:.4f} at step {step} → wrote ema_best.")
     ipc.write_results(run_dir=ctx["run_dir"], report=report)
@@ -185,14 +189,17 @@ def main():
     run_dir = Path(args.run_dir)
     log_dir = Path(args.log_dir)
 
-    CHECKPOINTS_DIR.mkdir(parents=True, exist_ok=True)   # eval_state.json (best-tracking) still lives here
     setup_file_logger(logger, log_dir / "eval_daemon.log", root=True)
     logging.captureWarnings(True)   # warnings.warn → logging → eval_daemon.log (matches console/wandb)
+    install_warning_filters()       # drop the same known-benign torch/phonemizer/s3prl spam as the trainer
     logger.info(f"Eval daemon starting; run_dir={run_dir}")
 
     ctx = build(run_dir)
     ctx["run_dir"] = run_dir
-    best_val_loss = ipc.load_eval_state(CHECKPOINTS_DIR / "eval_state.json").get("best_val_loss", float("inf"))
+    # eval_state.json (best-tracking) + ema_best live in this run's lineage subdir (derived in build()).
+    ckpt_dir = ctx["ckpt_dir"]
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    best_val_loss = ipc.load_eval_state(ckpt_dir / "eval_state.json").get("best_val_loss", float("inf"))
     poll = ctx["cfg"].setup.eval_daemon.poll_interval_s
     logger.info(f"Eval daemon ready (best_val_loss={best_val_loss}); watching for snapshots.")
 

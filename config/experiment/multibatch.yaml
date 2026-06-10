@@ -22,6 +22,7 @@ dataset:
 
 setup:
   max_iters: 20000               # ISR + warmup_ratio (0.11 → 2200) inherited from base — same schedule type as the full run
+  allow_ckpt_overwrite: true     # probe re-run often across the train-size ladder → freely overwrite its own subdir
   log_interval: 25               # finer than base's 100 — watch early generalization
   audio_tables: [fixed_train_refs, fixed_val_refs]   # trained-on (train slice) + held-out (dev+test pooled), both stable across runs
   inference_data_loss_sweep: []  # overfit-only / teacher-forced; blind to conditioning, unused here

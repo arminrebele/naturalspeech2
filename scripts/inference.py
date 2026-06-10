@@ -13,6 +13,7 @@ import soundfile
 from naturalspeech2.inference import MAX_SECONDS_PER_PHONEME, generate_audio, load_inference_model
 from naturalspeech2.modules.encodec import SAMPLING_RATE
 from naturalspeech2.paths import DATA_DIR
+from naturalspeech2.utils.warning_filters import install_warning_filters
 
 
 DEFAULT_OUTPUT_DIR = DATA_DIR / "inference_outputs"
@@ -24,9 +25,10 @@ def _default_output_path() -> Path:
 
 
 def main():
+    install_warning_filters()   # silence known-benign phonemizer / torch spam for clean CLI output
     parser = argparse.ArgumentParser(description="Generate audio from a NaturalSpeech2 checkpoint.")
     parser.add_argument("--checkpoint", type=str, required=True,
-                        help="Local .safetensors path (e.g. checkpoints/ema_best.safetensors) "
+                        help="Local .safetensors path (e.g. checkpoints/main_training/ema_best.safetensors) "
                              "or a Hugging Face repo id (downloaded on demand).")
     parser.add_argument("--prompt", type=Path, required=True,
                         help="Reference voice wav file (any sample rate; auto-resampled).")

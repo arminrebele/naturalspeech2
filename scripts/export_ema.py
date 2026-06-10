@@ -7,11 +7,11 @@ inference-loadable safetensors format — the one post-loop file artifact a part
 build the model from the checkpoint's own cfg, overlay EMA, save. No data, no GPU, no eval — output
 matches a finished run's ema_final byte-for-byte (same swap_in + save path as train.py).
 
-Example:
+Example (checkpoints live in a per-run subdir, models/checkpoints/<setup.log_name>/):
     # in container
     python scripts/export_ema.py \
-        --checkpoint models/checkpoints/ckpt.pt \
-        --output models/checkpoints/ema_final.safetensors
+        --checkpoint models/checkpoints/main_training/ckpt.pt \
+        --output models/checkpoints/main_training/ema_final.safetensors
 """
 import argparse
 from pathlib import Path
@@ -29,11 +29,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--checkpoint", type=Path, default=CHECKPOINTS_DIR / "ckpt.pt",
-        help="Crash-recovery checkpoint to read EMA weights from (default: checkpoints/ckpt.pt).",
+        help="Crash-recovery checkpoint to read EMA weights from. Checkpoints live per-run under "
+             "models/checkpoints/<setup.log_name>/, so pass e.g. checkpoints/main_training/ckpt.pt.",
     )
     parser.add_argument(
         "--output", type=Path, default=CHECKPOINTS_DIR / "ema_final.safetensors",
-        help="Destination safetensors path (default: checkpoints/ema_final.safetensors).",
+        help="Destination safetensors path (e.g. checkpoints/main_training/ema_final.safetensors).",
     )
     args = parser.parse_args()
 

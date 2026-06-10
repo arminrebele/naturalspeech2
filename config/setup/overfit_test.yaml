@@ -8,6 +8,8 @@ max_iters: 2000
 warmup_iters: 0                  # explicit absolute override of base's warmup_ratio (no warmup; cosine, since ISR asserts warmup>0)
 # lr_decay_iters now inherits base (= ${setup.max_iters})
 
+allow_ckpt_overwrite: True       # diagnostic: freely re-run + overwrite its own checkpoint subdir
+
 overfit_single_batch: True
 
 log_interval: 10
