@@ -36,6 +36,10 @@ class NaturalSpeech2Model(nn.Module):
         self.min_target_frames = int(cfg.min_target_seconds * sampling_rate / ENCODER_HOP_LENGTH)
         self.rope_max_seq_len = cfg.rope_max_seq_len   # phoneme/prompt seq ceiling (RoPE cache) — inference-boundary guard
 
+        # Stop-gradient toggles (plain bools → torch.compile specializes the branch, no graph break).
+        self.detach_aligner_input = cfg.detach_aligner_input
+        self.detach_duration_predictor_input = cfg.detach_duration_predictor_input
+
         self.encodec = EncodecWrapper(
             bandwidth=cfg.encodec.bandwidth,
             latent_stats_path=cfg.encodec.latent_stats_path,
@@ -232,11 +236,17 @@ class NaturalSpeech2Model(nn.Module):
             phoneme_tokens_mask,
         )
 
+        # Stop-gradient (parallel-TTS decoupling): the aligner losses (forward_sum/bin) train the
+        # aligner net but not the shared phoneme encoder. The encoder still learns via the diffusion
+        # condition path below — _expand_phoneme_encodings consumes the un-detached phoneme_encodings.
+        aligner_phoneme_encodings = (
+            phoneme_encodings.detach() if self.detach_aligner_input else phoneme_encodings
+        )
         durations, path_indices, posterior_label_logprobs, posterior_label_logits = self.aligner(
             audio_encodings,
             frame_mask,
             frame_lengths,
-            phoneme_encodings,
+            aligner_phoneme_encodings,
             phoneme_tokens_mask,
             phoneme_tokens_lengths,
         )
@@ -268,8 +278,13 @@ class NaturalSpeech2Model(nn.Module):
         )
         prompt_encodings_mask = prompt_latents_mask         # [B, Fp, 1]
 
+        # Stop-gradient (Glow-TTS sg[·] on the duration input): the duration loss trains the predictor,
+        # not the phoneme encoder. prompt_encodings stay attached (speaker-conditional durations).
+        duration_phoneme_encodings = (
+            phoneme_encodings.detach() if self.detach_duration_predictor_input else phoneme_encodings
+        )
         predicted_log_durations = self.duration_predictor(  # [B, P]
-            phoneme_encodings,
+            duration_phoneme_encodings,
             phoneme_tokens_mask,
             prompt_encodings,
             prompt_encodings_mask,

@@ -193,6 +193,13 @@ class ModelConfig:
     prompt_seconds: float = 3.0
     min_target_seconds: float = 1.0
 
+    # Stop-gradient on the phoneme-encoder → aligner / duration-predictor edges (parallel-TTS
+    # decoupling: Glow-TTS sg[·] on the duration input, RAD-TTS standalone aligner). The aligner/
+    # duration losses then train only their own heads, not the shared phoneme encoder (which keeps
+    # learning via the diffusion condition path). Default on. See config/model/base.yaml.
+    detach_aligner_input: bool = True
+    detach_duration_predictor_input: bool = True
+
     encodec: EncodecConfig = field(default_factory=EncodecConfig)
     mel: MelConfig = field(default_factory=MelConfig)
     phoneme_encoder: PhonemeEncoderConfig = field(default_factory=PhonemeEncoderConfig)

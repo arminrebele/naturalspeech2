@@ -6,6 +6,14 @@ rope_max_seq_len: 3000
 prompt_seconds: 3.0        # fixed prompt length at training; random start position within the clip
 min_target_seconds: 1.0    # safety net — minimum target duration preserved on short clips
 
+# Stop-gradient on the phoneme-encoder → aligner / duration-predictor edges (parallel-TTS decoupling:
+# Glow-TTS sg[·] on the duration input; RAD-TTS standalone aligner). The aligner + duration losses then
+# train only their own heads, not the shared phoneme encoder — which keeps learning via the diffusion
+# condition path. Motivation: measured bin+duration grad on the encoder ≫ diffusion grad (~30–300×),
+# and bin's gradient is unstable (Viterbi churn). Set false to A/B the coupled (paper-divergent) form.
+detach_aligner_input: true
+detach_duration_predictor_input: true
+
 # Encodec (frozen audio codec)
 encodec:
   # kbps → RVQ books summed into z₀ (0.75/book): 1.5→2 · 3→4 · 6→8 · 12→16 · 24→32.
