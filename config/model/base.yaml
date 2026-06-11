@@ -111,7 +111,13 @@ ema:
   enabled: true
   halflife_kimg: 50.0
 
-# Loss Balancing Weights
+# Loss Balancing Weights — paper states only ce_rvq = 0.1, no other weight (terms summed as-is;
+# aligner/voicing are our paper-silent additions). Kept: gradient analysis shows aligned diffusion
+# trio (cos 0.7–0.95), near-orthogonal rest → no conflicts; magnitude ≠ impact (near-equal-magnitude
+# terms differ ~30× in shared-param grad norm) → no magnitude equalization. Accepted asymmetries:
+# bin+duration dominate the phoneme encoder (grad ~8 vs ≤0.15 from diffusion terms); fs↔bin
+# cos ≈ −0.6 = structural CTC-spread↔sharpening tug (Optuna/overfit-validated). Deviate only on
+# measured pathology (conflict or starvation): warmup first, then static down-weight.
 loss_weights:
   duration_predictor_loss: 1.0
   pitch_predictor_loss: 1.0
@@ -126,11 +132,12 @@ loss_weights:
     score_loss: 1.0
     ce_rvq_loss: 0.1
 
-# Loss Balance Targets — desired contribution *share* of each leaf. Read ONLY by the loss-analysis
-# run (+experiment=loss_analysis), which prints suggested loss_weights from these + measured raw
-# magnitudes; never read during training. Flat leaves and each group's group_target share one
-# top-level scale; sub-targets split within the group. Suggested weights anchored so data_loss=1.0
-# (preserves the diffusion gradient scale → paper LR transfers).
+# Loss Balance Targets — what-if DIAGNOSTIC only, not the adopted policy (weights above follow the
+# paper + gradient analysis; don't paste the suggestion in blindly). Read ONLY by the loss-analysis
+# run (+experiment=loss_analysis), which prints the loss_weights that would equalize contribution
+# shares from these + measured raw magnitudes; never read during training. Flat leaves and each
+# group's group_target share one top-level scale; sub-targets split within the group. Suggestion
+# anchored so data_loss=1.0 (preserves the diffusion gradient scale → paper LR transfers).
 loss_balance_targets:
   duration_predictor_loss: 1.0
   pitch_predictor_loss: 1.0

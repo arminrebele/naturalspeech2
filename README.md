@@ -231,9 +231,9 @@ python scripts/train.py +experiment=overfit_test
 
 **3. Loss-Analysis**
 
-Since our Loss comprises multiple individual Loss-Terms, we run a few iterations of the [Train-Loop](scripts/train.py) to estimate their magnitude. 
+Since our Loss comprises multiple individual Loss-Terms, we run a few iterations of the [Train-Loop](scripts/train.py) to estimate their raw magnitudes — i.e. how the total loss is composed.
 
-We then scale the Loss-Terms accordingly, so they influence the shared parameters equally (actually we might still want to introduce intentional biases towards individual Terms afterwards).
+On weighting itself the paper is almost silent: the only weight it states is λ_ce-rvq = 0.1; all other terms are summed as-is (and the aligner / voicing terms are our additions — they don't exist there). We keep that implied scheme — every weight 1.0, ce_rvq 0.1 — as the default, and read the measured magnitudes as a diagnostic rather than as targets to equalize: magnitude proved a poor proxy for impact in our runs (two terms of near-identical magnitude differed ~30× in gradient norm on shared parameters). The run additionally prints the weights that *would* equalize contributions (anchored at data_loss = 1.0, which preserves the diffusion gradient scale so the paper's learning rate transfers) — a what-if reference, not a recipe.
 
 ```bash
 python scripts/train.py +experiment=loss_analysis
@@ -241,9 +241,9 @@ python scripts/train.py +experiment=loss_analysis
 
 **4. Gradient-Analysis**
 
-In order to verify, if the Loss-Balancing from the previous step actually worked, we run the [Train-Loop](scripts/train.py) again, but perform the backward passes individually for each Loss-Term. This allows us to compare the L2-norms of the Loss-Term-gradients of shared parameters, which acts as our measure for impact on the model. 
+The actual decision instrument for the weighting. We run the [Train-Loop](scripts/train.py) again, but perform the backward passes individually for each (weighted) Loss-Term. This allows us to compare the L2-norms of the Loss-Term-gradients of shared parameters, which acts as our measure for impact on the model.
 
-We additionally calculate cosine-similarities between the gradients, to make sure that individual Loss-Terms do not compete with each other. If that were the case, we would need to introduce further measures, like slowly warming up those specific Loss-Terms.
+We additionally calculate cosine-similarities between the gradients to expose competing Loss-Terms. A weight deviates from its default only on a measured pathology: a term that conflicts with others (negative cosine) while dominating them in norm, or a term being starved on a parameter region it must train. Orthogonal pulls (cosine ≈ 0) of different sizes are accepted — they coexist rather than fight. Escalation order: slowly warming up the offending term (the built-in 0.1×→1.0 ramp), then a static down-weight.
 
 ```bash
 python scripts/train.py +experiment=gradient_analysis

@@ -352,8 +352,10 @@ def compute_suggested_loss_weights(
     targets: dict,
     anchor: str = "data_loss",
 ) -> dict:
-    """Suggest loss_weights so each leaf's weighted contribution matches a target share,
-    given the raw per-leaf magnitudes a loss-analysis run measured.
+    """Magnitude-equalizing loss_weights suggestion — what-if DIAGNOSTIC, not the adopted policy
+    (adopted: paper defaults + gradient-analysis veto; see README §5 + config/model/base.yaml).
+    Computes weights so each leaf's weighted contribution matches a target share, given the raw
+    per-leaf magnitudes a loss-analysis run measured.
 
     targets mirrors loss_weights: flat leaves carry a scalar; groups carry group_target + per-sub
     targets. Desired share:
@@ -363,7 +365,7 @@ def compute_suggested_loss_weights(
     the anchor's gradient scale (data_loss → diffusion path) so the paper LR transfers.
 
     Two-level like LossWrapper: sub_weight = sub_target / magnitude; group_weight = group share ×
-    anchor scale. Returns a nested dict shaped like loss_weights, ready to paste into config/model.
+    anchor scale. Returns a nested dict shaped like loss_weights.
     """
     suggested: dict = {}
     eff_unscaled: dict[str, float] = {}   # leaf -> pre-anchor effective weight
@@ -1397,7 +1399,7 @@ def train(cfg: DictConfig):
         targets = OmegaConf.to_container(cfg.model.loss_balance_targets, resolve=True)
         magnitudes = {k: v / loss_analysis_steps_counted for k, v in loss_analysis_accumulators.items()}
         suggested = compute_suggested_loss_weights(magnitudes, targets, anchor="data_loss")
-        logger.info("Suggested loss_weights (anchor: data_loss = 1.0) — paste into config/model:")
+        logger.info("Magnitude-equalizing loss_weights (anchor: data_loss = 1.0) — what-if diagnostic, NOT the adopted policy (see README §5):")
         for key, val in suggested.items():
             if isinstance(val, dict):
                 logger.info(f"  {key}:")
