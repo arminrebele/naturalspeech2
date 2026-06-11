@@ -117,7 +117,9 @@ ema:
 # terms differ ~30× in shared-param grad norm) → no magnitude equalization. Accepted asymmetries:
 # bin+duration dominate the phoneme encoder (grad ~8 vs ≤0.15 from diffusion terms); fs↔bin
 # cos ≈ −0.6 = structural CTC-spread↔sharpening tug (Optuna/overfit-validated). Deviate only on
-# measured pathology (conflict or starvation): warmup first, then static down-weight.
+# measured pathology (conflict or starvation): warmup first, then static down-weight. Measurements
+# are snapshots of the then-current arch/hparams, not constants — re-run both analyses after any
+# magnitude-shifting change before trusting the no-pathology verdict again.
 loss_weights:
   duration_predictor_loss: 1.0
   pitch_predictor_loss: 1.0
