@@ -29,10 +29,23 @@ compile:
   dynamic: null
   mode: default
 
-max_iters: 300000
-warmup_ratio: 0.11                   # warmup length as a fraction of max_iters (0.11·300k ≈ 33k; paper: 32k). Canonical knob.
+# max_iters = planned/expected run length (paper 300k × batch ratio 96/80 ≈ 360k). The LR-schedule
+# reference (warmup + cosine decay horizon) AND the early-stop floor (never stop before it). Diagnostic
+# modes override it and run to exactly this many steps (early_stopping.enabled stays false below).
+max_iters: 360000
+warmup_ratio: 0.11                   # warmup as a fraction of max_iters (0.11·360k ≈ 40k; paper 32k × 96/80 ≈ 38k). Canonical knob.
 warmup_iters: null                   # absolute override; null → round(warmup_ratio · max_iters), resolved at entry. Resume restores the ckpt's pinned value (immune to max_iters changes).
 lr_decay_iters: ${setup.max_iters}   # cosine decay horizon — tracks max_iters; ISR ignores it. Resume restores the ckpt's pinned value.
+
+# Early stopping. enabled=false (default → diagnostic/experiment modes + the canonical no-arg run): loop
+# runs exactly max_iters. enabled=true (opt in at launch for the extended run): past max_iters the loop
+# free-rides ISR with NO fixed upper bound, ending only once EMA dev loss hasn't improved for
+# patience_iters — the same best_step that gates ema_best, persisted to eval_state.json. Stop = clean loop
+# break → epilogue writes ema_final + final resume ckpt + drains the daemon (unlike a manual interrupt).
+# Floor is max_iters: never stops before the planned length.
+early_stopping:
+  enabled: false
+  patience_iters: 50000
 
 # Mode flags — branch training mechanics, not the eval/log/save surface
 overfit_single_batch: False

@@ -3,6 +3,7 @@ import sys
 import json
 import time
 import math
+import itertools
 import queue
 import signal
 import ctypes
@@ -623,6 +624,10 @@ def run_eval_block(
                 best_val_loss = losses['val']['total_loss']
                 logger.info(f"Saving new best model to {deps.ckpt_dir}")
                 atomic_save_safetensors(deps.unoptimized_model, deps.ckpt_dir / 'ema_best.safetensors')
+                # Mirror the daemon's eval_state write so single-GPU runs are early-stoppable (the early-stop
+                # block reads best_step from here). Redundant no-op on the 2-GPU path (daemon already writes it).
+                ipc.save_eval_state(deps.ckpt_dir / 'eval_state.json',
+                                    {"best_val_loss": best_val_loss, "best_step": deps.iter_num})
     finally:
         deps.unoptimized_model.train()
 
@@ -802,9 +807,10 @@ def train(cfg: DictConfig):
         model_cfg_dict = checkpoint['model_cfg']
         start_batch_idx = checkpoint['batch_idx'] # Already points to the next batch due to pre-fetch
 
-        # warmup_iters/lr_decay_iters resolve from max_iters at entry; resume raises max_iters to extend the
-        # run, which would rescale + step-jump the LR (ISR: peak·√(warmup/it)). Pin to the checkpoint's values
-        # for seamless continuation. Pre-fix ckpts lack the keys → warn, keep cfg value.
+        # warmup_iters/lr_decay_iters resolve from max_iters (the planned length) at entry. Pin them to the
+        # checkpoint's values on resume so extending the run (early_stopping.enabled=true, or raising
+        # max_iters) — or any drift in max_iters/warmup_ratio — can't rescale or step-jump the LR (ISR:
+        # peak·√(warmup/it)). Pre-fix ckpts lack the keys → warn, keep cfg value.
         for k in ('warmup_iters', 'lr_decay_iters'):
             if k in checkpoint:
                 cfg.setup[k] = checkpoint[k]
@@ -817,11 +823,13 @@ def train(cfg: DictConfig):
 
         logger.info(f"Resuming training at iteration {start_iter} from checkpoint in {ckpt_dir}...")
 
-    # Resume endpoint = max_iters; start_iter == max_iters ⇒ run already finished. An empty range does
-    # no training, only a redundant re-save → assert loudly (no known use for a zero-iteration run).
-    assert start_iter < cfg.setup.max_iters, (
-        f"Nothing to train: start_iter={start_iter} >= setup.max_iters={cfg.setup.max_iters}; "
-        f"on resume, raise setup.max_iters above the checkpoint's iteration to continue. To "
+    # Endpoint when early stopping is OFF = max_iters; start_iter == max_iters ⇒ run already finished, an
+    # empty range only re-saves → assert loudly (no known use for a zero-iteration run). With early stopping
+    # ON the loop is unbounded (stops on a dev-loss plateau), so resuming at/after max_iters is valid.
+    assert cfg.setup.early_stopping.enabled or start_iter < cfg.setup.max_iters, (
+        f"Nothing to train: start_iter={start_iter} >= setup.max_iters={cfg.setup.max_iters} and "
+        f"early_stopping.enabled=false; on resume, raise setup.max_iters above the checkpoint's iteration "
+        f"(or set setup.early_stopping.enabled=true to train on until the dev loss plateaus). To "
         f"regenerate ema_final.safetensors from a finished/partial run instead, use scripts/export_ema.py."
     )
 
@@ -1031,7 +1039,15 @@ def train(cfg: DictConfig):
     # the same 5 objects forever, so caching lookahead_queue[0] once gives a stable ref batch.
     overfit_ref_batch = None
 
-    for iter_num in range(start_iter, cfg.setup.max_iters):
+    # early_stopping.enabled → unbounded loop (the early-stop block below breaks on a dev-loss plateau, never
+    # before max_iters); else the planned fixed-length run. itertools.count: no giant range, "no upper bound"
+    # explicit. No `continue` in the body, so the for-over-count form is exactly the old loop, just unbounded.
+    iter_space = (
+        itertools.count(start_iter)
+        if cfg.setup.early_stopping.enabled
+        else range(start_iter, cfg.setup.max_iters)
+    )
+    for iter_num in iter_space:
 
         # Apply LR scheduling
         lr = get_lr(iter_num, cfg) if cfg.training.decay_lr else cfg.training.learning_rate
@@ -1342,6 +1358,29 @@ def train(cfg: DictConfig):
                 cur_kimg=cur_kimg, wandb_log=cfg.wandb.log,
             )
 
+        # -----------------------------
+        # Early stopping (enabled runs only — unbounded loop past max_iters)
+        # -----------------------------
+        # Stop once EMA dev loss hasn't improved for patience_iters. best_step = same signal gating ema_best
+        # (daemon eval_daemon.py / in-process run_eval_block), persisted to eval_state.json, fresh by now
+        # (daemon drain + in-process eval both ran earlier this iter). break → epilogue (ema_final + final
+        # ckpt + clean daemon drain), unlike a manual interrupt. iter_num >= max_iters floor: never before
+        # the planned length. Inert when enabled=false (loop ends at max_iters; the JSON is never read).
+        if (
+            cfg.setup.early_stopping.enabled
+            and iter_num >= cfg.setup.max_iters
+            and iter_num % cfg.setup.log_interval == 0
+        ):
+            best_step = ipc.load_eval_state(ckpt_dir / "eval_state.json")["best_step"]
+            stale = iter_num - best_step
+            if best_step >= 0 and stale >= cfg.setup.early_stopping.patience_iters:
+                logger.info(
+                    f"Early stop @ iter {iter_num}: EMA dev loss hasn't improved in {stale} steps "
+                    f"(best @ {best_step}, patience {cfg.setup.early_stopping.patience_iters}). "
+                    f"Finishing cleanly."
+                )
+                break
+
     # -----------------------------
     # Loss Analysis Summary Dump
     # -----------------------------
@@ -1390,21 +1429,24 @@ def train(cfg: DictConfig):
     # -----------------------------
     # Final eval pass + inference-iterable safetensors save
     # -----------------------------
-    # Final eval at iter_num=max_iters. In-process: run the eval block under EMA. Daemon: write a
-    # final snapshot + signal shutdown → the daemon runs the final eval (+ ema_best), then drain it.
-    # ema_final weights are written by the trainer below regardless (no dependency on the daemon).
+    # Final eval at iter_num=final_iter (one past the last trained step). In-process: run the eval block
+    # under EMA. Daemon: write a final snapshot + signal shutdown → daemon runs the final eval (+ ema_best),
+    # then drain it. ema_final is written by the trainer below regardless (no daemon dep).
+    # final_iter == max_iters on a full planned run; == break+1 on an early stop. Both loop exits (range
+    # exhaustion when disabled, early-stop break when enabled) leave iter_num at the last trained step.
+    final_iter = iter_num + 1
     if use_eval_daemon:
         logger.info("Signaling eval daemon shutdown + final eval...")
         live_cpu, shadow_cpu = _clone_trainable_cpu(unoptimized_model, ema)
-        snapshot_writer.submit(cfg.setup.max_iters, live_cpu, shadow_cpu)
+        snapshot_writer.submit(final_iter, live_cpu, shadow_cpu)
         snapshot_writer.close()                       # flush the final snapshot to disk first
-        ipc.signal_shutdown(eval_run_dir, cfg.setup.max_iters)
-        _await_daemon_final_eval(daemon_proc, eval_run_dir, cfg.setup.max_iters)
+        ipc.signal_shutdown(eval_run_dir, final_iter)
+        _await_daemon_final_eval(daemon_proc, eval_run_dir, final_iter)
         _drain_and_log(eval_run_dir, incremental_audio_tables, cfg.wandb.log)
     else:
         # swap_in writes the final safetensors below separately (non-reentrant → can't nest the two).
         final_eval_deps = EvalDeps(
-            iter_num=cfg.setup.max_iters,
+            iter_num=final_iter,
             unoptimized_model=unoptimized_model,
             compiled_model=model,
             sampling_rate=sampling_rate,
@@ -1427,18 +1469,19 @@ def train(cfg: DictConfig):
     # Final full-state checkpoint at the endpoint. The periodic save only fires on
     # checkpoint_interval multiples, so without this a COMPLETED run could only resume from the
     # last multiple — losing up to checkpoint_interval steps of model+optimizer+EMA+data state
-    # (e.g. a 40000-step run last checkpointed at 35000). Resume from here by raising max_iters to
-    # continue training. Gated like the periodic save so diagnostic modes (interval=0) stay write-free.
+    # (e.g. a 40000-step run last checkpointed at 35000). Resume from here (early_stopping.enabled=true, or
+    # a higher max_iters) to continue training. Gated like the periodic save so diagnostic modes
+    # (interval=0) stay write-free.
     if cfg.setup.checkpoint_interval > 0:
         final_ckpt_path = save_resume_checkpoint(
             unoptimized_model, optimizer, ema, ckpt_dir=ckpt_dir,
             model_cfg_dict=model_cfg_dict, token_vocabulary_size=token_vocabulary_size,
-            sampling_rate=sampling_rate, iter_num=cfg.setup.max_iters - 1, best_val_loss=best_val_loss,
+            sampling_rate=sampling_rate, iter_num=iter_num, best_val_loss=best_val_loss,
             warmup_iters=cfg.setup.warmup_iters, lr_decay_iters=cfg.setup.lr_decay_iters,
             epoch=current_epoch, batch_idx=current_batch_idx + 1, cur_kimg=cur_kimg,
             wandb_log=cfg.wandb.log,
         )
-        logger.info(f"Saved final crash-recovery checkpoint (iter {cfg.setup.max_iters - 1}) to {final_ckpt_path}")
+        logger.info(f"Saved final crash-recovery checkpoint (iter {iter_num}) to {final_ckpt_path}")
 
     if cfg.setup.final_safetensors:
         final_path = ckpt_dir / 'ema_final.safetensors'
