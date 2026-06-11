@@ -36,7 +36,10 @@ class NaturalSpeech2Model(nn.Module):
         self.min_target_frames = int(cfg.min_target_seconds * sampling_rate / ENCODER_HOP_LENGTH)
         self.rope_max_seq_len = cfg.rope_max_seq_len   # phoneme/prompt seq ceiling (RoPE cache) — inference-boundary guard
 
-        self.encodec = EncodecWrapper(latent_stats_path=cfg.encodec.latent_stats_path)
+        self.encodec = EncodecWrapper(
+            bandwidth=cfg.encodec.bandwidth,
+            latent_stats_path=cfg.encodec.latent_stats_path,
+        )
 
         self.log_mel_spectrogram_generator = LogMelSpectrogramGenerator(
             sampling_rate=sampling_rate,

@@ -398,7 +398,7 @@ class DiffusionModel(nn.Module):
         #   r_j     = ẑ₀ − Σᵢ<ⱼ eᵢ              (partial residual, GT earlier codes — no error cascade)
         #   logit_k = 2·r_j·Cⱼ[k] − ‖Cⱼ[k]‖²    (= −‖r−C[k]‖² + const; const drops under softmax)
         #   loss_j  = CE(softmax_k(logit), codes_j)
-        # Static Python loop over Q=32, vectorized over (B, Ft, K). Running cumsum avoids a full
+        # Static Python loop over the Q books in target codes, vectorized over (B, Ft, K). Running cumsum avoids a full
         # [Q, B, Ft, latent_dim] residual tensor. Unnormalize ẑ₀ to raw codebook space first
         # (codebook embeds are raw Encodec; the residual interpretation only holds there).
         # autocast-disabled bracket: einsum is an autocast op, so .float() inputs alone would still

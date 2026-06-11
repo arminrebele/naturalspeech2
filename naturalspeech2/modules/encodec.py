@@ -12,17 +12,23 @@ from naturalspeech2.paths import ENCODEC_24KHZ_DIR, PROJECT_ROOT
 ENCODER_HOP_LENGTH = 320
 LATENT_DIM = 128  # Encodec 24kHz quantizer output dimension
 SAMPLING_RATE = 24000  # facebook/encodec_24khz rate (paper used 16 kHz; 24 kHz forced by codec)
+CODEBOOK_KBPS = 0.75  # per RVQ book: log2(1024) bits × 75 Hz / 1000
+
+
+def num_quantizers_for_bandwidth(bandwidth: float) -> int:
+    # 1.5→2, 3→4, 6→8, 12→16, 24→32 books. Mirrors HF EncodecResidualVectorQuantizer.
+    return int(bandwidth / CODEBOOK_KBPS)
 
 
 class EncodecWrapper(nn.Module):
     def __init__(
         self,
-        bandwidth: int = 24,
+        bandwidth: float,   # kbps → RVQ books in the latent sum (0.75/book)
         auto_load: bool = True,
         latent_stats_path: Optional[str] = None,
     ):
         super().__init__()
-        self.bandwidth = bandwidth          # 24.0 kbps -> 32 codebooks
+        self.bandwidth = bandwidth
         self.sampling_rate = SAMPLING_RATE
         self.model_dir = ENCODEC_24KHZ_DIR
         self.model = None
@@ -64,14 +70,19 @@ class EncodecWrapper(nn.Module):
             "facebook/encodec_24khz",
             cache_dir=cache_dir
         )
+        assert self.bandwidth in self.model.config.target_bandwidths, (
+            f"encodec.bandwidth={self.bandwidth} not in {self.model.config.target_bandwidths} "
+            f"(facebook/encodec_24khz supported bandwidths, kbps)"
+        )
 
         self.model.eval()
         self.model.requires_grad_(False)
 
+        # Full 32-book stack regardless of bandwidth; consumers slice [:Q] via the codes tensor.
         codebook_embeddings = torch.stack(
             [layer.codebook.embed for layer in self.model.quantizer.layers],
             dim=0,
-        )  # [Q, K=1024, latent_dim=128] float32
+        )  # [32, K=1024, latent_dim=128] float32
         self.register_buffer('codebook_embeddings', codebook_embeddings, persistent=False)
 
     @torch.compiler.disable
@@ -92,8 +103,8 @@ class EncodecWrapper(nn.Module):
                 bandwidth=self.bandwidth,
             )
 
-        # output.audio_codes: [C=1, B, Q=32, F] (1 s → F=75). Q = quantizer/codebook,
-        # each codebook [index 0-1023, latent_dim 128]
+        # output.audio_codes: [C=1, B, Q, F] (1 s → F=75; Q = books at self.bandwidth,
+        # e.g. 16 @ 12 kbps / 32 @ 24 kbps), each codebook [index 0-1023, latent_dim 128]
         return output.audio_codes, output.audio_scales
 
     @torch.compiler.disable
@@ -104,10 +115,10 @@ class EncodecWrapper(nn.Module):
         audio_lengths   # [B]
     ):
         with torch.autocast(device_type=audio.device.type, enabled=False):
-            codebook_indices, _ = self.encode(audio)                                           # [C=1, B, Q=32, F]
+            codebook_indices, _ = self.encode(audio)                                           # [C=1, B, Q, F]
             codebook_indices = rearrange(codebook_indices, '1 b q f -> q b f').contiguous()    # [Q, B, F]
 
-            audio_latents = self.model.quantizer.decode(codebook_indices)      # [B, D=128, F] | sum of the 32 codebook vectors per frame
+            audio_latents = self.model.quantizer.decode(codebook_indices)      # [B, D=128, F] | sum of the Q codebook vectors per frame
             audio_latents = rearrange(audio_latents, "b d f -> b f d").contiguous() # [B, F, D]
 
             # Per-channel norm (z-μ)/σ; identity at defaults. Broadcasts [128]→[B,F,128].

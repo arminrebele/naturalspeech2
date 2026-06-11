@@ -7,9 +7,9 @@ saves a .pt that EncodecWrapper loads at construction as persistent buffers.
 Example:
     # in container
     python scripts/compute_encodec_latent_stats.py \
-        --dataset data/mls_eng/dev/processed_otf \
-        --output models/encodec_24khz/encodec_latent_stats.pt \
-        --num-clips 1024
+        --dataset data/mls_eng/train/chunks_otf/chunk_00000 \
+        --bandwidth 12 \
+        --num-clips 4096
 """
 import argparse
 from pathlib import Path
@@ -37,12 +37,18 @@ def main() -> None:
     )
     parser.add_argument(
         "--output",
-        default="models/encodec_24khz/encodec_latent_stats.pt",
-        help="Output .pt path (relative to repo root or absolute).",
+        default=None,
+        help="Output .pt path (relative to repo root or absolute). "
+        "Default: models/encodec_24khz/encodec_latent_stats_bw<bandwidth>.pt",
     )
-    parser.add_argument("--bandwidth", type=int, default=24, help="Encodec bandwidth (kbps).")
+    parser.add_argument(
+        "--bandwidth", type=float, required=True,
+        help="Encodec bandwidth (kbps); must match the consuming run's model.encodec.bandwidth.",
+    )
     parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
+    if args.output is None:
+        args.output = f"models/encodec_24khz/encodec_latent_stats_bw{args.bandwidth:g}.pt"
 
     dataset_path = Path(args.dataset)
     if not dataset_path.is_absolute():

@@ -3,11 +3,9 @@ from pathlib import Path
 from typing import Union
 import torch
 from omegaconf import DictConfig
-from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
+from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH, num_quantizers_for_bandwidth
 
 from einops import rearrange
-
-ENCODEC_Q = 32 # Encodec 24kHz utilizes 32 quantizers
 
 
 def setup_file_logger(
@@ -109,6 +107,7 @@ def compute_denominators(micro_batches: list[dict], cfg: DictConfig) -> dict:
     prompt_frames = int(cfg.model.prompt_seconds * sr / hop)
     min_target_frames = int(cfg.model.min_target_seconds * sr / hop)
     latent_dim = cfg.model.latent_dim
+    encodec_q = num_quantizers_for_bandwidth(cfg.model.encodec.bandwidth)
     
     for batch in micro_batches:
         denominators["duration_predictor_loss"] += batch["phoneme_tokens_lengths"].sum().item()
@@ -130,7 +129,7 @@ def compute_denominators(micro_batches: list[dict], cfg: DictConfig) -> dict:
         valid_scalars = target_frames * latent_dim
         denominators["data_loss"] += valid_scalars
         denominators["score_loss"] += valid_scalars
-        denominators["ce_rvq_loss"] += target_frames * ENCODEC_Q
+        denominators["ce_rvq_loss"] += target_frames * encodec_q
         
     return denominators
 
