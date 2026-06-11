@@ -1,0 +1,24 @@
+# Root config for the read-only model diagnostics (scripts/diagnostics/*). Same group composition as
+# training/eval, so splits + buckets are identical and CLI-overridable; architecture comes from the
+# checkpoint itself (resume rule). Nothing is written back (no ema_best/eval_state).
+defaults:
+  - _self_
+  - dataset: mls_eng
+  - dataloader: base
+  - model: base
+  - training: base
+  - setup: base
+  - wandb: eval
+
+seed: 42
+
+# --- diagnostics knobs ---
+checkpoint: ???        # REQUIRED — ckpt.pt (live weights) or ema_*.safetensors (EMA weights)
+token_vocab: null      # override token_vocabulary.json path (null → from the local dataset build)
+model_config: null     # override model_cfg yaml (null → ckpt's stored cfg / sibling ckpt.pt)
+device: "cuda:0"      # diagnostics card (the training card is free when no run is active)
+out_dir: null          # also dump PNG/wav artifacts here (null → wandb + console only)
+
+split: dev             # split to draw samples from: dev | test | train
+num_samples: 8         # samples to visualize (heatmap) / ablate (condition_ablation)
+sampling_steps: 150    # condition_ablation: diffusion ODE steps per sample
