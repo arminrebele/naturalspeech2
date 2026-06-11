@@ -1,0 +1,9 @@
+# Standalone checkpoint-benchmark wandb defaults (scripts/eval_checkpoint.py). Separate project so
+# benchmark runs don't mix into the training project; run_name null → derived from the checkpoint.
+defaults:
+  - base
+  - _self_
+
+project: "naturalspeech2-eval"
+group: "benchmarks"
+run_name: null

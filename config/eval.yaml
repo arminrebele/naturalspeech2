@@ -1,0 +1,24 @@
+# Root config for the standalone checkpoint benchmark (scripts/eval_checkpoint.py). Same group
+# composition as training, so eval POLICY (splits, buckets, setup.eval_* knobs) is identical and
+# CLI-overridable; only the wandb project + the checkpoint knobs below differ. Model ARCHITECTURE is
+# taken from the checkpoint itself (not cfg.model) — same rule as resume.
+defaults:
+  - _self_
+  - dataset: mls_eng
+  - dataloader: base
+  - model: base
+  - training: base
+  - setup: base
+  - wandb: eval
+
+seed: 42
+
+# --- benchmark-only knobs ---
+checkpoint: ???        # REQUIRED — path to a ckpt.pt (live+EMA) or ema_*.safetensors (EMA-only)
+token_vocab: null      # override token_vocabulary.json path (null → from the local dataset build)
+model_config: null     # override model_cfg yaml (null → ckpt's stored cfg / sibling ckpt.pt)
+device: "cuda:0"      # eval-model card (the training card is free when no run is active)
+out_dir: null          # also dump JSON + wav artifacts here (null → wandb + console only)
+eval_train: true       # also report train-subset loss (needs the train split preprocessed); false →
+                       # held-out only (dev+test), skips the train loader → benchmark a checkpoint
+                       # with just dev/test + a vocab (token_vocab=) and no train split

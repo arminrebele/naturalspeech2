@@ -325,7 +325,7 @@ def run_decoupled_eval(
     train_loader,
     dev_loader,
     test_loader,
-    live_trainable: dict,
+    live_trainable: Optional[dict],
     shadow_trainable: dict,
     val_refs: list[FixedRef],
     train_refs: list[FixedRef],
@@ -336,13 +336,17 @@ def run_decoupled_eval(
     sampling_rate: int,
     snapshot_step: int,
     prev_best_val_loss: float,
+    eval_train: bool = True,
 ) -> EvalReport:
     """Daemon eval over one weight snapshot, on a single resident model:
-      1. load LIVE trainable → losses ('-live').
+      1. load LIVE trainable → losses ('-live')  [skipped if live_trainable is None — an EMA-only
+         checkpoint, e.g. a standalone benchmark of ema_*.safetensors].
       2. load EMA shadow → losses (primary) + audio/WER (shipped model).
       3. best-ckpt gate on EMA val loss.
     `model` is the eager handle (clean param names — used for weight-load + audio gen);
     `loss_model` is the handle for estimate_loss (compiled if enabled; shares the same params).
+    `eval_train=False` → held-out-only losses (no train-subset pass; standalone benchmark of a
+    checkpoint without the train split preprocessed — train_loader may be None).
     Returns an EvalReport (scalars + audio rows + best flag) — caller handles IO/wandb.
     """
     report = EvalReport(snapshot_step=snapshot_step, best_val_loss=prev_best_val_loss)
@@ -359,10 +363,12 @@ def run_decoupled_eval(
     loss_wrapper._update_weights(snapshot_step)
 
     # --- 1. live losses (overfitting signal, comparable to the per-step train curve) ---
-    if eval_iters > 0:
+    # live_trainable=None → EMA-only checkpoint (no live counterpart): skip rather than log a
+    # '-live' series that just duplicates the EMA numbers below.
+    if eval_iters > 0 and live_trainable is not None:
         _load_trainable(model, live_trainable)
         live = estimate_loss(loss_model, train_loader, dev_loader, test_loader, loss_wrapper,
-                             eval_iters, gas, device, cfg, eval_train=True)
+                             eval_iters, gas, device, cfg, eval_train=eval_train)
         _record_losses(report.scalars, live, suffix="-live")
 
     # --- 2. EMA losses (primary, best-selection + shipped quality) ---
@@ -370,7 +376,7 @@ def run_decoupled_eval(
     ema_losses = None
     if eval_iters > 0:
         ema_losses = estimate_loss(loss_model, train_loader, dev_loader, test_loader, loss_wrapper,
-                                   eval_iters, gas, device, cfg, eval_train=True)
+                                   eval_iters, gas, device, cfg, eval_train=eval_train)
         _record_losses(report.scalars, ema_losses, suffix="")
 
     # --- 2b. EMA audio + WER on fixed refs ---

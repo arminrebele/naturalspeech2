@@ -355,6 +355,31 @@ audio, length = generate_audio(model, "path/to/reference.wav", "Hello world.")
 
 ---
 
+### Benchmarking a Checkpoint
+
+`scripts/inference.py` generates a single clip; to score a checkpoint on the **same objective metrics the training loop reports** — held-out (and train-subset) loss, WER, SIM-o, and sample audio — use the standalone benchmark. It reuses the in-training eval core, so the numbers are directly comparable to a live run's, but it targets any saved checkpoint and logs to its own W&B project (`naturalspeech2-eval`).
+
+```bash
+# a resume checkpoint → self-describing; reports both live and EMA metrics
+python scripts/eval_checkpoint.py checkpoint=models/checkpoints/main_training/ckpt.pt
+
+# the shipped best-dev artifact → EMA-only (metadata read from the sibling ckpt.pt)
+python scripts/eval_checkpoint.py checkpoint=models/checkpoints/main_training/ema_best.safetensors
+```
+
+It accepts either checkpoint kind. A `ckpt.pt` carries its own config plus both the live and EMA weights, so it needs no extra arguments and reports both. An `ema_*.safetensors` holds only the EMA weights; it reads the architecture and vocabulary from the sibling `ckpt.pt`, or — for a checkpoint downloaded without one — from `model_config=<yaml> token_vocab=<json>`. The benchmark is **read-only**: it never writes `ema_best`.
+
+Eval *policy* is the normal Hydra config, overridable on the CLI like training — e.g. a larger, steadier sample than the lightweight in-loop eval, scoring held-out splits only:
+
+```bash
+python scripts/eval_checkpoint.py checkpoint=.../ema_best.safetensors \
+    setup.num_audio_refs=300 eval_train=false out_dir=logs/benchmarks/run_a
+```
+
+`eval_train=false` scores held-out (dev+test) only and skips the train loader, so a checkpoint can be benchmarked with just those splits and a vocabulary — no preprocessed train split required (the default, `true`, additionally reports a train-subset loss and needs the train split). Because the reference clips are drawn from a fixed seed, two checkpoints evaluated with the same `seed`, splits, and `num_audio_refs` share an identical eval set and line up for head-to-head comparison in W&B; `out_dir` also dumps the scalars and generated wavs to disk.
+
+---
+
 ## References
 
 *(For academic use, the BibTeX citations for these works can be found in [docs/references.bib](docs/references.bib))*
