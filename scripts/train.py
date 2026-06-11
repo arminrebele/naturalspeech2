@@ -62,9 +62,18 @@ logger = logging.getLogger(__name__)
 COMPILE_WARMUP_STEP = 250  # by here all buckets + their dynamic-shape promotions have compiled
 
 def get_lr(it, cfg):
+    schedule = cfg.training.lr_schedule
+
+    if schedule == "range_test":
+        # LR range test (Smith 2017): exponential sweep min_lr → max_lr over max_iters steps (no
+        # warmup — the sweep IS the ramp). Read loss-vs-LR off W&B / the run-end summary; pick the LR
+        # at steepest descent, ~1 decade below the divergence knee. See +experiment=lr_range_test.
+        rt = cfg.setup.lr_range_test
+        frac = it / max(cfg.setup.max_iters - 1, 1)
+        return rt.min_lr * (rt.max_lr / rt.min_lr) ** frac
+
     learning_rate = cfg.training.learning_rate
     warmup_iters = cfg.setup.warmup_iters
-    schedule = cfg.training.lr_schedule
 
     if it < warmup_iters:
         return learning_rate * (it + 1) / (warmup_iters + 1)
@@ -88,6 +97,34 @@ def get_lr(it, cfg):
         
     else:
         raise ValueError(f"Unknown lr_schedule: {schedule}")
+
+
+def summarize_lr_range_test(history, logger) -> None:
+    """LR range-test readout (Smith 2017): EMA-smooth the loss, report the steepest-descent LR (the
+    standard pick) and the min-loss LR (upper bound — use ~1 decade below). history = [(lr, loss), ...]."""
+    if len(history) < 5:
+        logger.warning(f"LR range test: only {len(history)} points — increase setup.max_iters.")
+        return
+    lrs = [lr for lr, _ in history]
+    smoothed, avg = [], history[0][1]
+    for _, loss in history:
+        avg = 0.8 * avg + 0.2 * loss
+        smoothed.append(avg)
+    best_slope, best_lr = float("inf"), lrs[0]
+    for i in range(1, len(lrs)):
+        dlog = math.log(lrs[i]) - math.log(lrs[i - 1])
+        if dlog <= 0:
+            continue
+        slope = (smoothed[i] - smoothed[i - 1]) / dlog   # d(smoothed loss) / d(log lr)
+        if slope < best_slope:
+            best_slope, best_lr = slope, lrs[i]
+    min_loss_lr = lrs[min(range(len(smoothed)), key=smoothed.__getitem__)]
+    logger.info("========== LR RANGE TEST SUMMARY ==========")
+    logger.info(f"Swept {len(history)} steps, LR {lrs[0]:.2e} → {lrs[-1]:.2e}.")
+    logger.info(f"Steepest-descent LR (suggested): {best_lr:.2e}")
+    logger.info(f"Min-smoothed-loss LR (upper bound; use ~1 decade below): {min_loss_lr:.2e}")
+    logger.info("Confirm against the 'LR Range Test/loss' vs 'LR Range Test/lr' W&B curve (the knee).")
+    logger.info("===========================================")
 
 def get_infinite_batches(loader, start_epoch=0, start_batch_idx=0, overfit_single_batch=False, grad_accum_steps=1):
     """Continuously yields batches while tracking and setting dataloader state for instant resuming."""
@@ -715,6 +752,7 @@ def train(cfg: DictConfig):
     daemon_incompatible_run = (
         cfg.setup.overfit_single_batch
         or cfg.setup.gradient_analysis_run or cfg.setup.aligner_trial_run
+        or cfg.training.lr_schedule == "range_test"   # sweep diverges by design → no eval/daemon
     )
     use_eval_daemon = (
         cfg.setup.eval_daemon.enabled
@@ -944,6 +982,10 @@ def train(cfg: DictConfig):
 
         wandb.init(**init_kwargs)
 
+        if cfg.training.lr_schedule == "range_test":
+            wandb.define_metric("LR Range Test/lr")
+            wandb.define_metric("LR Range Test/loss", step_metric="LR Range Test/lr")
+
         # Legacy reattach can't overwrite the orphaned tail → warn loudly which steps will be dropped.
         if resume_wandb_id and cfg.setup.wandb_resume_mode == "allow" and wandb.run.step >= start_iter:
             logger.warning(
@@ -1040,6 +1082,8 @@ def train(cfg: DictConfig):
     # Filled on the first loop iter when overfit_batch table is active. Overfit cycling yields
     # the same 5 objects forever, so caching lookahead_queue[0] once gives a stable ref batch.
     overfit_ref_batch = None
+
+    lr_range_test_history = []   # (lr, loss) per logged step — only the range_test sweep fills this
 
     # early_stopping.enabled → unbounded loop (the early-stop block below breaks on a dev-loss plateau, never
     # before max_iters); else the planned fixed-length run. itertools.count: no giant range, "no upper bound"
@@ -1213,9 +1257,20 @@ def train(cfg: DictConfig):
             dt_avg = (current_time - last_log_time) / steps_since_last
             
             logger.info(f"Iteration: {iter_num}, Loss: {lossf:.4f}, Avg. Time/Step: {dt_avg*1000:.2f}ms")
-            
+
             last_log_time = current_time
             last_log_iter = iter_num
+
+            # LR range test: record (lr, loss), log the loss-vs-LR curve, stop on divergence (Smith 2017).
+            if cfg.training.lr_schedule == "range_test":
+                lr_range_test_history.append((lr, lossf))
+                if cfg.wandb.log:
+                    wandb.log({"LR Range Test/lr": lr, "LR Range Test/loss": lossf}, step=iter_num)
+                min_loss = min(loss for _, loss in lr_range_test_history)
+                if not math.isfinite(lossf) or lossf > 4.0 * min_loss:
+                    logger.info(f"LR range test: loss diverged ({lossf:.3f} > 4x min {min_loss:.3f}) "
+                                f"at LR {lr:.2e} — stopping sweep.")
+                    break
 
             # --- torch.compile telemetry (CPU-only counter reads → free; Dynamo maintains them
             # regardless). unique_graphs must PLATEAU after warmup; a grow at a NON-eval step = shape
@@ -1428,6 +1483,9 @@ def train(cfg: DictConfig):
             logger.info(f"  {k}: {avg:.4f}")
         logger.info("===============================================")
 
+    if cfg.training.lr_schedule == "range_test":
+        summarize_lr_range_test(lr_range_test_history, logger)
+
     # -----------------------------
     # Final eval pass + inference-iterable safetensors save
     # -----------------------------
@@ -1437,7 +1495,9 @@ def train(cfg: DictConfig):
     # final_iter == max_iters on a full planned run; == break+1 on an early stop. Both loop exits (range
     # exhaustion when disabled, early-stop break when enabled) leave iter_num at the last trained step.
     final_iter = iter_num + 1
-    if use_eval_daemon:
+    if cfg.training.lr_schedule == "range_test":
+        logger.info("LR range test: skipping the final eval pass (sweep weights are not a real model).")
+    elif use_eval_daemon:
         logger.info("Signaling eval daemon shutdown + final eval...")
         live_cpu, shadow_cpu = _clone_trainable_cpu(unoptimized_model, ema)
         snapshot_writer.submit(final_iter, live_cpu, shadow_cpu)

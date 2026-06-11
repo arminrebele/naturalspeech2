@@ -1,0 +1,22 @@
+defaults:
+  - base
+  - _self_
+
+# LR range test (Smith 2017): exponential LR sweep on a fresh-init model. No warmup (the sweep IS the
+# ramp), no eval/daemon/checkpoints; stops on divergence (loss > 4x running-min). Read-only tuning.
+max_iters: 500                  # sweep resolution: 500 exponential steps min_lr → max_lr
+warmup_iters: 0                 # the sweep is the ramp
+log_interval: 1                 # per-step loss → dense loss-vs-LR curve + divergence check
+
+lr_range_test:
+  min_lr: 1.0e-7
+  max_lr: 1.0                    # upper bound; the divergence stop ends the sweep well before here
+
+eval_interval: 100000000        # disable periodic eval (range_test is also daemon-incompatible in code)
+checkpoint_interval: 0          # no checkpoints
+best_safetensors: false
+final_safetensors: false
+allow_ckpt_overwrite: true      # diagnostic: freely re-runnable
+
+log_subdir: "logs/experiments"
+log_name: "lr_range_test"

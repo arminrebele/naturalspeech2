@@ -1,0 +1,20 @@
+# @package _global_
+#
+# LR range test (Smith 2017): exponential LR sweep on a fresh-init model over the REAL objective
+# (production loss weights + decoupled graph). Pick the steepest-descent LR (run-end summary), ~1 decade
+# below the divergence knee; confirm against the W&B 'LR Range Test/loss' vs '/lr' curve.
+#   python scripts/train.py +experiment=lr_range_test
+#
+# Deferred FINAL tuning step — run on a model that already trains healthily, since the right LR depends
+# on the (fixed) architecture. Real train split (prerequisite: train preprocessed), like loss/gradient
+# analysis. No model override → production loss weights from base.yaml.
+
+defaults:
+  - override /setup: lr_range_test
+  - override /wandb: lr_range_test
+
+training:
+  lr_schedule: range_test
+
+dataset:
+  max_train_clips: 400000
