@@ -247,6 +247,8 @@ The actual decision instrument for the weighting. We run the [Train-Loop](script
 
 We additionally calculate cosine-similarities between the gradients to expose competing Loss-Terms. A weight deviates from its default only on a measured pathology: a term that conflicts with others (negative cosine) while dominating them in norm, or a term being starved on a parameter region it must train. Orthogonal pulls (cosine ≈ 0) of different sizes are accepted — they coexist rather than fight. Escalation order: slowly warming up the offending term (the built-in 0.1×→1.0 ramp), then a static down-weight.
 
+For the **alignment and duration** losses specifically, we instead **stop-gradient** their inputs (`detach_aligner_input` / `detach_duration_predictor_input`, default on) so they don't reach the shared phoneme encoder at all — the parallel-TTS recipe (Glow-TTS's `sg[·]` on the duration input; RAD-TTS's standalone aligner). When one task's gradient both dominates and destabilizes a shared backbone, decoupling it is cleaner than re-weighting; the encoder is then shaped only by the generative path. Set the flags `false` to A/B the coupled form.
+
 ```bash
 python scripts/train.py +experiment=gradient_analysis
 ```
@@ -263,7 +265,33 @@ python scripts/tuning/run_aligner_optuna.py --n-trials 30
 
 Each trial is a fresh `+experiment=aligner_trial` training job (`--max-iters`, default 5000) that dumps per-eval held-out aligner losses; the trial is scored on the mean over its converged tail. Study state persists to SQLite under `research/aligner_optuna/`, so runs are resumable and inspectable. Tune the search ranges in `SEARCH_SPACE` at the top of [the driver](scripts/tuning/run_aligner_optuna.py), and use `--override <hydra.key=value>` to forward extra Hydra overrides to every trial. The best scalars print at the end → paste into [`config/model/base.yaml`](config/model/base.yaml). To probe one setting by hand: `python scripts/train.py +experiment=aligner_trial model.aligner.prior_w=0.1`. The winner still gets a manual `overfit_test` (monotonic durations, intelligible audio) — the loss objective is necessary, not sufficient.
 
+**Learning rate.** The paper's LR is for a different codec / aligner / normalization regime and doesn't transfer directly. Rather than an Optuna sweep over a single scalar, we find it with a **range test** (Smith 2017): one short run that exponentially ramps the LR from `min_lr` to `max_lr`, logs a loss-vs-LR curve, and stops on divergence.
+
+```bash
+python scripts/train.py +experiment=lr_range_test
+```
+
+The run-end summary prints the steepest-descent LR and the min-loss LR (use ~1 decade below); confirm against the `LR Range Test/loss` vs `/lr` curve in W&B. This is the **last** tuning step — run it on a model that already trains healthily, since the right LR depends on the fixed architecture (loss weights, aligner, normalization), and a plateaued model's LR-invariant loss tells you nothing.
+
 **Dropout.** Zero by default: the paper reports the model still underfitting at 300k steps, so regularization is expected net-negative. We reintroduce it locally only if a run shows overfitting (val/train divergence), most likely in the small duration/pitch predictors.
+
+**6. Alignment & Conditioning Diagnostics**
+
+When a run underfits despite a clean overfit test, two read-only probes — run on any saved checkpoint, logged to the eval W&B project, writing nothing — localize the cause:
+
+- **Alignment heatmap** decomposes the aligner into three per-frame distributions (Beta-Binomial **prior** alone / **learned** scores alone / **posterior**) with the Viterbi path overlaid, plus pooled scalars. Learned ≈ prior (low `align/learned_vs_prior_tv`, `learned_peak` ≈ `1/P`) ⇒ the aligner is riding the prior, not learning; sharp + content-dependent ⇒ the aligner is fine and the bottleneck is downstream.
+
+  ```bash
+  python scripts/diagnostics/alignment_heatmap.py checkpoint=models/checkpoints/main_training/ckpt.pt
+  ```
+
+- **Conditioning ablation** re-samples from identical noise with the real vs zeroed/shuffled content `condition` and a swapped speaker prompt. A content/speaker RMSE ratio ≪ 1 means the denoiser ignores the phoneme content (a problem downstream of the aligner). It decodes real vs zeroed-condition audio to listen.
+
+  ```bash
+  python scripts/diagnostics/condition_ablation.py checkpoint=models/checkpoints/main_training/ckpt.pt
+  ```
+
+Both take the architecture from the checkpoint (the resume rule), like the checkpoint benchmark below.
 
 ## Hardware: Reference, Assumptions, and Minimum Baseline
 
