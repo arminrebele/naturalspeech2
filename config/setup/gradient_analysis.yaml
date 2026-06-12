@@ -3,11 +3,16 @@ defaults:
   - _self_
 
 # Overrides on top of setup/base.yaml — only the deltas live here. Diagnostic mode: trains normally
-# (ISR + warmup_ratio 0.11 ≈ 1100, inherited from base); GradientAnalyzer profiles per-loss-term
-# gradient norms + pairwise cosines on the last 20% of steps (window hardcoded in train.py), every
-# log_interval. Eval / audio / checkpoints all off — pure gradient geometry.
-
-max_iters: 10000
+# (ISR + warmup_ratio 0.11, inherited from base) WITH the base loss-weight schedule intact (the
+# warmup is part of representative training); GradientAnalyzer profiles per-loss-term gradient norms +
+# pairwise cosines on the last 20% of steps (window hardcoded in train.py), every log_interval. Eval /
+# audio / checkpoints all off — pure gradient geometry.
+#
+# max_iters sized so the analysis window (last 20% = last 2k at log_interval 10) starts AFTER the
+# loss-weight warmup completes (duration is the slowest, full at 15k per config/model/base.yaml) — so
+# every term is measured at its full weight. window start = max(0.8·M, M−2k); at M=20k → 18k > 15k. ✓
+# Raise this if the base.yaml warmup schedule is lengthened.
+max_iters: 20000
 
 allow_ckpt_overwrite: True       # diagnostic: freely re-run its own subdir (inert here — saves all off)
 

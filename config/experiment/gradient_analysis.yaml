@@ -3,7 +3,6 @@
 # Per-loss-term gradient diagnostic — python scripts/train.py +experiment=gradient_analysis
 
 defaults:
-  - override /model: gradient_analysis    # base weights, but warmups+holds zeroed (steady-state grad norms)
   - override /setup: gradient_analysis
   - override /wandb: gradient_analysis
 
