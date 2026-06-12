@@ -157,6 +157,7 @@ def main(cfg: DictConfig) -> None:
     loss_wrapper = LossWrapper(
         loss_weights=OmegaConf.to_container(cfg.model.loss_weights, resolve=True),
         loss_warmup_steps=OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True),
+        loss_warmup_hold_steps=OmegaConf.to_container(cfg.model.loss_warmup_hold_steps, resolve=True),
     ).to(device)
 
     # Fixed, seeded refs — identical draw to the trainer/daemon for a given seed + splits +

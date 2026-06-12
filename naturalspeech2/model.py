@@ -551,10 +551,11 @@ class NaturalSpeech2Model(nn.Module):
     
 
 class LossWrapper(torch.nn.Module):
-    def __init__(self, loss_weights: dict, loss_warmup_steps: dict):
+    def __init__(self, loss_weights: dict, loss_warmup_steps: dict, loss_warmup_hold_steps: dict):
         super().__init__()
         self.loss_weights = self._flatten_config(loss_weights, "group_weight")
         self.loss_warmup_steps = self._flatten_config(loss_warmup_steps, "group_warmup")
+        self.loss_warmup_hold_steps = self._flatten_config(loss_warmup_hold_steps, "group_hold")
         self.current_weights = {}
         self._update_weights(0)  # Initialize weights for step 0
 
@@ -573,12 +574,16 @@ class LossWrapper(torch.nn.Module):
         return flat
 
     def _update_weights(self, step: int):
+        # Hold at 0 for `hold` steps, then linear ramp 0→target over `ramp` steps (true-zero hard
+        # onset). hold + ramp = step at full weight; both 0 → full weight from step 0.
         for key, target_weight in self.loss_weights.items():
-            warmup_steps = self.loss_warmup_steps[key]
-            if warmup_steps > 0:
-                progress = min(1.0, step / warmup_steps)
-                # Linear warm-up: 0.1×target → target
-                self.current_weights[key] = target_weight * (0.1 + 0.9 * progress)
+            hold = self.loss_warmup_hold_steps[key]
+            ramp = self.loss_warmup_steps[key]
+            if step < hold:
+                self.current_weights[key] = 0.0
+            elif ramp > 0:
+                progress = min(1.0, (step - hold) / ramp)
+                self.current_weights[key] = target_weight * progress
             else:
                 self.current_weights[key] = target_weight
 

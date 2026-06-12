@@ -37,7 +37,7 @@ diffusion_model:
 ema:
   halflife_kimg: 5.0
 
-# Loss-weight warmups zeroed: they'd complicate verifying each term converges to ~0 on one batch.
+# Loss-weight warmups + holds zeroed: they'd complicate verifying each term converges to ~0 on one batch.
 loss_warmup_steps:
   duration_predictor_loss: 0
   pitch_predictor_loss: 0
@@ -47,6 +47,18 @@ loss_warmup_steps:
     bin_loss: 0
   diffusion_loss:
     group_warmup: 0
+    data_loss: 0
+    score_loss: 0
+    ce_rvq_loss: 0
+loss_warmup_hold_steps:
+  duration_predictor_loss: 0
+  pitch_predictor_loss: 0
+  aligner_loss:
+    group_hold: 0
+    forward_sum_loss: 0
+    bin_loss: 0
+  diffusion_loss:
+    group_hold: 0
     data_loss: 0
     score_loss: 0
     ce_rvq_loss: 0

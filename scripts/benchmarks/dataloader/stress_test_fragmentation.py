@@ -103,6 +103,7 @@ def _bench_mode(label, dynamic, mode, cfg, buckets, vocab_size, device) -> dict:
     loss_wrapper = LossWrapper(
         loss_weights=OmegaConf.to_container(cfg.model.loss_weights, resolve=True),
         loss_warmup_steps=OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True),
+        loss_warmup_hold_steps=OmegaConf.to_container(cfg.model.loss_warmup_hold_steps, resolve=True),
     ).to(device)
 
     # Warmup: cycle all buckets until unique_graphs is stable for a full pass (statics + dynamic

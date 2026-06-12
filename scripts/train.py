@@ -888,10 +888,12 @@ def train(cfg: DictConfig):
 
     loss_weights_dict = OmegaConf.to_container(cfg.model.loss_weights, resolve=True)
     loss_warmup_steps_dict = OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
+    loss_warmup_hold_steps_dict = OmegaConf.to_container(cfg.model.loss_warmup_hold_steps, resolve=True)
 
     loss_wrapper = LossWrapper(
         loss_weights=loss_weights_dict,
-        loss_warmup_steps=loss_warmup_steps_dict
+        loss_warmup_steps=loss_warmup_steps_dict,
+        loss_warmup_hold_steps=loss_warmup_hold_steps_dict
     ).to(device)
     
     optimizer = model.configure_optimizers(

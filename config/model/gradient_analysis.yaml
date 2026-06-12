@@ -2,22 +2,9 @@ defaults:
   - base
   - _self_
 
-# Uniform 1.0 weights so the loss-magnitude analysis reads unweighted truth —
-# weight tuning is what the analysis output informs, not the input.
-loss_weights:
-  duration_predictor_loss: 1.0
-  pitch_predictor_loss: 1.0
-  aligner_loss:
-    group_weight: 1.0
-    forward_sum_loss: 1.0
-    bin_loss: 1.0
-  diffusion_loss:
-    group_weight: 1.0
-    data_loss: 1.0
-    score_loss: 1.0
-    ce_rvq_loss: 1.0
-
-# Zero warmups AND holds so loss magnitudes are comparable across early/late iters (steady state).
+# Keeps base loss_weights (per-term grad L2 norms must reflect the REAL weighted training gradients).
+# Zeros warmups AND holds so every term is at full weight from step 0 — a held/ramping term would
+# backprop a scaled-down (or zero) gradient, corrupting the imbalance readout the analysis exists to measure.
 loss_warmup_steps:
   duration_predictor_loss: 0
   pitch_predictor_loss: 0

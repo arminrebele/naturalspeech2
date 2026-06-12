@@ -6,11 +6,15 @@ rope_max_seq_len: 3000
 prompt_seconds: 3.0        # fixed prompt length at training; random start position within the clip
 min_target_seconds: 1.0    # safety net — minimum target duration preserved on short clips
 
-# Stop-gradient on the phoneme-encoder → aligner / duration-predictor edges (parallel-TTS decoupling:
-# Glow-TTS sg[·] on the duration input; RAD-TTS standalone aligner). The aligner + duration losses then
-# train only their own heads, not the shared phoneme encoder — which keeps learning via the diffusion
-# condition path. Motivation: measured bin+duration grad on the encoder ≫ diffusion grad (~30–300×),
-# and bin's gradient is unstable (Viterbi churn). Set false to A/B the coupled (paper-divergent) form.
+# Stop-gradient on the phoneme-encoder → aligner / duration-predictor edges (parallel-TTS decoupling).
+# duration: paper-backed — Glow-TTS sg[·] on the duration input (Eq 6); RAD-TTS torch.detach on the
+# duration text input. aligner: shields the encoder. RAD-TTS gets the same shielding STRUCTURALLY by
+# computing alignment off its raw pre-encoder embedding (text_embeddings, not the encoder output
+# text_enc), so its CTC/bin grad never reaches the contextual encoder; our aligner reads the
+# post-encoder phoneme_encodings, so we detach to match. (The truly RAD-faithful variant — tap the
+# aligner off the phoneme embedding, pre-transformer — is the unbuilt "upstream-tap" option.) Pitch
+# stays attached (RAD-TTS F0 reads non-detached text_enc). Motivation: measured bin+duration grad on
+# the encoder ≫ diffusion (~30–300×), bin spiky (Viterbi churn). false → A/B the coupled form.
 detach_aligner_input: true
 detach_duration_predictor_input: true
 
@@ -164,22 +168,43 @@ loss_balance_targets:
     score_loss: 1.0
     ce_rvq_loss: 0.1
 
-# Warmup ramps a loss weight 0.1×→1.0× over N steps (0 = full from step 0). Paper uses none; we keep
-# one. duration_predictor_loss warms over 1000 steps — its target is the aligner's Viterbi durations,
-# which move fastest during the aligner's steep early descent; the ramp avoids chasing a shifting
-# target. pitch/pitch_voicing target stable GT → no warmup. Aligner full from step 0 (everything
-# downstream depends on it). Diffusion loss is the primary objective and is NOT warmed (warming would
-# down-weight conditioning-independent denoising too; neither paper nor diffusion literature warms it).
-loss_warmup_steps:
-  duration_predictor_loss: 1000
+# Loss-weight schedule: hold at 0 for loss_warmup_hold_steps, then linear ramp 0→target over
+# loss_warmup_steps (true-zero hard onset, RAD-TTS-style). hold + ramp = step at full weight; both 0 =
+# full from step 0. FIXED absolute steps, NOT a fraction of max_iters: alignment settling is an
+# optimization-dynamics property (budget-independent) — a % would mis-scale a 30k probe vs the 360k run.
+# Anchored to examples-seen: our ~80k-frame/step batch is ~10× the papers' → their bin@18k scales to ~2k.
+# Curriculum order fs → bin → duration (each waits for the previous to settle):
+#   forward_sum  : full from 0  — the soft-alignment signal everything keys off.
+#   bin          : hold 2k, →8k — hardening early locks in ~uniform durations before the soft alignment
+#                                 differentiates long/short phonemes (RAD-TTS delays bin to 18k).
+#   duration     : hold 6k, →15k— target is the Viterbi path; only stable after bin sharpens it (slower
+#                                 than bin by design).
+#   pitch/voicing: none         — length-matched grid, ~diagonal early; low sensitivity.
+# Diffusion NOT warmed (primary objective; warming would down-weight conditioning-independent denoising).
+loss_warmup_steps:                # ramp length AFTER the hold (full weight at hold + this)
+  duration_predictor_loss: 9000
   pitch_predictor_loss: 0
   pitch_voicing_loss: 0
   aligner_loss:
     group_warmup: 0
     forward_sum_loss: 0
-    bin_loss: 0
+    bin_loss: 6000
   diffusion_loss:
     group_warmup: 0
+    data_loss: 0
+    score_loss: 0
+    ce_rvq_loss: 0
+
+loss_warmup_hold_steps:           # steps held at weight 0 before the ramp begins
+  duration_predictor_loss: 6000
+  pitch_predictor_loss: 0
+  pitch_voicing_loss: 0
+  aligner_loss:
+    group_hold: 0
+    forward_sum_loss: 0
+    bin_loss: 2000
+  diffusion_loss:
+    group_hold: 0
     data_loss: 0
     score_loss: 0
     ce_rvq_loss: 0

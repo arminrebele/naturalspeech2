@@ -185,6 +185,32 @@ class LossWarmups:
 
 
 @dataclass
+class AlignerLossWarmupHolds:
+    group_hold: int = 0
+    forward_sum_loss: int = 0
+    bin_loss: int = 0
+
+
+@dataclass
+class DiffusionLossWarmupHolds:
+    group_hold: int = 0
+    data_loss: int = 0
+    score_loss: int = 0
+    ce_rvq_loss: int = 0
+
+
+@dataclass
+class LossWarmupHolds:
+    """Hold N steps at weight 0 before the loss_warmup_steps ramp begins (true-zero hard onset,
+    RAD-TTS-style). hold + ramp = step at full weight; 0 = ramp from step 0."""
+    duration_predictor_loss: int = 0
+    pitch_predictor_loss: int = 0
+    pitch_voicing_loss: int = 0
+    aligner_loss: AlignerLossWarmupHolds = field(default_factory=AlignerLossWarmupHolds)
+    diffusion_loss: DiffusionLossWarmupHolds = field(default_factory=DiffusionLossWarmupHolds)
+
+
+@dataclass
 class ModelConfig:
     hidden_dim: int = 512
     latent_dim: int = 128
@@ -194,9 +220,11 @@ class ModelConfig:
     min_target_seconds: float = 1.0
 
     # Stop-gradient on the phoneme-encoder → aligner / duration-predictor edges (parallel-TTS
-    # decoupling: Glow-TTS sg[·] on the duration input, RAD-TTS standalone aligner). The aligner/
-    # duration losses then train only their own heads, not the shared phoneme encoder (which keeps
-    # learning via the diffusion condition path). Default on. See config/model/base.yaml.
+    # decoupling). Duration: paper-backed (Glow-TTS sg[·] on the duration input, Eq 6; RAD-TTS
+    # torch.detach on the duration text input). Aligner: shields the encoder — RAD-TTS shields its
+    # contextual encoder structurally by computing alignment off the raw pre-encoder embedding, so we
+    # detach the post-encoder phoneme_encodings to match. Pitch stays attached (RAD-TTS F0 reads
+    # non-detached text_enc). Default on. See config/model/base.yaml.
     detach_aligner_input: bool = True
     detach_duration_predictor_input: bool = True
 
@@ -212,6 +240,7 @@ class ModelConfig:
 
     loss_weights: LossWeights = field(default_factory=LossWeights)
     loss_warmup_steps: LossWarmups = field(default_factory=LossWarmups)
+    loss_warmup_hold_steps: LossWarmupHolds = field(default_factory=LossWarmupHolds)
     loss_balance_targets: LossBalanceTargets = field(default_factory=LossBalanceTargets)
 
 

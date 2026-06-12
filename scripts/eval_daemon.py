@@ -75,6 +75,7 @@ def build(run_dir: Path):
     loss_wrapper = LossWrapper(
         loss_weights=OmegaConf.to_container(cfg.model.loss_weights, resolve=True),
         loss_warmup_steps=OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True),
+        loss_warmup_hold_steps=OmegaConf.to_container(cfg.model.loss_warmup_hold_steps, resolve=True),
     ).to(device)
 
     nw = cfg.setup.eval_daemon.num_workers
