@@ -591,7 +591,8 @@ class DynamicBucketedBatchSampler(Sampler):
         bucket_mapping: list[dict[str, int]], 
         drop_last: bool = True, 
         shuffle: bool = True,
-        seed: int = 42
+        seed: int = 42,
+        validate_phoneme_caps: bool = True,
     ):
         self.dataset = dataset
         self.drop_last = drop_last
@@ -624,6 +625,12 @@ class DynamicBucketedBatchSampler(Sampler):
             
         for b_idx in range(len(self.bucket_mapping)):
             self.bucket_to_indices[b_idx] = np.where(bucket_indices == b_idx)[0].tolist()
+
+        # phoneme_length is a HARD collate cap; fail loud here (mirrors the audio guard above) instead
+        # of mid-run in BucketedCollateFn. measure_bucket_phoneme_lengths.py passes False — it reports
+        # every bucket itself rather than dying on the first overflow.
+        if validate_phoneme_caps:
+            self._assert_phoneme_caps_fit()
 
         # Exact batch count for tqdm / DataLoader len()
         self._num_batches = self._compute_len()
@@ -661,6 +668,23 @@ class DynamicBucketedBatchSampler(Sampler):
         
         self.expected_batch_audio_samples = mu_X
         self.variance_batch_audio_samples = expected_var + var_expected
+
+    def _assert_phoneme_caps_fit(self) -> None:
+        """Raise if any clip's phoneme count exceeds its audio-bucket's phoneme_length cap."""
+        phoneme_lengths = np.asarray(self.dataset.dataset["phoneme_length"])
+        for b_idx, indices in self.bucket_to_indices.items():
+            cap = self.bucket_mapping[b_idx].get("phoneme_length")
+            if cap is None or not indices:
+                continue
+            bucket_phon = phoneme_lengths[indices]
+            mx = int(bucket_phon.max())
+            if mx > cap:
+                worst = indices[int(np.argmax(bucket_phon))]
+                raise ValueError(
+                    f"Sequence at index {worst} has {mx} phonemes, exceeding bucket {b_idx}'s "
+                    f"phoneme_length cap ({cap}). Raise it to >= {mx} — "
+                    f"scripts/benchmarks/dataloader/measure_bucket_phoneme_lengths.py reports the per-bucket max."
+                )
 
     def _compute_len(self) -> int:
         num_batches = 0

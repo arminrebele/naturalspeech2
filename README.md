@@ -128,17 +128,29 @@ To maximize GPU VRAM utilization, enable efficient `torch.compile` graph caching
 
 We highly recommend running these steps before starting a full training run on a new dataset or hardware configuration.
 
-**1. Finding Optimal Buckets**
+**1. Bucket Boundaries (`audio_length` + `phoneme_length`)**
 
-Dynamic batch bucketing relies on grouping sequences by length. Fixed buckets are crucial for maximizing VRAM utilization, utilizing `torch.compile`, and reducing memory fragmentation. This [script](scripts/benchmarks/dataloader/find_optimal_buckets.py) determines the optimal buckets for dynamic batch-bucketing of a specific dataset.
+Dynamic batch bucketing groups sequences by length into fixed `(audio_length, phoneme_length, batch_size)` buckets ([`config/dataloader/base.yaml`](config/dataloader/base.yaml)) — crucial for maximizing VRAM utilization, keeping the `torch.compile` graph cache hot, and reducing memory fragmentation. `audio_length` is the pad width on the audio axis; `phoneme_length` is **both** a pad width **and a hard cap** (a clip with more phonemes than its audio-bucket's value crashes `BucketedCollateFn`). Derive the two length columns here — for a range of bucket counts *K*, trading compiled shapes against padding waste — then `batch_size` in step 2. Which tool you run depends on whether the data is preprocessed and whether you'll later train on more of it:
 
-It ultimately logs the found optimal buckets (defined by `audio_samples` and `phoneme_tokens`) for different choices of the total number of buckets *K*. The choice of *K* is a trade-off between the number of different shapes that have to be compiled, and the respective resulting padding waste. 
+| Situation | `audio_length` from | `phoneme_length` from | Re-run later? |
+| --- | --- | --- | --- |
+| **Final split, already preprocessed** — full corpus, *or* a fixed subset you won't grow | `find_optimal_buckets.py` | same run | No — derived once |
+| **Training subsets now, full corpus later** | `find_audio_buckets_from_parquet.py` | `measure_bucket_phoneme_lengths.py` | Phonemes only, on each subset growth (audio is already final) |
 
-> **Note:** Paste the found bucket-boundaries for your choice of *K* into the respective [config-files](config/dataloader/) before continuing.
+- [`find_optimal_buckets.py`](scripts/benchmarks/dataloader/find_optimal_buckets.py) — **both columns at once**, off the cached `audio_length`/`phoneme_length` of a *preprocessed* split. It builds the split through the training path, so `dataset.max_train_clips=N` targets exactly the subset you'll train (full split → final). Use it for a split you won't change.
+- [`find_audio_buckets_from_parquet.py`](scripts/benchmarks/dataloader/find_audio_buckets_from_parquet.py) — **audio only**, straight from the parquet headers (`len = ceil(frames · target_sr / native_sr)`, exactly the decode path) with **no preprocessing**. Audio depends only on the length distribution, knowable for the *full corpus* up front, so these boundaries are **final** and stay valid for any subset. Run it to fix audio before the multi-day preprocessing finishes.
+- [`measure_bucket_phoneme_lengths.py`](scripts/benchmarks/dataloader/measure_bucket_phoneme_lengths.py) — the **phoneme** column for the *current* subset: it groups that subset through the **real sampler** and prints each bucket's `max` (the value to paste) in a ready-to-paste block, **and** verifies an already-set `phoneme_length`, exiting non-zero on any overflow so it can gate `preprocess && measure && train`. `phoneme_length` may be unset when you run it (pure derive). Re-run on every subset growth.
 
 ```bash
-python scripts/benchmarks/dataloader/find_optimal_buckets.py
+python scripts/benchmarks/dataloader/find_optimal_buckets.py                                 # both columns, full split
+python scripts/benchmarks/dataloader/find_optimal_buckets.py dataset.max_train_clips=200000  #   ... on a subset
+python scripts/benchmarks/dataloader/find_audio_buckets_from_parquet.py                      # audio only, no preprocessing
+python scripts/benchmarks/dataloader/measure_bucket_phoneme_lengths.py                       # phoneme only (pass your run's overrides)
 ```
+
+> **Note — audio is final; re-check only phonemes as the subset grows.** The train split isn't phoneme-filtered, so a bucket's max phoneme count only *grows* with the subset — re-run `measure_bucket` (and raise any flagged cap) whenever `max_train_clips` increases; audio never changes. That subset coverage is the *only* reason to re-derive — **not** a boundary-rounding artefact: the sampler buckets by raw samples and `find_optimal` by frame length rounded up to a ×8 grid, but since the boundaries live on that same ×8 grid the two assignments are provably identical (they diverge only when the data does). Training also self-guards — the sampler **fails loud at startup** if any clip exceeds its bucket's phoneme cap (mirroring the audio-overflow check), so a stale cap can't silently crash mid-run; `measure_bucket` is the pre-flight that hands you the numbers first.
+
+> **Note:** Paste the boundaries for your chosen *K* into [`config/dataloader/`](config/dataloader/) before continuing.
 
 **2. Finding Maximum Batch Sizes**
 

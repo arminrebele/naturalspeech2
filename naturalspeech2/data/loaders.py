@@ -13,27 +13,22 @@ from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, Dynam
 logger = logging.getLogger(__name__)
 
 
-def create_dataloader(cfg, split: str, token_vocabulary_path: str = None, num_workers: int = None,
-                      batch_size_divisor: int = 1):
-    bucket_mapping = OmegaConf.to_container(cfg.dataloader.bucket_mapping, resolve=True)
-    if batch_size_divisor > 1:
-        # Daemon eval only: shrink the batch dimension (lower forward VRAM) WITHOUT touching the
-        # per-bucket (audio_length, phoneme_length) pad targets — the collate keys on max length, not
-        # batch_size, so padded/compiled shapes are unchanged. grad_accum compensates (run_decoupled_eval).
-        bucket_mapping = [{**b, "batch_size": max(1, b["batch_size"] // batch_size_divisor)}
-                          for b in bucket_mapping]
-
+def create_dataset(cfg, split: str, token_vocabulary_path: str = None):
+    """Build the DatasetWrapper for `split`, triggering preprocessing if uncached. Single source of the
+    train-split construction (chunked store + max_train_clips), shared by create_dataloader and the
+    find_optimal_buckets benchmark so the bucket derivation sees the exact data training will."""
     max_audio_length = cfg.dataset.max_audio_length
     max_phoneme_length = cfg.dataset.max_phoneme_length
 
     if split != cfg.dataset.train_split:    # bucket mapping is derived from train split
+        bucket_mapping = OmegaConf.to_container(cfg.dataloader.bucket_mapping, resolve=True)
         largest_bucket = max(bucket_mapping, key=lambda x: x['audio_length'])
         max_audio_length = largest_bucket['audio_length']
         max_phoneme_length = largest_bucket['phoneme_length']
         logger.info(f"Overriding upper boundaries for '{split}' split to match max bucket: "
                     f"audio={max_audio_length}, phonemes={max_phoneme_length}")
 
-    dataset = DatasetWrapper(
+    return DatasetWrapper(
         dataset_source=cfg.dataset.source,
         dataset_name=cfg.dataset.name,
         split=split,
@@ -60,6 +55,19 @@ def create_dataloader(cfg, split: str, token_vocabulary_path: str = None, num_wo
         chunk_size=(cfg.dataset.get("chunk_size") if split == cfg.dataset.train_split else None),
         build_vocabulary=(split == cfg.dataset.train_split),
     )
+
+
+def create_dataloader(cfg, split: str, token_vocabulary_path: str = None, num_workers: int = None,
+                      batch_size_divisor: int = 1):
+    dataset = create_dataset(cfg, split, token_vocabulary_path)
+
+    bucket_mapping = OmegaConf.to_container(cfg.dataloader.bucket_mapping, resolve=True)
+    if batch_size_divisor > 1:
+        # Daemon eval only: shrink the batch dimension (lower forward VRAM) WITHOUT touching the
+        # per-bucket (audio_length, phoneme_length) pad targets — the collate keys on max length, not
+        # batch_size, so padded/compiled shapes are unchanged. grad_accum compensates (run_decoupled_eval).
+        bucket_mapping = [{**b, "batch_size": max(1, b["batch_size"] // batch_size_divisor)}
+                          for b in bucket_mapping]
 
     sampler = DynamicBucketedBatchSampler(
         dataset,
