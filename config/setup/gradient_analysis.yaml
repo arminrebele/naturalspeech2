@@ -9,10 +9,10 @@ defaults:
 # audio / checkpoints all off — pure gradient geometry.
 #
 # max_iters sized so the analysis window (last 20% = last 2k at log_interval 10) starts AFTER the
-# loss-weight warmup completes (duration is the slowest, full at 15k per config/model/base.yaml) — so
-# every term is measured at its full weight. window start = max(0.8·M, M−2k); at M=20k → 18k > 15k. ✓
+# loss-weight warmup completes (duration is the slowest, full at 30k per config/model/base.yaml) — so
+# every term is measured at its full weight. window start = max(0.8·M, M−2k); at M=35k → 33k > 30k. ✓
 # Raise this if the base.yaml warmup schedule is lengthened.
-max_iters: 20000
+max_iters: 35000
 
 allow_ckpt_overwrite: True       # diagnostic: freely re-run its own subdir (inert here — saves all off)
 
