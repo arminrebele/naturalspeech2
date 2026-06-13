@@ -134,8 +134,10 @@ class DiffusionModel(nn.Module):
             wavenet_attn_weights_dropout: float = 0.2,
             wavenet_attn_out_dropout: float = 0.2,
             wavenet_gate_dropout: float = 0.2,
-            beta_min: float = 0.05,
+            beta_min: float = 0.1,
             beta_max: float = 20.0,
+            schedule: str = "cosine",           # noise schedule: "cosine" (Nichol-Dhariwal, current default) | "linear" (legacy VP-SDE); see _alpha_bar()/_beta()
+            cosine_s: float = 0.008,            # cosine schedule offset (unused when schedule="linear")
             sampling_steps: int = 150,
             sampling_temperature: float = 1.44,
             timestep_eps: float = 1e-3,
@@ -149,6 +151,10 @@ class DiffusionModel(nn.Module):
         self.hidden_dim = hidden_dim
         self.beta_min = beta_min
         self.beta_max = beta_max
+        if schedule not in ("linear", "cosine"):
+            raise ValueError(f"schedule must be 'linear' or 'cosine', got {schedule!r}")
+        self.schedule = schedule
+        self.cosine_s = cosine_s
         self.sampling_steps = sampling_steps
         self.sampling_temperature = sampling_temperature
         self.timestep_eps = timestep_eps
@@ -440,12 +446,27 @@ class DiffusionModel(nn.Module):
         z_t = alpha_bar.sqrt() * z_0.float() + (1.0 - alpha_bar).sqrt() * epsilon
         return z_t, epsilon
 
+    def _cosine_u(
+            self,
+            t,  # [] or [B]
+    ):
+        # Cosine-schedule angle u(t) = ((t+s)/(1+s))·(π/2), clamped just below π/2 so the sampler's
+        # t=1.0 step keeps β=(π/(1+s))·tan(u) finite-positive (unclamped, FP32 cos(π/2) rounds negative
+        # → β≈−7e7, a wrong-signed Euler step, NOT a NaN) and ᾱ=(cos u/cos u₀)²>0.
+        frac = ((t.float() + self.cosine_s) / (1.0 + self.cosine_s)).clamp(max=1.0 - 1e-4)
+        return frac * (math.pi / 2.0)
+
     def _alpha_bar(
             self,
             t,  # [] or [B]
     ):
-        # VP-SDE: α̅(t) = exp(−∫₀ᵗ β(s) ds), ∫₀ᵗ β(s) ds = t·β_min + ½t²(β_max − β_min).
-        # Forward marginal z_t = √α̅·z₀ + √(1 − α̅)·ε matches paper (ρ = √α̅·z₀, Σ_t = 1 − α̅).
+        # α̅(t) = exp(−∫₀ᵗ β(s) ds); forward marginal z_t = √α̅·z₀ + √(1 − α̅)·ε (ρ = √α̅·z₀, Σ_t = 1 − α̅).
+        if self.schedule == "cosine":
+            # Nichol-Dhariwal (Improved DDPM, 2021): ᾱ(t) = (cos u(t) / cos u₀)², ᾱ(0)=1 exactly.
+            u = self._cosine_u(t)
+            u0 = (self.cosine_s / (1.0 + self.cosine_s)) * (math.pi / 2.0)
+            return (u.cos() / math.cos(u0)) ** 2
+        # Linear VP-SDE (legacy): ∫₀ᵗ β(s) ds = t·β_min + ½t²(β_max − β_min).
         t = t.float()
         integral_beta = t * self.beta_min + 0.5 * t.square() * (self.beta_max - self.beta_min)
         return torch.exp(-integral_beta)
@@ -454,5 +475,8 @@ class DiffusionModel(nn.Module):
             self,
             t,  # [] or [B]
     ):
-        # β(t) = β_min + t (β_max − β_min)
+        if self.schedule == "cosine":
+            # β(t) = −d/dt ln ᾱ(t) = (π/(1+s))·tan u(t) for the cosine schedule.
+            return (math.pi / (1.0 + self.cosine_s)) * self._cosine_u(t).tan()
+        # Linear VP-SDE (legacy): β(t) = β_min + t (β_max − β_min).
         return self.beta_min + t.float() * (self.beta_max - self.beta_min)

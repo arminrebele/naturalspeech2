@@ -108,6 +108,10 @@ diffusion_model:
   time_dim: 128
   beta_min: 0.1
   beta_max: 20.0
+  # Noise schedule. "cosine" (Nichol-Dhariwal 2021) keeps ᾱ high longer than the legacy linear-β
+  # VP-SDE (ᾱ(0.5): 0.49 vs 0.08), so logit-normal t-sampling lands on the ~0 dB content band.
+  schedule: "cosine"
+  cosine_s: 0.008
   sampling_steps: 150
   sampling_temperature: 1.44     # τ = 1.2² — initial noise ~ N(0, τ⁻¹·I)
   timestep_eps: 0.001

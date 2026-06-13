@@ -98,6 +98,8 @@ class DiffusionModelConfig:
     time_dim: int = 128
     beta_min: float = 0.1
     beta_max: float = 20.0
+    schedule: str = "linear"      # compat shim: old ckpts have no schedule key, so this default reconstructs them — keep "linear". (ctor + base.yaml default to "cosine".)
+    cosine_s: float = 0.008       # cosine schedule offset (unused when schedule="linear")
     sampling_steps: int = 150
     sampling_temperature: float = 1.44
     timestep_eps: float = 1e-3
