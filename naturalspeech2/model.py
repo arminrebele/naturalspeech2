@@ -645,14 +645,17 @@ class GradientAnalyzer:
             
         for p_name, p in model.named_parameters():
             if p.requires_grad and p.grad is not None:
-                # .grad → CPU RAM
-                self.grad_vectors[name][p_name] = p.grad.detach().cpu()
+                g = p.grad.detach().cpu()  # → CPU RAM
+                # torch.compile zero-fills off-path params with exact-0 .grad (non-None) → the None
+                # check admits every param; keep only each term's true (nonzero-grad) support.
+                if g.any():
+                    self.grad_vectors[name][p_name] = g
         
     def compute_metrics(self):
         # Norms decomposed by top-level module (param-name prefix). L2 norms over disjoint param groups
         # compose by root-sum-of-squares, so Total + Encoders are exact roll-ups of the per-module norms.
         # Keys: "Module/{module}/{term}", "Total/{term}", "Encoders/{term}". Cosines stay pairwise over
-        # the params two terms actually share (each per-term backward yields .grad only on that term's path).
+        # the params two terms actually share (extract_gradients filters to each term's true nonzero support).
         grad_norms = {}
         cos_sims = {}
 
