@@ -1,4 +1,5 @@
 import logging
+import math
 from dataclasses import asdict
 
 import torch
@@ -633,6 +634,9 @@ class LossWrapper(torch.nn.Module):
 
 
 class GradientAnalyzer:
+    # Cross-head contested representation: the modules >1 functional head writes to (the loss-balance metric).
+    ENCODER_MODULES = ("phoneme_encoder", "speech_prompt_encoder")
+
     def __init__(self):
         self.grad_vectors = {}
         
@@ -645,46 +649,36 @@ class GradientAnalyzer:
                 self.grad_vectors[name][p_name] = p.grad.detach().cpu()
         
     def compute_metrics(self):
+        # Norms decomposed by top-level module (param-name prefix). L2 norms over disjoint param groups
+        # compose by root-sum-of-squares, so Total + Encoders are exact roll-ups of the per-module norms.
+        # Keys: "Module/{module}/{term}", "Total/{term}", "Encoders/{term}". Cosines stay pairwise over
+        # the params two terms actually share (each per-term backward yields .grad only on that term's path).
         grad_norms = {}
         cos_sims = {}
-        
-        # Compute Total Norms
+
         for name, vec_dict in self.grad_vectors.items():
-            if vec_dict:
-                v_flat = torch.cat([v.flatten() for v in vec_dict.values()])
-                grad_norms[f"{name}_total"] = torch.norm(v_flat).item()
-                del v_flat
-            else:
-                grad_norms[f"{name}_total"] = 0.0
-            
-        # Cosine sim over shared params only
+            module_sq = {}  # module → Σ‖grad‖² over its params
+            for p_name, v in vec_dict.items():
+                module = p_name.split(".", 1)[0]
+                module_sq[module] = module_sq.get(module, 0.0) + float(v.square().sum())
+            for module, sq in module_sq.items():
+                grad_norms[f"Module/{module}/{name}"] = math.sqrt(sq)
+            grad_norms[f"Total/{name}"] = math.sqrt(sum(module_sq.values()))
+            grad_norms[f"Encoders/{name}"] = math.sqrt(sum(module_sq.get(m, 0.0) for m in self.ENCODER_MODULES))
+
+        # Cosine sim over the params two terms actually share (intersection of their grad supports).
         names = list(self.grad_vectors.keys())
         for i in range(len(names)):
             for j in range(i + 1, len(names)):
-                name_i = names[i]
-                name_j = names[j]
-                
-                shared_params = sorted(list(set(self.grad_vectors[name_i].keys()).intersection(set(self.grad_vectors[name_j].keys()))))
-                
-                if shared_params:
-                    # Concatenate shared params → vectorized (faster than per-dict iteration)
-                    vi_flat = torch.cat([self.grad_vectors[name_i][p].flatten() for p in shared_params])
-                    vj_flat = torch.cat([self.grad_vectors[name_j][p].flatten() for p in shared_params])
-                    
-                    norm_i = torch.norm(vi_flat).item()
-                    norm_j = torch.norm(vj_flat).item()
-                    dot_product = torch.dot(vi_flat, vj_flat).item()
-                    
-                    del vi_flat, vj_flat
-                    
-                    # Norms over the shared backbone only
-                    grad_norms[f"{name_i}_shared_with_{name_j}"] = norm_i
-                    grad_norms[f"{name_j}_shared_with_{name_i}"] = norm_j
+                name_i, name_j = names[i], names[j]
+                shared = sorted(set(self.grad_vectors[name_i]).intersection(self.grad_vectors[name_j]))
+                if not shared:
+                    continue
+                vi = torch.cat([self.grad_vectors[name_i][p].flatten() for p in shared])
+                vj = torch.cat([self.grad_vectors[name_j][p].flatten() for p in shared])
+                norm_i, norm_j = torch.norm(vi).item(), torch.norm(vj).item()
+                dot = torch.dot(vi, vj).item()
+                del vi, vj
+                cos_sims[f"{name_i}_vs_{name_j}"] = dot / (norm_i * norm_j) if norm_i > 0 and norm_j > 0 else 0.0
 
-                    if norm_i > 0 and norm_j > 0:
-                        sim = dot_product / (norm_i * norm_j)
-                        cos_sims[f"{name_i}_vs_{name_j}"] = sim
-                    else:
-                        cos_sims[f"{name_i}_vs_{name_j}"] = 0.0
-                        
         return grad_norms, cos_sims

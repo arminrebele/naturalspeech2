@@ -3,6 +3,7 @@ import sys
 import json
 import time
 import math
+import statistics
 import itertools
 import queue
 import signal
@@ -1322,10 +1323,12 @@ def train(cfg: DictConfig):
             if analyzer is not None:
                 grad_norms, cos_sims = analyzer.compute_metrics()
                 grad_analysis_steps_counted += 1
+                # Keep per-step values (not a running sum) → summary reports full spread (min/quantiles/
+                # max), which a noisy/spiky series (e.g. bin's Viterbi churn) hides under the mean alone.
                 for k, v in grad_norms.items():
-                    grad_norm_accumulators[k] = grad_norm_accumulators.get(k, 0.0) + v
+                    grad_norm_accumulators.setdefault(k, []).append(v)
                 for k, v in cos_sims.items():
-                    cos_sim_accumulators[k] = cos_sim_accumulators.get(k, 0.0) + v
+                    cos_sim_accumulators.setdefault(k, []).append(v)
 
             if cfg.wandb.log:
                 log_payload = {
@@ -1350,15 +1353,20 @@ def train(cfg: DictConfig):
                 for k, v in raw_terms.items():
                     log_payload[f"Train: Loss Composition (Raw Fraction)/{k}"] = (v / raw_total).item()
 
-                # Gradient analysis (computed + accumulated above, wandb-independent); log it.
+                # Gradient analysis (computed + accumulated above, wandb-independent); log it. compute_metrics
+                # returns category-prefixed keys (Total/ Encoders/ Module/{module}/); map each to a descriptive
+                # "Gradient Analysis: …" wandb section (the full key "section/name" becomes the panel title).
                 if analyzer is not None:
+                    norm_sections = {
+                        "Total": "L2-Norm (Total)",
+                        "Encoders": "L2-Norm (Encoder Backbone)",
+                        "Module": "L2-Norm (by Module)",
+                    }
                     for k, v in grad_norms.items():
-                        if k.endswith("_total"):
-                            log_payload[f"Gradient Analysis: L2-Norms (Total)/{k}"] = v
-                        else:
-                            log_payload[f"Gradient Analysis: L2-Norms (Shared)/{k}"] = v
+                        cat, rest = k.split("/", 1)
+                        log_payload[f"Gradient Analysis: {norm_sections[cat]}/{rest}"] = v
                     for k, v in cos_sims.items():
-                        log_payload[f"Gradient Analysis: Cosine-Similarity (Shared)/{k}"] = v
+                        log_payload[f"Gradient Analysis: Cosine Similarity (Shared)/{k}"] = v
 
                 if ema is not None:
                     log_payload["EMA/effective_decay"] = ema._effective_decay(
@@ -1474,15 +1482,31 @@ def train(cfg: DictConfig):
     if cfg.setup.gradient_analysis_run:
         logger.info("========== GRADIENT ANALYSIS SUMMARY ==========")
         logger.info(f"Analyzed over the last {grad_analysis_steps_counted} logged steps (between iterations {grad_analysis_start_iter} and {cfg.setup.max_iters - 1}).")
-        logger.info("Average Gradient L2-Norms (Shared Backbone):")
-        for k, v in grad_norm_accumulators.items():
-            if not k.endswith("_total"):
-                avg = v / grad_analysis_steps_counted
-                logger.info(f"  {k}: {avg:.4f}")
-        logger.info("Average Gradient Cosine Similarities (Shared Backbone):")
-        for k, v in cos_sim_accumulators.items():
-            avg = v / grad_analysis_steps_counted
-            logger.info(f"  {k}: {avg:.4f}")
+        # Full spread per key (not just the mean): max/p90 surface the spikes (bin Viterbi churn) the
+        # mean buries; min/p10 the floor. p10/p90 only when n>=2 (a degenerate 1-step window has none).
+        def _stats(vals):
+            n = len(vals)
+            mean, lo, hi, med = sum(vals) / n, min(vals), max(vals), statistics.median(vals)
+            if n < 2:
+                return f"mean={mean:.4f} (n=1)"
+            q = statistics.quantiles(vals, n=10, method="inclusive")  # stays within [min, max]
+            return f"mean={mean:.4f} med={med:.4f} min={lo:.4f} p10={q[0]:.4f} p90={q[8]:.4f} max={hi:.4f}"
+
+        logger.info("Per-term Total Norms:")
+        for k, vals in grad_norm_accumulators.items():
+            if k.startswith("Total/"):
+                logger.info(f"  {k.split('/', 1)[1]}: {_stats(vals)}")
+        logger.info("Encoder-Backbone Norms (phoneme + prompt encoders):")
+        for k, vals in grad_norm_accumulators.items():
+            if k.startswith("Encoders/"):
+                logger.info(f"  {k.split('/', 1)[1]}: {_stats(vals)}")
+        logger.info("Per-Module Norms:")
+        for k, vals in grad_norm_accumulators.items():
+            if k.startswith("Module/"):
+                logger.info(f"  {k.split('/', 1)[1]}: {_stats(vals)}")
+        logger.info("Cosine Similarities (shared params):")
+        for k, vals in cos_sim_accumulators.items():
+            logger.info(f"  {k}: {_stats(vals)}")
         logger.info("===============================================")
 
     if cfg.training.lr_schedule == "range_test":
