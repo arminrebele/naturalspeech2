@@ -12,6 +12,13 @@ Quantitative companions (pooled over valid frames, logged as scalars so checkpoi
   align/learned_vs_prior_tv mean total-variation(learned, prior) ∈ [0,1] — 0 ⇒ riding the prior.
   align/posterior_peak      mean max-prob of the posterior that actually drives durations.
 
+Duration-sanity companions (per-utterance) — the peaks above are BLIND to a degenerate path that
+stays confident per-frame while dwelling hundreds of frames on a few "sink" phonemes and skipping
+the rest (smears the conditioning → wordless audio). These read the Viterbi step-widths directly:
+  align/dur_skip_frac       frac of phonemes given 0 frames — degenerate alignment skips content.
+  align/dur_cv              coeff of variation of durations — 0 ⇒ uniform, ≫1 ⇒ few sinks dominate.
+  align/dur_max_frac        frac of an utterance's frames in its single longest phoneme (sink capture).
+
 Read-only. Usage (architecture from the checkpoint, like eval_checkpoint):
   python scripts/diagnostics/alignment_heatmap.py checkpoint=.../ckpt.pt num_samples=8 split=dev
 """
@@ -93,6 +100,20 @@ def accumulate_scalars(mats, acc) -> None:
     acc["learned_vs_prior_tv"] += (0.5 * (learned - prior).abs().sum(dim=-1) * frame_valid).sum()
     acc["P"] = learned.shape[-1]
 
+    # Duration-degeneracy (per-utterance): bin the Viterbi path into frames-per-phoneme, then read
+    # skip / spread / sink-capture. Pooled by utterance (n_utt), not frames — these are per-utt props.
+    P = learned.shape[-1]
+    pl = mats["phoneme_lengths"]
+    phon_valid = (torch.arange(P, device=fl.device)[None, :] < pl[:, None])               # [B,P] bool
+    durations = torch.zeros(B, P, device=fl.device).scatter_add_(                          # [B,P] frames/phoneme
+        1, mats["path"], frame_valid)                                                      # padded frames add 0 (src=0)
+    mean_dur = fl.float() / pl.float()                                                     # [B] = F/P
+    var = (durations.square() * phon_valid).sum(dim=1) / pl.float() - mean_dur.square()
+    acc["n_utt"] += B
+    acc["dur_cv"] += (var.clamp_min(0.0).sqrt() / mean_dur).sum()
+    acc["dur_skip_frac"] += (((durations == 0) & phon_valid).sum(dim=1).float() / pl.float()).sum()
+    acc["dur_max_frac"] += (durations.amax(dim=1) / fl.float()).sum()
+
 
 def plot_sample(mats, b, text, step) -> plt.Figure:
     F = int(mats["frame_lengths"][b].item())
@@ -152,7 +173,8 @@ def main(cfg: DictConfig) -> None:
     logger.info(f"Loaded {cfg.checkpoint} (step {step}); drawing {cfg.num_samples} from {cfg.split}.")
 
     acc = {k: torch.zeros((), device=cfg.device) for k in
-           ("n", "learned_peak", "posterior_peak", "prior_peak", "learned_vs_prior_tv")}
+           ("n", "n_utt", "learned_peak", "posterior_peak", "prior_peak", "learned_vs_prior_tv",
+            "dur_cv", "dur_skip_frac", "dur_max_frac")}
     figures, n_plotted = [], 0
     for batch in loader:
         mats = alignment_matrices(model, batch, cfg.device)
@@ -167,12 +189,16 @@ def main(cfg: DictConfig) -> None:
             break
 
     n = acc["n"].clamp(min=1)
+    n_utt = acc["n_utt"].clamp(min=1)
     scalars = {
         "align/learned_peak": (acc["learned_peak"] / n).item(),
         "align/posterior_peak": (acc["posterior_peak"] / n).item(),
         "align/prior_peak": (acc["prior_peak"] / n).item(),
         "align/learned_vs_prior_tv": (acc["learned_vs_prior_tv"] / n).item(),
         "align/uniform_baseline": 1.0 / acc["P"],
+        "align/dur_skip_frac": (acc["dur_skip_frac"] / n_utt).item(),
+        "align/dur_cv": (acc["dur_cv"] / n_utt).item(),
+        "align/dur_max_frac": (acc["dur_max_frac"] / n_utt).item(),
     }
     render(scalars, figures, cfg, run_name=cfg.wandb.run_name or f"align_{tag}_step{step}", step=step)
 
