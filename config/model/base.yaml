@@ -160,26 +160,6 @@ loss_weights:
     score_loss: 1.0
     ce_rvq_loss: 0.1
 
-# Loss Balance Targets — what-if DIAGNOSTIC only, not the adopted policy (weights above follow the
-# paper + gradient analysis; don't paste the suggestion in blindly). Read ONLY by the loss-analysis
-# run (+experiment=loss_analysis), which prints the loss_weights that would equalize contribution
-# shares from these + measured raw magnitudes; never read during training. Flat leaves and each
-# group's group_target share one top-level scale; sub-targets split within the group. Suggestion
-# anchored so data_loss=1.0 (preserves the diffusion gradient scale → paper LR transfers).
-loss_balance_targets:
-  duration_predictor_loss: 1.0
-  pitch_predictor_loss: 1.0
-  pitch_voicing_loss: 1.0
-  aligner_loss:
-    group_target: 1.0
-    forward_sum_loss: 1.0
-    bin_loss: 1.0
-  diffusion_loss:
-    group_target: 1.0
-    data_loss: 1.0
-    score_loss: 1.0
-    ce_rvq_loss: 0.1
-
 # Loss-weight schedule: hold at 0 for loss_warmup_hold_steps, then linear ramp 0→target over
 # loss_warmup_steps (true-zero hard onset, RAD-TTS-style). hold + ramp = step at full weight; both 0 =
 # full from step 0. FIXED absolute steps, NOT a fraction of max_iters: alignment settling is an

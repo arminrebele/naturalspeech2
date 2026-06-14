@@ -134,35 +134,6 @@ class LossWeights:
 
 
 @dataclass
-class AlignerLossTargets:
-    group_target: float = 1.0
-    forward_sum_loss: float = 1.0
-    bin_loss: float = 1.0
-
-
-@dataclass
-class DiffusionLossTargets:
-    group_target: float = 1.0
-    data_loss: float = 1.0
-    score_loss: float = 1.0
-    ce_rvq_loss: float = 1.0
-
-
-@dataclass
-class LossBalanceTargets:
-    """Target contribution *shares* per loss leaf — used only by the loss-analysis run to
-    suggest loss_weights, never read at train time. Flat leaves and each group's group_target
-    share one top-level scale; sub-targets are the within-group split.
-    See compute_suggested_loss_weights in scripts/train.py.
-    """
-    duration_predictor_loss: float = 1.0
-    pitch_predictor_loss: float = 1.0
-    pitch_voicing_loss: float = 1.0
-    aligner_loss: AlignerLossTargets = field(default_factory=AlignerLossTargets)
-    diffusion_loss: DiffusionLossTargets = field(default_factory=DiffusionLossTargets)
-
-
-@dataclass
 class AlignerLossWarmups:
     group_warmup: int = 0
     forward_sum_loss: int = 0
@@ -251,7 +222,6 @@ class ModelConfig:
     loss_weights: LossWeights = field(default_factory=LossWeights)
     loss_warmup_steps: LossWarmups = field(default_factory=LossWarmups)
     loss_warmup_hold_steps: LossWarmupHolds = field(default_factory=LossWarmupHolds)
-    loss_balance_targets: LossBalanceTargets = field(default_factory=LossBalanceTargets)
 
 
 def model_cfg_from_omegaconf(cfg: Any) -> ModelConfig:

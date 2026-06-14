@@ -49,7 +49,6 @@ early_stopping:
 
 # Mode flags — branch training mechanics, not the eval/log/save surface
 overfit_single_batch: False
-loss_analysis_run: False
 gradient_analysis_run: False
 aligner_trial_run: False
 

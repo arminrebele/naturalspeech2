@@ -243,19 +243,11 @@ To verify that there are no fundamental errors preventing the model from learnin
 python scripts/train.py +experiment=overfit_test
 ```
 
-**3. Loss-Analysis**
+**3. Gradient-Analysis**
 
-Since our Loss comprises multiple individual Loss-Terms, we run a few iterations of the [Train-Loop](scripts/train.py) to estimate their raw magnitudes — i.e. how the total loss is composed.
+On weighting itself the paper is almost silent: the only weight it states is λ_ce-rvq = 0.1; all other terms are summed as-is (and the aligner / voicing terms are our additions — they don't exist there). We keep that implied scheme — every weight 1.0, ce_rvq 0.1 — as the default and deviate from it only on a measured pathology, judged by **gradient impact, not loss magnitude**: magnitude proved a poor proxy for impact in our runs (two terms of near-identical magnitude differed ~30× in gradient norm on shared parameters).
 
-On weighting itself the paper is almost silent: the only weight it states is λ_ce-rvq = 0.1; all other terms are summed as-is (and the aligner / voicing terms are our additions — they don't exist there). We keep that implied scheme — every weight 1.0, ce_rvq 0.1 — as the default, and read the measured magnitudes as a diagnostic rather than as targets to equalize: magnitude proved a poor proxy for impact in our runs (two terms of near-identical magnitude differed ~30× in gradient norm on shared parameters). The run additionally prints the weights that *would* equalize contributions (anchored at data_loss = 1.0, which preserves the diffusion gradient scale so the paper's learning rate transfers) — a what-if reference, not a recipe.
-
-```bash
-python scripts/train.py +experiment=loss_analysis
-```
-
-**4. Gradient-Analysis**
-
-The actual decision instrument for the weighting. We run the [Train-Loop](scripts/train.py) again, but perform the backward passes individually for each (weighted) Loss-Term. This allows us to compare the L2-norms of the Loss-Term-gradients of shared parameters, which acts as our measure for impact on the model.
+The decision instrument is therefore a per-term gradient diagnostic. We run the [Train-Loop](scripts/train.py) again, but perform the backward passes individually for each (weighted) Loss-Term. This lets us compare the L2-norms of the Loss-Term-gradients on shared parameters, which acts as our measure for impact on the model.
 
 We additionally calculate cosine-similarities between the gradients to expose competing Loss-Terms. A weight deviates from its default only on a measured pathology: a term that conflicts with others (negative cosine) while dominating them in norm, or a term being starved on a parameter region it must train. Orthogonal pulls (cosine ≈ 0) of different sizes are accepted — they coexist rather than fight. Escalation order: slowly warming up the offending term (the built-in **hold-then-ramp** schedule — `loss_warmup_hold_steps` steps at weight 0, then a linear 0→target ramp over `loss_warmup_steps`), then a static down-weight.
 
@@ -267,7 +259,7 @@ The aligner/duration **warmups** follow a fs → bin → duration curriculum (fi
 python scripts/train.py +experiment=gradient_analysis
 ```
 
-**5. Hyperparameter-Tuning**
+**4. Hyperparameter-Tuning**
 
 For every hyperparameter the original paper [1] states explicitly, we use the declared value. The rest is set to a sensible default or — where the paper is silent and the choice is sensitive — tuned with **Optuna**.
 
@@ -289,7 +281,7 @@ The run-end summary prints the steepest-descent LR and the min-loss LR (use ~1 d
 
 **Dropout.** Zero by default: the paper reports the model still underfitting at 300k steps, so regularization is expected net-negative. We reintroduce it locally only if a run shows overfitting (val/train divergence), most likely in the small duration/pitch predictors.
 
-**6. Alignment & Conditioning Diagnostics**
+**5. Alignment & Conditioning Diagnostics**
 
 When a run underfits despite a clean overfit test, two read-only probes — run on any saved checkpoint, logged to the eval W&B project, writing nothing — localize the cause:
 

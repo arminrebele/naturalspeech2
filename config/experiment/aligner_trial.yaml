@@ -6,7 +6,7 @@
 #   python scripts/train.py +experiment=aligner_trial \
 #       model.aligner.prior_w=0.1 model.aligner.blank_logit=-2
 #
-# Real train split (like loss_analysis — alignment quality must reflect production data). Per-eval
+# Real train split (alignment quality must reflect production data, not the tiny dev split). Per-eval
 # held-out forward_sum+bin losses → setup.aligner_trial_out for the driver to minimize over the
 # converged tail. Scalars set per-trial via CLI; everything else inherits base, so /model is
 # intentionally not overridden. Run on the LOCKED aligner architecture (attn_channels, conv stacks).

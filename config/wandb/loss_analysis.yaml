@@ -1,6 +1,0 @@
-defaults:
-  - base
-  - _self_
-
-group: "loss-analysis"
-run_name: "loss_analysis"

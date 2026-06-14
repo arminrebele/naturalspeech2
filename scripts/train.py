@@ -385,57 +385,6 @@ def _collect_dropout_keys(cfg_model) -> dict:
     return out
 
 
-def compute_suggested_loss_weights(
-    magnitudes: dict[str, float],
-    targets: dict,
-    anchor: str = "data_loss",
-) -> dict:
-    """Magnitude-equalizing loss_weights suggestion — what-if DIAGNOSTIC, not the adopted policy
-    (adopted: paper defaults + gradient-analysis veto; see README §5 + config/model/base.yaml).
-    Computes weights so each leaf's weighted contribution matches a target share, given the raw
-    per-leaf magnitudes a loss-analysis run measured.
-
-    targets mirrors loss_weights: flat leaves carry a scalar; groups carry group_target + per-sub
-    targets. Desired share:
-        flat:    c = target
-        grouped: c = group_target * sub_target / sum(sub_targets in group)
-    Effective weight W = c / magnitude. All weights scaled so the anchor leaf's W = 1.0, pinning
-    the anchor's gradient scale (data_loss → diffusion path) so the paper LR transfers.
-
-    Two-level like LossWrapper: sub_weight = sub_target / magnitude; group_weight = group share ×
-    anchor scale. Returns a nested dict shaped like loss_weights.
-    """
-    suggested: dict = {}
-    eff_unscaled: dict[str, float] = {}   # leaf -> pre-anchor effective weight
-
-    for key, value in targets.items():
-        if isinstance(value, dict):
-            sub_targets = {k: v for k, v in value.items() if k != "group_target"}
-            group_share = value["group_target"] / sum(sub_targets.values())
-            suggested[key] = {"group_weight": group_share}   # anchor scale folded in below
-            for sub_key, sub_target in sub_targets.items():
-                sub_weight = sub_target / magnitudes[sub_key]
-                suggested[key][sub_key] = sub_weight
-                eff_unscaled[sub_key] = group_share * sub_weight
-        else:
-            weight = value / magnitudes[key]
-            suggested[key] = weight
-            eff_unscaled[key] = weight
-
-    assert anchor in eff_unscaled, (
-        f"anchor '{anchor}' is not a loss leaf; have {sorted(eff_unscaled)}"
-    )
-    alpha = 1.0 / eff_unscaled[anchor]
-
-    for key, value in suggested.items():
-        if isinstance(value, dict):
-            value["group_weight"] *= alpha
-        else:
-            suggested[key] = value * alpha
-
-    return suggested
-
-
 def _should_run_eval(iter_num: int, cfg) -> bool:
     """Eval trigger: every eval_interval steps (never at step 0)."""
     return iter_num > 0 and iter_num % cfg.setup.eval_interval == 0
@@ -749,7 +698,7 @@ def train(cfg: DictConfig):
     setup_file_logger(logger, log_dir / log_name, root=True)
 
     # Daemon offloads eval to GPU1. overfit/gradient_analysis/aligner_trial need trainer-local eval
-    # state so they stay in-process; loss_analysis's eval is plain held-out loss → daemon-compatible.
+    # state so they stay in-process; the main run's eval is plain held-out loss → daemon-compatible.
     daemon_incompatible_run = (
         cfg.setup.overfit_single_batch
         or cfg.setup.gradient_analysis_run or cfg.setup.aligner_trial_run
@@ -1063,11 +1012,6 @@ def train(cfg: DictConfig):
     cv_logical = std_minutes / exp_minutes
     logger.info(f"Expected audio processed per logical step: ~{exp_minutes:.2f}m (± std of {std_minutes:.2f}m)")
     logger.info(f"  - Relative Fluctuation (CV): {cv_logical:.1%}. Target: < 10% for good stability.")
-
-    if cfg.setup.loss_analysis_run:
-        loss_analysis_start_iter = int(cfg.setup.max_iters * 0.8)   # last 20% of steps (stable logged values)
-        loss_analysis_accumulators = {}
-        loss_analysis_steps_counted = 0
 
     if cfg.setup.aligner_trial_run:
         # Truncate any stale dump from a prior run.
@@ -1411,13 +1355,6 @@ def train(cfg: DictConfig):
 
                 wandb.log(log_payload, step=iter_num)
 
-            # Accumulate raw unweighted losses for the analysis table
-            if cfg.setup.loss_analysis_run and iter_num >= loss_analysis_start_iter:
-                loss_analysis_steps_counted += 1
-                for k, v in accum_logged_losses.items():
-                    if not k.endswith("_weighted"):
-                        loss_analysis_accumulators[k] = loss_analysis_accumulators.get(k, 0.0) + v.item()
-
             # Drain finished daemon evals → wandb; respawn the daemon if it crashed (capped,
             # non-blocking). Training never waits on the daemon.
             if use_eval_daemon:
@@ -1471,34 +1408,6 @@ def train(cfg: DictConfig):
                     f"Finishing cleanly."
                 )
                 break
-
-    # -----------------------------
-    # Loss Analysis Summary Dump
-    # -----------------------------
-    if cfg.setup.loss_analysis_run:
-        logger.info("========== LOSS ANALYSIS SUMMARY ==========")
-        logger.info(f"Analyzed over the last {loss_analysis_steps_counted} logged steps (between iterations {loss_analysis_start_iter} and {cfg.setup.max_iters - 1}).")
-        logger.info("Average raw unweighted loss magnitudes:")
-        for k, v in loss_analysis_accumulators.items():
-            avg = v / loss_analysis_steps_counted
-            logger.info(f"  {k}: {avg:.4f}")
-        logger.info("===========================================")
-
-        # Suggested loss_weights to hit configured target shares (loss_balance_targets), anchored data_loss=1.0.
-        targets = OmegaConf.to_container(cfg.model.loss_balance_targets, resolve=True)
-        magnitudes = {k: v / loss_analysis_steps_counted for k, v in loss_analysis_accumulators.items()}
-        suggested = compute_suggested_loss_weights(magnitudes, targets, anchor="data_loss")
-        logger.info("Magnitude-equalizing loss_weights (anchor: data_loss = 1.0) — what-if diagnostic, NOT the adopted policy (see README §5):")
-        for key, val in suggested.items():
-            if isinstance(val, dict):
-                logger.info(f"  {key}:")
-                logger.info(f"    group_weight: {val['group_weight']:.4f}")
-                for sub_key, sub_val in val.items():
-                    if sub_key != "group_weight":
-                        logger.info(f"    {sub_key}: {sub_val:.4f}")
-            else:
-                logger.info(f"  {key}: {val:.4f}")
-        logger.info("===========================================")
 
     # -----------------------------
     # Gradient Analysis Summary Dump
