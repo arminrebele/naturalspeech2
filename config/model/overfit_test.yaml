@@ -30,6 +30,10 @@ diffusion_model:
   wavenet_attn_out_dropout: 0.0
   wavenet_gate_dropout: 0.0
 
+# Disable the soft-alignment warmstart: the 6k window would span the entire 2k run (pure-soft
+# throughout) and never exercise the hard single-batch memorization gate.
+soft_align_steps: 0
+
 # Override base's halflife_kimg=50 (right at ~300k iters). On a 2000-iter overfit_test
 # (~14 examples/iter = 27.87 kimg total), 50 leaves rampup unfinished → shadow stays
 # contaminated by rampup-region weights. halflife=5 ends rampup at iter ~360, concentrating

@@ -40,6 +40,7 @@ class NaturalSpeech2Model(nn.Module):
         # Stop-gradient toggles (plain bools → torch.compile specializes the branch, no graph break).
         self.detach_aligner_input = cfg.detach_aligner_input
         self.detach_duration_predictor_input = cfg.detach_duration_predictor_input
+        self.detach_soft_alignment = cfg.detach_soft_alignment
 
         self.encodec = EncodecWrapper(
             bandwidth=cfg.encodec.bandwidth,
@@ -130,6 +131,21 @@ class NaturalSpeech2Model(nn.Module):
         expanded_phoneme_encodings = expanded_phoneme_encodings * frame_mask.to(expanded_phoneme_encodings.dtype)
 
         return expanded_phoneme_encodings, frame_mask, frame_lengths
+
+    def _soft_expand_phoneme_encodings(
+        self,
+        phoneme_encodings: torch.Tensor,         # [B, P, D]
+        posterior_label_logprobs: torch.Tensor,  # [B, F, P] FP32 per-frame log-distribution over phonemes
+        frame_mask: torch.Tensor,                # [B, F, 1] bool
+    ):
+        # Soft-alignment conditioning (RAD-TTS soft phase): condition[f] = Σ_p A_soft[f,p]·phoneme[p],
+        # a per-frame convex blend of phoneme encodings. A_soft attaches by default
+        # (detach_soft_alignment=False) so the diffusion loss co-shapes the aligner during the warmstart.
+        A_soft = posterior_label_logprobs.exp()                      # [B, F, P], rows sum to 1 over valid phonemes
+        if self.detach_soft_alignment:
+            A_soft = A_soft.detach()
+        soft = torch.bmm(A_soft, phoneme_encodings)                  # [B, F, P] @ [B, P, D] → [B, F, D]
+        return soft * frame_mask.to(soft.dtype)
 
     @staticmethod
     def _generate_prompts_and_targets(
@@ -222,6 +238,9 @@ class NaturalSpeech2Model(nn.Module):
 
         return_diffusion_inputs: bool = False, # also return diffusion inputs so a caller can
                                                # re-run sample() with the same condition (overfit diagnostic).
+
+        soft_align_alpha: torch.Tensor | None = None,  # 0-dim soft-conditioning weight (1=soft, 0/None=hard);
+                                                       # training-only RAD-TTS warmstart, eval/inference pass None → hard.
     ):
         """Shapes — B: batch, T: audio samples, P: phonemes, F: frames, D: hidden_dim."""
 
@@ -260,6 +279,19 @@ class NaturalSpeech2Model(nn.Module):
             max_frames=audio_encodings.shape[1],
         )
         
+        # Soft-alignment conditioning warmstart (RAD-TTS [0,6k)): blend the soft (differentiable)
+        # expansion over the hard one, α 1→0. None → pure hard (eval/inference/post-warmstart, the
+        # byte-identical existing path). Placed before the pitch predictor + condition build below so the
+        # whole condition path consumes the blended expansion.
+        if soft_align_alpha is not None:
+            soft_expanded = self._soft_expand_phoneme_encodings(
+                phoneme_encodings, posterior_label_logprobs, frame_mask_expanded,
+            )
+            expanded_phoneme_encodings = (
+                soft_align_alpha * soft_expanded
+                + (1.0 - soft_align_alpha) * expanded_phoneme_encodings
+            )
+
         audio_latents, audio_latents_lengths, codebook_indices = self.encodec.get_latents(audio, audio_lengths) # [B, F, latent_dim], [B], [B, F, Q]
 
         (prompt_latents, prompt_latents_mask,                                           # prompt_latents: [B, Fp, latent_dim]   prompt_latents_mask: [B, Fp, 1]

@@ -18,6 +18,14 @@ min_target_seconds: 1.0    # safety net — minimum target duration preserved on
 detach_aligner_input: true
 detach_duration_predictor_input: true
 
+# Soft-alignment conditioning warmstart (RAD-TTS §2.4, [0,6k)): for the first soft_align_steps the diffusion
+# model is conditioned on the aligner's SOFT alignment (A_soft @ phoneme_encodings — differentiable, so the
+# reconstruction loss co-shapes the aligner), then switches to the hard durations path. Ends before bin_loss
+# turns on at 18k. detach_soft_alignment=false = attach (RAD-faithful); true = soft values only (ablation).
+soft_align_steps: 6000          # pure soft conditioning for the first N steps (0 = disabled)
+soft_align_ramp_steps: 0        # 0 = sharp soft→hard switch (RAD-TTS); >0 = linear α 1→0 ramp after the hold
+detach_soft_alignment: false    # attach the soft alignment to the diffusion gradient during the warmstart
+
 # Encodec (frozen audio codec)
 encodec:
   # kbps → RVQ books summed into z₀ (0.75/book): 1.5→2 · 3→4 · 6→8 · 12→16 · 24→32.
@@ -53,7 +61,7 @@ phoneme_encoder:
 # is set by feature magnitude via the aligner's Xavier init, not a scalar knob. See aligner.py.
 aligner:
   attn_channels: 80     # distance dim: both encoders project to 80 (mel native; text 512→1024→80)
-  prior_w: 0.05         # Beta-Binomial prior strength ω (paper Eq 12-13). RAD-TTS data.py default=0.05, but its shipped configs override to 1.0; 0.05 = softer, untested MLS fit (Optuna-tunable)
+  prior_w: 1.0          # Beta-Binomial prior strength ω (paper Eq 12-13). RAD-TTS shipped value (config_ljs_radtts.json betabinom_scaling_factor=1.0; higher ω = narrower/more-peaked). LJS-validated only — untested on multi-speaker MLS (where 0.05 was the softer guess). Optuna-tunable [0.01,1.0]
   blank_logit: -1.0     # ForwardSumLoss blank, in log_softmax+prior space (metric-scale-invariant)
   dropout: 0.0
 

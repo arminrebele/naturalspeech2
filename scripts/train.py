@@ -1169,6 +1169,20 @@ def train(cfg: DictConfig):
         # Forward & Backward Pass
         # -----------------------------
         
+        # Soft-alignment conditioning warmstart (RAD-TTS [0,6k)): α=1 (pure soft) for soft_align_steps,
+        # then sharp (ramp=0) or linear ramp to 0 (pure hard). Passed as a 0-dim tensor so its per-step
+        # value change does NOT trigger torch.compile recompiles; None once fully hard → the byte-identical
+        # existing hard graph. Eval/inference never pass it → hard.
+        _sa_steps = cfg.model.soft_align_steps
+        _sa_ramp = cfg.model.soft_align_ramp_steps
+        if iter_num < _sa_steps:
+            _sa_alpha = 1.0
+        elif _sa_ramp > 0 and iter_num < _sa_steps + _sa_ramp:
+            _sa_alpha = 1.0 - (iter_num - _sa_steps) / _sa_ramp
+        else:
+            _sa_alpha = 0.0
+        soft_alpha = None if _sa_alpha == 0.0 else torch.tensor(_sa_alpha, device=device, dtype=torch.float32)
+
         accum_loss = torch.zeros((), device=device)
         accum_logged_losses = {}
         
@@ -1194,7 +1208,7 @@ def train(cfg: DictConfig):
                 for b_cpu in lookahead_queue:
                     b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items() if isinstance(v, torch.Tensor)}
                     with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                        loss_dict = model(**b_gpu)
+                        loss_dict = model(**b_gpu, soft_align_alpha=soft_alpha)
                         _loss, _logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num, denominators=global_denominators)
                         
                         if not loss_keys:
@@ -1221,7 +1235,7 @@ def train(cfg: DictConfig):
             for b_cpu in lookahead_queue:
                 b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items() if isinstance(v, torch.Tensor)}
                 with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    loss_dict = model(**b_gpu)
+                    loss_dict = model(**b_gpu, soft_align_alpha=soft_alpha)
                     loss, logged_losses, weighted_tensors = loss_wrapper(loss_dict, step=iter_num, denominators=global_denominators)
                     
                 loss.backward()
@@ -1236,7 +1250,7 @@ def train(cfg: DictConfig):
             for b_cpu in lookahead_queue:
                 b_gpu = {k: v.to(device, non_blocking=True) for k, v in b_cpu.items() if isinstance(v, torch.Tensor)}
                 with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                    loss_dict = model(**b_gpu)
+                    loss_dict = model(**b_gpu, soft_align_alpha=soft_alpha)
                     loss, logged_losses, _ = loss_wrapper(loss_dict, step=iter_num, denominators=global_denominators)
                     
                 loss.backward()

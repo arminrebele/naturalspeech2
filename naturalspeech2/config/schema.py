@@ -38,7 +38,7 @@ class PhonemeEncoderConfig:
 @dataclass
 class AlignerConfig:
     attn_channels: int = 80
-    prior_w: float = 0.05
+    prior_w: float = 1.0
     blank_logit: float = -1.0
     dropout: float = 0.0
 
@@ -229,6 +229,14 @@ class ModelConfig:
     # non-detached text_enc). Default on. See config/model/base.yaml.
     detach_aligner_input: bool = True
     detach_duration_predictor_input: bool = True
+
+    # Soft-alignment conditioning warmstart (RAD-TTS [0,6k)): condition the diffusion model on the
+    # aligner's soft alignment (A_soft @ phoneme_encodings — differentiable, so reconstruction co-shapes
+    # the aligner) for soft_align_steps, then the hard durations path. Training-only; eval/inference use
+    # hard. detach_soft_alignment=False = attach (RAD-faithful). See config/model/base.yaml.
+    soft_align_steps: int = 6000
+    soft_align_ramp_steps: int = 0
+    detach_soft_alignment: bool = False
 
     encodec: EncodecConfig = field(default_factory=EncodecConfig)
     mel: MelConfig = field(default_factory=MelConfig)
