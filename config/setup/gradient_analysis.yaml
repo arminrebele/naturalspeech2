@@ -5,14 +5,18 @@ defaults:
 # Overrides on top of setup/base.yaml — only the deltas live here. Diagnostic mode: trains normally
 # (ISR + warmup_ratio 0.11, inherited from base) WITH the base loss-weight schedule intact (the
 # warmup is part of representative training); GradientAnalyzer profiles per-loss-term gradient norms +
-# pairwise cosines on the last 20% of steps (window hardcoded in train.py), every log_interval. Eval /
-# audio / checkpoints all off — pure gradient geometry.
+# pairwise cosines over an explicit window [grad_analysis_start_iter, max_iters), at grad_analysis_interval
+# (null → log_interval). Eval / audio / checkpoints all off — pure gradient geometry.
 #
-# max_iters sized so the analysis window (last 20% = last 2k at log_interval 10) starts AFTER the
-# loss-weight warmup completes (duration is the slowest, full at 30k per config/model/base.yaml) — so
-# every term is measured at its full weight. window start = max(0.8·M, M−2k); at M=35k → 33k > 30k. ✓
-# Raise this if the base.yaml warmup schedule is lengthened.
+# Default window = last 200 steps, every step (start max_iters−200 = 34800, interval 1 ⇒ 200 analyzed
+# steps) = the tightest mature-endpoint impact read; still clears the loss-weight warmup (duration full at
+# 30k per config/model/base.yaml) → every term at full weight. Widen for other reads: an earlier start +
+# a stride (e.g. 33000 / 10) decorrelates the mature estimate; start 0 profiles the full-run trajectory
+# incl. warmup, where the analyzer's WEIGHTED grads give a term's true (warmup-scaled) per-step
+# contribution. Each analyzed step ≈ 10× a normal step (one backward per loss term).
 max_iters: 35000
+grad_analysis_start_iter: 34800   # max_iters − 200
+grad_analysis_interval: 1         # every step (consecutive)
 
 allow_ckpt_overwrite: True       # diagnostic: freely re-run its own subdir (inert here — saves all off)
 

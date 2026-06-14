@@ -1020,14 +1020,24 @@ def train(cfg: DictConfig):
         aligner_trial_out_path.write_text("")
         
     if cfg.setup.gradient_analysis_run:
-        # Last 20% (stable logged values), but capped to ~200 analyzed steps (window ÷ log_interval)
-        # so layering gradient_analysis onto a LONG productive run (e.g. a train_5M continuation)
-        # doesn't balloon the 9×-cost per-term passes over thousands of steps. Identical to 0.8× for
-        # the standalone 10k run (log_interval=10 → 200·10=2000 = the last 20%).
-        grad_analysis_start_iter = max(int(cfg.setup.max_iters * 0.8), cfg.setup.max_iters - 200 * cfg.setup.log_interval)
+        # Explicit window: analyze [start, max_iters) at grad_analysis_interval (null → log_interval). That
+        # interval OVERRIDES log_interval from start on (effective_log_interval in the loop), so the analyzer
+        # fires only on log steps — no off-log analysis, no extra sync sites. start may sit inside the
+        # loss-weight warmup: the analyzer reads WEIGHTED grads, so a term's norm there is its true
+        # (warmup-scaled) per-step contribution to the update.
+        grad_analysis_start_iter = cfg.setup.grad_analysis_start_iter
+        grad_analysis_interval = cfg.setup.grad_analysis_interval or cfg.setup.log_interval
         grad_norm_accumulators = {}
         cos_sim_accumulators = {}
         grad_analysis_steps_counted = 0
+        # Cost heads-up (no fixed cap any more): analyzed steps = multiples of the interval in
+        # [start, max_iters), each ≈10× a normal step. Surface the count so a low start / dense interval
+        # on a long run can't silently balloon the per-term passes.
+        n_analyzed = max(0, (cfg.setup.max_iters - 1) // grad_analysis_interval
+                            - (grad_analysis_start_iter - 1) // grad_analysis_interval)
+        logger.info(f"Gradient analysis: {n_analyzed} analyzed steps planned — window "
+                    f"[{grad_analysis_start_iter}, {cfg.setup.max_iters}), every {grad_analysis_interval} "
+                    f"(each ≈10× a normal step).")
         
     logger.info("Starting training loop...")
     last_log_time = time.perf_counter()
@@ -1051,6 +1061,13 @@ def train(cfg: DictConfig):
         else range(start_iter, cfg.setup.max_iters)
     )
     for iter_num in iter_space:
+
+        # Gradient-analysis window overrides the log cadence from grad_analysis_start_iter on (the analysis
+        # interval may be denser than log_interval), so the analyzer fires only on log steps — analysis is
+        # welded to logging by construction. Outside the window (and every non-analysis run): log_interval.
+        effective_log_interval = cfg.setup.log_interval
+        if cfg.setup.gradient_analysis_run and iter_num >= grad_analysis_start_iter:
+            effective_log_interval = grad_analysis_interval
 
         # Apply LR scheduling
         lr = get_lr(iter_num, cfg) if cfg.training.decay_lr else cfg.training.learning_rate
@@ -1130,7 +1147,7 @@ def train(cfg: DictConfig):
         accum_loss = torch.zeros((), device=device)
         accum_logged_losses = {}
         
-        analyzer = GradientAnalyzer() if (cfg.setup.gradient_analysis_run and iter_num >= grad_analysis_start_iter and iter_num % cfg.setup.log_interval == 0) else None
+        analyzer = GradientAnalyzer() if (cfg.setup.gradient_analysis_run and iter_num >= grad_analysis_start_iter and iter_num % effective_log_interval == 0) else None
         
         if analyzer:
             logger.info(f"Performing gradient analysis for step {iter_num} (this takes extra time)...")
@@ -1219,7 +1236,7 @@ def train(cfg: DictConfig):
         # Timing & Logging
         # -----------------------------
         
-        if iter_num % cfg.setup.log_interval == 0:
+        if iter_num % effective_log_interval == 0:
             # CPU-GPU sync point due to .item() extraction
             lossf = accum_loss.item()
             
@@ -1310,11 +1327,11 @@ def train(cfg: DictConfig):
                     log_payload["Compile/graph_breaks_total"] = cstats["graph_breaks_total"]
                     log_payload["Compile/n_break_reasons"] = cstats["n_break_reasons"]
                     log_payload["Compile/cache_size_limit"] = cstats["cache_size_limit"]
-                # Balanced loss components; .item() inside log_interval → no per-step GPU sync.
+                # Per-term loss components; .item() inside log_interval → no per-step GPU sync.
                 for k, v in accum_logged_losses.items():
                     log_payload[f"{get_loss_section(k, 'Train')}/{k}"] = v.item()
 
-                # Each raw term's share of summed raw magnitudes — flat once balance stabilizes
+                # Each raw term's share of summed raw magnitudes — flat once the composition stabilizes
                 # (drift signal in the main run).
                 raw_terms = {k: v for k, v in accum_logged_losses.items() if not k.endswith("_weighted")}
                 raw_total = sum(raw_terms.values())
@@ -1414,7 +1431,7 @@ def train(cfg: DictConfig):
     # -----------------------------
     if cfg.setup.gradient_analysis_run:
         logger.info("========== GRADIENT ANALYSIS SUMMARY ==========")
-        logger.info(f"Analyzed over the last {grad_analysis_steps_counted} logged steps (between iterations {grad_analysis_start_iter} and {cfg.setup.max_iters - 1}).")
+        logger.info(f"Analyzed {grad_analysis_steps_counted} steps in window [{grad_analysis_start_iter}, {cfg.setup.max_iters}) at interval {grad_analysis_interval}.")
         # Full spread per key (not just the mean): max/p90 surface the spikes (bin Viterbi churn) the
         # mean buries; min/p10 the floor. p10/p90 only when n>=2 (a degenerate 1-step window has none).
         def _stats(vals):

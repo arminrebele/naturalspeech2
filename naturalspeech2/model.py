@@ -666,7 +666,7 @@ class LossWrapper(torch.nn.Module):
 
 
 class GradientAnalyzer:
-    # Cross-head contested representation: the modules >1 functional head writes to (the loss-balance metric).
+    # Cross-head contested representation: modules >1 functional head writes to — per-term grad norm here = each term's impact on the shared encoder.
     ENCODER_MODULES = ("phoneme_encoder", "speech_prompt_encoder")
 
     def __init__(self):

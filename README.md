@@ -259,6 +259,8 @@ The aligner/duration **warmups** follow a fs → bin → duration curriculum (fi
 python scripts/train.py +experiment=gradient_analysis
 ```
 
+The diagnostic samples per-term gradients over an explicit window `[grad_analysis_start_iter, max_iters)`, every `grad_analysis_interval` steps (`null` → reuse `log_interval`); each sampled step costs ~10× a normal one (one backward per term). The default profiles the **mature endpoint tightly** — the last 200 steps, every step. Two other reads via overrides: a **decorrelated** mature estimate, `grad_analysis_start_iter=33000 grad_analysis_interval=10` (wider window, strided so consecutive-step autocorrelation doesn't shrink the effective sample); and the **full-run trajectory** including warmup, `grad_analysis_start_iter=0` — there a term's norm is its true warmup-scaled per-step contribution (the analyzer reads weighted gradients).
+
 **4. Hyperparameter-Tuning**
 
 For every hyperparameter the original paper [1] states explicitly, we use the declared value. The rest is set to a sensible default or — where the paper is silent and the choice is sensitive — tuned with **Optuna**.

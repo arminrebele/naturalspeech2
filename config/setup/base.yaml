@@ -55,6 +55,14 @@ aligner_trial_run: False
 # aligner_trial only (inert otherwise): dump per-eval held-out aligner losses (fwd_sum+bin) for the Optuna driver.
 aligner_trial_out: "research/aligner_trial_evals.jsonl"
 
+# gradient_analysis only (inert otherwise): per-term gradient diagnostic window.
+#   start_iter — first iter analyzed; window is [start_iter, max_iters). May sit inside the loss-weight
+#                warmup (the analyzer reads WEIGHTED grads = the term's true, warmup-scaled per-step impact).
+#   interval   — null → reuse log_interval; else OVERRIDES the log cadence from start_iter on, so analysis
+#                fires only on log steps (denser logging in the window). Analyzed-step count logged at start.
+grad_analysis_start_iter: 0
+grad_analysis_interval: null
+
 # Frequencies (orthogonal)
 log_interval: 100
 eval_interval: 2000          # held-out eval cadence (decoupled on GPU1, off the training path). 2000 not 1000: a full eval (WER+SIM-o+60 refs) measures ~22.7 min ≈ a 1000-step wall, so 1000 left the daemon no margin (coalescing); 2000 gives ~2x headroom for clean points.
