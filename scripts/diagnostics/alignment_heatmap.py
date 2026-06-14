@@ -26,6 +26,10 @@ import torch
 import wandb
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (e.g. WANDB_API_KEY)
+load_dotenv()
 
 from naturalspeech2.modules.aligner import compute_beta_binomial_prior, maximum_path_indices
 from naturalspeech2.paths import PROJECT_ROOT

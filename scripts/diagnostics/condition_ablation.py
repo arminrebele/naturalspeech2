@@ -20,6 +20,10 @@ import hydra
 import torch
 import wandb
 from omegaconf import DictConfig, OmegaConf
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (e.g. WANDB_API_KEY)
+load_dotenv()
 
 from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 from naturalspeech2.paths import PROJECT_ROOT

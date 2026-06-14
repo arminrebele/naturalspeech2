@@ -7,6 +7,10 @@ from torch.utils.data import DataLoader
 import hydra
 from omegaconf import DictConfig, OmegaConf
 import wandb
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (e.g. WANDB_API_KEY)
+load_dotenv()
 
 from naturalspeech2.config.schema import model_cfg_from_omegaconf
 from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, DynamicBucketedBatchSampler

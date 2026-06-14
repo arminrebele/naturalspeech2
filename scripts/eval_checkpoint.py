@@ -29,6 +29,10 @@ import torch
 import wandb
 from omegaconf import DictConfig, OmegaConf
 from safetensors.torch import load_file
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (e.g. WANDB_API_KEY)
+load_dotenv()
 
 from naturalspeech2.config.schema import model_cfg_from_omegaconf
 from naturalspeech2.data.loaders import create_dataloader
