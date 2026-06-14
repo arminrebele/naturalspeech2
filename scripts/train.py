@@ -963,7 +963,12 @@ def train(cfg: DictConfig):
         # DROPS every re-logged step <= run.step. Branch the run at the ckpt iter instead (step ==
         # iter_num since every wandb.log passes step=iter_num):
         #   rewind → resume_from truncates the orphaned tail in-place (one continuous run; default)
-        #   fork   → fork_from starts a NEW run branched at the ckpt (original preserved)
+        #   fork   → fork_from starts a NEW run branched at the ckpt (original preserved). NOTE: wandb
+        #            private-preview feature — 400s with "Forking is in private preview" unless the
+        #            account is enabled; 'rewind' (resume_from) is in the same preview family. Use 'new'.
+        #   new    → brand-new independent run; the ckpt's wandb_id is ignored entirely (source run
+        #            untouched, no fork lineage). The non-gated way to log a resumed diagnostic
+        #            (e.g. gradient_analysis off a finished run) without polluting the source A/B run.
         #   allow  → legacy reattach (keeps the drop) + a loud guard below
         if resume_wandb_id:
             branch = f"{resume_wandb_id}?_step={start_iter - 1}"
@@ -976,12 +981,17 @@ def train(cfg: DictConfig):
                 init_kwargs["fork_from"] = branch
                 logger.info(f"wandb resume mode 'fork': forking a new run from {resume_wandb_id} at "
                             f"step {start_iter - 1} (original run preserved).")
+            elif mode == "new":
+                # Leave init_kwargs untouched (no resume_from/fork_from/id) so wandb.init mints a
+                # fresh run id; the ckpt's run is left alone. Logs from start_iter onward.
+                logger.info(f"wandb resume mode 'new': starting a fresh independent run; ckpt's run "
+                            f"{resume_wandb_id} left untouched (no fork lineage).")
             elif mode == "allow":
                 init_kwargs["id"] = resume_wandb_id
                 init_kwargs["resume"] = "allow"
             else:
                 raise ValueError(
-                    f"Unknown setup.wandb_resume_mode={mode!r}; expected 'rewind', 'fork', or 'allow'.")
+                    f"Unknown setup.wandb_resume_mode={mode!r}; expected 'rewind', 'fork', 'new', or 'allow'.")
 
         wandb.init(**init_kwargs)
 
