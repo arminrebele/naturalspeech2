@@ -153,7 +153,7 @@ loss_weights:
   aligner_loss:
     group_weight: 1.0
     forward_sum_loss: 1.0
-    bin_loss: 1.0
+    bin_loss: 0.1
   diffusion_loss:
     group_weight: 1.0
     data_loss: 1.0
