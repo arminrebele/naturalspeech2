@@ -779,7 +779,7 @@ def train(cfg: DictConfig):
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
 
         # Rebuild from the checkpoint's own cfg → architecture matches even if base.yaml drifted.
-        ckpt_cfg = model_cfg_from_omegaconf(checkpoint['model_cfg'])
+        ckpt_cfg = model_cfg_from_omegaconf(checkpoint['model_cfg'], drop_unknown=True)
         model = NaturalSpeech2Model(
             ckpt_cfg,
             token_vocabulary_size=checkpoint['token_vocabulary_size'],

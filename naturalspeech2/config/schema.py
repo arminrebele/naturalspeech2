@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -224,9 +227,45 @@ class ModelConfig:
     loss_warmup_hold_steps: LossWarmupHolds = field(default_factory=LossWarmupHolds)
 
 
-def model_cfg_from_omegaconf(cfg: Any) -> ModelConfig:
+def _strip_keys_absent_from_schema(
+    schema: DictConfig, cfg: DictConfig, prefix: str = ""
+) -> tuple[dict, list[str]]:
+    """Recursively drop keys in `cfg` that the structured `schema` no longer declares,
+    returning (clean_container, dropped_dotpaths). Lets a checkpoint/exported config written
+    before a schema field was retired still load instead of hard-failing the struct merge."""
+    clean: dict = {}
+    dropped: list[str] = []
+    for key, value in cfg.items():
+        if key not in schema:
+            dropped.append(f"{prefix}{key}")
+            continue
+        sub_schema = schema[key]
+        if isinstance(value, DictConfig) and isinstance(sub_schema, DictConfig):
+            sub_clean, sub_dropped = _strip_keys_absent_from_schema(
+                sub_schema, value, f"{prefix}{key}."
+            )
+            clean[key] = sub_clean
+            dropped.extend(sub_dropped)
+        else:
+            clean[key] = value
+    return clean, dropped
+
+
+def model_cfg_from_omegaconf(cfg: Any, *, drop_unknown: bool = False) -> ModelConfig:
     # OmegaConf.merge validates cfg against the schema (raises on unknown keys / type
     # mismatches); to_object returns a real ModelConfig → call sites are Hydra-agnostic.
+    # drop_unknown=True (checkpoint / exported-config loads) first strips keys the current
+    # schema no longer declares, so a config saved before a field was retired (e.g.
+    # `loss_balance_targets`, removed in 1e27a64) still loads. The authored-config path
+    # (scratch init, dataloader benchmarks) keeps drop_unknown=False so a typo in base.yaml
+    # still hard-fails the merge.
     schema = OmegaConf.structured(ModelConfig)
+    if drop_unknown:
+        cfg, dropped = _strip_keys_absent_from_schema(schema, OmegaConf.create(cfg))
+        if dropped:
+            logger.warning(
+                "Dropping %d checkpoint config key(s) retired from the schema: %s",
+                len(dropped), ", ".join(sorted(dropped)),
+            )
     merged = OmegaConf.merge(schema, cfg)
     return OmegaConf.to_object(merged)
