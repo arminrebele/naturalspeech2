@@ -697,11 +697,20 @@ def train(cfg: DictConfig):
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     setup_file_logger(logger, log_dir / log_name, root=True)
 
-    # Daemon offloads eval to GPU1. overfit/gradient_analysis/aligner_trial need trainer-local eval
-    # state so they stay in-process; the main run's eval is plain held-out loss → daemon-compatible.
+    # Daemon offloads eval to GPU1. overfit/aligner_trial need trainer-local eval state so they stay
+    # in-process; the main run's eval is plain held-out loss → daemon-compatible. gradient_analysis is
+    # daemon-compatible too WHEN eval is configured (an early-phase grad probe bolted onto a full gated
+    # run): the per-term replays run on GPU0, the daemon evals on GPU1 — orthogonal. It forces in-process
+    # only in its pure form (eval surface all off), where a daemon would have nothing to eval.
+    gradient_analysis_eval_off = (
+        cfg.setup.gradient_analysis_run
+        and not cfg.setup.audio_tables
+        and not cfg.setup.eval_metrics
+        and cfg.setup.eval_iters == 0
+    )
     daemon_incompatible_run = (
         cfg.setup.overfit_single_batch
-        or cfg.setup.gradient_analysis_run or cfg.setup.aligner_trial_run
+        or gradient_analysis_eval_off or cfg.setup.aligner_trial_run
         or cfg.training.lr_schedule == "range_test"   # sweep diverges by design → no eval/daemon
     )
     use_eval_daemon = (
@@ -1020,23 +1029,26 @@ def train(cfg: DictConfig):
         aligner_trial_out_path.write_text("")
         
     if cfg.setup.gradient_analysis_run:
-        # Explicit window: analyze [start, max_iters) at grad_analysis_interval (null → log_interval). That
-        # interval OVERRIDES log_interval from start on (effective_log_interval in the loop), so the analyzer
-        # fires only on log steps — no off-log analysis, no extra sync sites. start may sit inside the
+        # Explicit window: analyze [start, end) at grad_analysis_interval (null → log_interval; end null →
+        # max_iters). That interval OVERRIDES log_interval INSIDE the window (effective_log_interval in the
+        # loop), so the analyzer fires only on log steps — no off-log analysis, no extra sync sites; outside
+        # the window the cadence reverts to log_interval and the run trains at normal cost. start may sit inside the
         # loss-weight warmup: the analyzer reads WEIGHTED grads, so a term's norm there is its true
         # (warmup-scaled) per-step contribution to the update.
         grad_analysis_start_iter = cfg.setup.grad_analysis_start_iter
+        grad_analysis_end_iter = cfg.setup.grad_analysis_end_iter or cfg.setup.max_iters
         grad_analysis_interval = cfg.setup.grad_analysis_interval or cfg.setup.log_interval
         grad_norm_accumulators = {}
         cos_sim_accumulators = {}
         grad_analysis_steps_counted = 0
         # Cost heads-up (no fixed cap any more): analyzed steps = multiples of the interval in
-        # [start, max_iters), each ≈10× a normal step. Surface the count so a low start / dense interval
-        # on a long run can't silently balloon the per-term passes.
-        n_analyzed = max(0, (cfg.setup.max_iters - 1) // grad_analysis_interval
+        # [start, end), each ≈10× a normal step. end < max_iters closes the window early so the rest of
+        # the run trains at normal cost. Surface the count so a low start / dense interval can't silently
+        # balloon the per-term passes.
+        n_analyzed = max(0, (grad_analysis_end_iter - 1) // grad_analysis_interval
                             - (grad_analysis_start_iter - 1) // grad_analysis_interval)
         logger.info(f"Gradient analysis: {n_analyzed} analyzed steps planned — window "
-                    f"[{grad_analysis_start_iter}, {cfg.setup.max_iters}), every {grad_analysis_interval} "
+                    f"[{grad_analysis_start_iter}, {grad_analysis_end_iter}), every {grad_analysis_interval} "
                     f"(each ≈10× a normal step).")
         
     logger.info("Starting training loop...")
@@ -1066,7 +1078,7 @@ def train(cfg: DictConfig):
         # interval may be denser than log_interval), so the analyzer fires only on log steps — analysis is
         # welded to logging by construction. Outside the window (and every non-analysis run): log_interval.
         effective_log_interval = cfg.setup.log_interval
-        if cfg.setup.gradient_analysis_run and iter_num >= grad_analysis_start_iter:
+        if cfg.setup.gradient_analysis_run and grad_analysis_start_iter <= iter_num < grad_analysis_end_iter:
             effective_log_interval = grad_analysis_interval
 
         # Apply LR scheduling
@@ -1147,7 +1159,7 @@ def train(cfg: DictConfig):
         accum_loss = torch.zeros((), device=device)
         accum_logged_losses = {}
         
-        analyzer = GradientAnalyzer() if (cfg.setup.gradient_analysis_run and iter_num >= grad_analysis_start_iter and iter_num % effective_log_interval == 0) else None
+        analyzer = GradientAnalyzer() if (cfg.setup.gradient_analysis_run and grad_analysis_start_iter <= iter_num < grad_analysis_end_iter and iter_num % effective_log_interval == 0) else None
         
         if analyzer:
             logger.info(f"Performing gradient analysis for step {iter_num} (this takes extra time)...")
@@ -1431,7 +1443,7 @@ def train(cfg: DictConfig):
     # -----------------------------
     if cfg.setup.gradient_analysis_run:
         logger.info("========== GRADIENT ANALYSIS SUMMARY ==========")
-        logger.info(f"Analyzed {grad_analysis_steps_counted} steps in window [{grad_analysis_start_iter}, {cfg.setup.max_iters}) at interval {grad_analysis_interval}.")
+        logger.info(f"Analyzed {grad_analysis_steps_counted} steps in window [{grad_analysis_start_iter}, {grad_analysis_end_iter}) at interval {grad_analysis_interval}.")
         # Full spread per key (not just the mean): max/p90 surface the spikes (bin Viterbi churn) the
         # mean buries; min/p10 the floor. p10/p90 only when n>=2 (a degenerate 1-step window has none).
         def _stats(vals):

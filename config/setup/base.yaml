@@ -56,11 +56,14 @@ aligner_trial_run: False
 aligner_trial_out: "research/aligner_trial_evals.jsonl"
 
 # gradient_analysis only (inert otherwise): per-term gradient diagnostic window.
-#   start_iter — first iter analyzed; window is [start_iter, max_iters). May sit inside the loss-weight
+#   start_iter — first iter analyzed; window is [start_iter, end_iter). May sit inside the loss-weight
 #                warmup (the analyzer reads WEIGHTED grads = the term's true, warmup-scaled per-step impact).
-#   interval   — null → reuse log_interval; else OVERRIDES the log cadence from start_iter on, so analysis
+#   end_iter   — null → max_iters; else the window CLOSES here and training continues normally to max_iters
+#                (an early-phase grad probe bolted onto an otherwise-full gated run — analysis only [start,end)).
+#   interval   — null → reuse log_interval; else OVERRIDES the log cadence INSIDE the window, so analysis
 #                fires only on log steps (denser logging in the window). Analyzed-step count logged at start.
 grad_analysis_start_iter: 0
+grad_analysis_end_iter: null
 grad_analysis_interval: null
 
 # Frequencies (orthogonal)
