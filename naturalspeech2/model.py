@@ -356,7 +356,7 @@ class NaturalSpeech2Model(nn.Module):
             prompt_encodings_mask,
         )
 
-        predicted_log_pitch, predicted_voicing_logit = self.pitch_predictor(   # [B, F], [B, F]
+        predicted_norm_logf0, predicted_voicing_logit = self.pitch_predictor(   # [B, F] normalized log-F0, [B, F]
             expanded_phoneme_encodings,
             frame_mask_expanded,
             prompt_encodings,
@@ -404,14 +404,21 @@ class NaturalSpeech2Model(nn.Module):
         phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').to(predicted_log_durations.dtype)
         duration_predictor_loss = (duration_loss_per_phoneme * phoneme_mask_flat).sum()
 
-        # Pitch loss
-        voiced_mask = (pitch > 0).to(predicted_log_pitch.dtype)                                # [B, F]
-        frame_mask_flat = rearrange(frame_mask_expanded, 'b f 1 -> b f').to(predicted_log_pitch.dtype)
+        # Pitch loss — predict & supervise in NORMALIZED log-F0 space ((logF0−μ)/σ over voiced frames).
+        # The head's zero-init output (0) equals the normalized mean → init MSE = 1, not the raw-space
+        # μ²+σ²≈25 (so no init gradient explosion); the head output is unit-scale; the loss weight is
+        # honest (raw-log MSE silently carried a σ²≈0.12 factor); and the predictor now speaks the SAME
+        # normalized space as the pitch condition. FastSpeech2/FastPitch-standard; de-normalized to Hz
+        # at inference (·σ+μ → exp).
+        voiced_mask = (pitch > 0).to(predicted_norm_logf0.dtype)                                # [B, F]
+        frame_mask_flat = rearrange(frame_mask_expanded, 'b f 1 -> b f').to(predicted_norm_logf0.dtype)
         pitch_loss_mask = voiced_mask * frame_mask_flat                                        # [B, F]
-        gt_log_pitch = torch.log(pitch.clamp(min=1e-5)).to(predicted_log_pitch.dtype)          # [B, F]
+        gt_norm_logf0 = (
+            (torch.log(pitch.clamp(min=1e-5)) - self.logf0_mean) / self.logf0_std
+        ).to(predicted_norm_logf0.dtype)                                                       # [B, F]
         pitch_loss_per_frame = F.mse_loss(
-            predicted_log_pitch,
-            gt_log_pitch,
+            predicted_norm_logf0,
+            gt_norm_logf0,
             reduction='none',
         )  # [B, F]
         pitch_predictor_loss = (pitch_loss_per_frame * pitch_loss_mask).sum()
@@ -561,16 +568,18 @@ class NaturalSpeech2Model(nn.Module):
 
         # 4. Pitch: predicted, unless teacher-forced GT pitch ([B, F'] in Hz) is supplied.
         if pitch is None:
-            predicted_log_pitch, predicted_voicing_logit = self.pitch_predictor(  # [B, F'], [B, F']
+            predicted_norm_logf0, predicted_voicing_logit = self.pitch_predictor(  # [B, F'] normalized, [B, F']
                 expanded_phoneme_encodings,
                 frame_mask,
                 prompt_encodings,
                 prompt_encodings_mask,
             )
+            # De-normalize the head's normalized log-F0 back to Hz (inverse of the training target norm).
+            log_pitch = predicted_norm_logf0 * self.logf0_std + self.logf0_mean
             # Gate by predicted voicing: unvoiced → 0 Hz, matching the GT condition (pitch=0 on
             # unvoiced). Pitch head is voiced-only trained → ~speaker-mean F0 on unvoiced = OOD → noise.
-            voiced = (torch.sigmoid(predicted_voicing_logit) > 0.5).to(predicted_log_pitch.dtype)
-            pitch = torch.exp(predicted_log_pitch) * voiced                       # [B, F']
+            voiced = (torch.sigmoid(predicted_voicing_logit) > 0.5).to(log_pitch.dtype)
+            pitch = torch.exp(log_pitch) * voiced                       # [B, F']
 
         condition = self._generate_condition(                                     # [B, F', D]
             expanded_phoneme_encodings,
