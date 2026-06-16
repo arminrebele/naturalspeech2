@@ -6,6 +6,12 @@ rope_max_seq_len: 3000
 prompt_seconds: 3.0        # fixed prompt length at training; random start position within the clip
 min_target_seconds: 1.0    # safety net — minimum target duration preserved on short clips
 
+# Pitch-condition normalization stats (log-F0 mean/std over voiced frames). The diffusion condition
+# adds a projected pitch term to the phoneme encodings; the projection consumes [voiced_flag, (logF0-μ)/σ]
+# so the pitch term is unit-scale and F0-magnitude-independent (raw Hz made it ~150× and dominate the
+# content). Computed once by scripts/compute_pitch_stats.py; recompute if the training corpus changes.
+pitch_stats_path: "models/pitch_logf0_stats.pt"
+
 # Stop-gradient on the phoneme-encoder → aligner / duration-predictor edges (parallel-TTS decoupling).
 # duration: paper-backed — Glow-TTS sg[·] on the duration input (Eq 6); RAD-TTS torch.detach on the
 # duration text input. aligner: shields the encoder. RAD-TTS gets the same shielding STRUCTURALLY by

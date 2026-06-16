@@ -195,6 +195,9 @@ class ModelConfig:
     prompt_seconds: float = 3.0
     min_target_seconds: float = 1.0
 
+    # Pitch-condition normalization (log-F0 mean/std over voiced frames; scripts/compute_pitch_stats.py).
+    pitch_stats_path: Optional[str] = "models/pitch_logf0_stats.pt"
+
     # Stop-gradient on the phoneme-encoder → aligner / duration-predictor edges (parallel-TTS
     # decoupling). Duration: paper-backed (Glow-TTS sg[·] on the duration input, Eq 6; RAD-TTS
     # torch.detach on the duration text input). Aligner: shields the encoder — RAD-TTS shields its

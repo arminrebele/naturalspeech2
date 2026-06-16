@@ -1,6 +1,7 @@
 import logging
 import math
 from dataclasses import asdict
+from pathlib import Path
 
 import torch
 from torch import nn
@@ -18,6 +19,7 @@ from naturalspeech2.modules.duration_predictor import DurationPredictor
 from naturalspeech2.modules.pitch_predictor import PitchPredictor
 from naturalspeech2.modules.diffusion_model import DiffusionModel
 from naturalspeech2.modules.layers import Conv1D
+from naturalspeech2.paths import PROJECT_ROOT
 from naturalspeech2.utils.utils import create_mask_from_lengths
 from naturalspeech2.utils.initialization import standard_init
 
@@ -90,8 +92,15 @@ class NaturalSpeech2Model(nn.Module):
             **asdict(cfg.pitch_predictor),
         )
 
-        # Project per-frame pitch (1 ch) → hidden_dim, added to expanded_phoneme_encodings for condition c.
-        self.pitch_projection = Conv1D(1, cfg.hidden_dim, 1)
+        # Project the per-frame pitch encoding → hidden_dim, added to expanded_phoneme_encodings for the
+        # condition. Input = 2 channels: [voiced_flag, normalized_log_F0]; normalization (next two buffers)
+        # keeps the pitch term unit-scale and F0-magnitude-independent so it doesn't swamp the content
+        # (raw Hz made it ~150× and reach parity with the phoneme term — see _generate_condition).
+        self.pitch_projection = Conv1D(2, cfg.hidden_dim, 1)
+        self.register_buffer("logf0_mean", torch.zeros(()), persistent=True)
+        self.register_buffer("logf0_std", torch.ones(()), persistent=True)
+        if cfg.pitch_stats_path is not None:
+            self._load_pitch_stats(cfg.pitch_stats_path)
 
         self.diffusion_model = DiffusionModel(
             latent_dim=cfg.latent_dim,
@@ -104,6 +113,20 @@ class NaturalSpeech2Model(nn.Module):
     def _init_weights(self) -> None:
         # Submodules self-init; pitch_projection is the only top-level learnable layer owned here.
         standard_init(self.pitch_projection)
+
+    def _load_pitch_stats(self, path: str) -> None:
+        p = Path(path)
+        if not p.is_absolute():
+            p = PROJECT_ROOT / p
+        assert p.is_file(), (
+            f"pitch stats not found at {p}; run scripts/compute_pitch_stats.py "
+            f"or set model.pitch_stats_path to null."
+        )
+        stats = torch.load(p, map_location="cpu", weights_only=True)
+        std = float(stats["logf0_std"])
+        assert std > 0, f"logf0_std must be strictly positive; got {std}"
+        self.logf0_mean.copy_(torch.tensor(float(stats["logf0_mean"])))
+        self.logf0_std.copy_(torch.tensor(std))
 
     @staticmethod
     def _expand_phoneme_encodings(
@@ -218,8 +241,18 @@ class NaturalSpeech2Model(nn.Module):
         pitch,                       # [B, F]          | GT F0 in Hz during training
         frame_mask,                  # [B, F, 1]       | bool
     ):
-        pitch = rearrange(pitch, 'b f -> b f 1')
-        pitch_projection = self.pitch_projection(pitch, frame_mask)  # [B, F, D]
+        # Encode pitch as 2 channels: an explicit voiced flag + normalized log-F0 (zero-mean/unit-std over
+        # voiced frames). This decouples "is it voiced" from "how high", so the projected pitch term is
+        # unit-scale and independent of absolute F0 — vs feeding raw Hz, which made the term scale ~150×,
+        # reach parity with the phoneme content, vary with the speaker's F0, and jump to 0 on unvoiced.
+        voiced = pitch > 0                                                # [B, F]
+        norm_logf0 = torch.where(
+            voiced,
+            (torch.log(pitch.clamp(min=1e-5)) - self.logf0_mean) / self.logf0_std,
+            torch.zeros_like(pitch),
+        )
+        pitch_feats = torch.stack([voiced.to(pitch.dtype), norm_logf0], dim=-1)  # [B, F, 2]
+        pitch_projection = self.pitch_projection(pitch_feats, frame_mask)        # [B, F, D]
         condition = expanded_phoneme_encodings + pitch_projection
         condition = condition * frame_mask.to(condition.dtype)
         return condition
