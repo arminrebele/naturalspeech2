@@ -23,7 +23,7 @@ gradient_accumulation_steps: 1
 # graphs, no symbolic-shape overhead) / true=fully symbolic. mode: default | reduce-overhead |
 # max-autotune-no-cudagraphs | max-autotune (the last two autotune kernels; reduce-overhead + both
 # cudagraph modes RAISE peak VRAM → re-run find_max_batch_sizes if adopted). A/B with
-# scripts/benchmarks/dataloader/stress_test_fragmentation.py before flipping a real run.
+# scripts/benchmarks/dataloader/benchmark_compile_modes.py before flipping a real run.
 compile:
   enabled: true
   dynamic: null

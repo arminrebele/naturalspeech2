@@ -164,13 +164,17 @@ python scripts/benchmarks/dataloader/find_max_batch_sizes.py
 
 **3. Stress-Test + Compile-Mode Selection**
 
-This [harness](scripts/benchmarks/dataloader/stress_test_fragmentation.py) cycles every bucket through a real forward+backward step (dummy batches), doing two jobs at once: it (a) **stress-tests the allocator** against back-to-back shape jumps — catching an OOM deep into training that the per-bucket sizing missed — and (b) **A/B-compares `torch.compile` modes** for the training step.
+Two tools, each cycling dummy per-bucket batches through a real forward+backward step — split because you often want only one:
+
+- [`stress_test_fragmentation.py`](scripts/benchmarks/dataloader/stress_test_fragmentation.py) **stress-tests the allocator** against back-to-back random shape jumps (torch.compiled, like training) — catching an OOM deep into training that the per-bucket sizing in step 2 missed. On failure it reports the offending bucket + peak VRAM + CUDA memory summary; on success, peak VRAM over the run.
+- [`benchmark_compile_modes.py`](scripts/benchmarks/dataloader/benchmark_compile_modes.py) **A/B-compares `torch.compile` modes** for the training step.
 
 ```bash
 python scripts/benchmarks/dataloader/stress_test_fragmentation.py
+python scripts/benchmarks/dataloader/benchmark_compile_modes.py
 ```
 
-For each `(dynamic, mode)` it reports steady-state **ms/step**, **peak VRAM**, the **unique-graph count**, warmup wall-time, and a **plateau check** (a full extra bucket pass must add *no* new graphs = no shape leak). Use the table to choose `setup.compile.{dynamic,mode}` (step 5). Env knobs: `COMPILE_SWEEP=auto|fast|all` (default `all`, including both cudagraph autotune modes), `COMPILE_TIMED_ROUNDS`, `COMPILE_MAX_WARMUP_PASSES`.
+For each `(dynamic, mode)` the compile benchmark reports steady-state **ms/step**, **peak VRAM**, the **unique-graph count**, warmup wall-time, and a **plateau check** (a full extra bucket pass must add *no* new graphs = no shape leak). Use the table to choose `setup.compile.{dynamic,mode}` (step 5). Env knobs: `COMPILE_SWEEP=auto|fast|all` (default `all`, including both cudagraph autotune modes), `COMPILE_TIMED_ROUNDS`, `COMPILE_MAX_WARMUP_PASSES`.
 
 > **Note:** `dynamic=False` (a static graph per bucket) and `max-autotune` trade a longer one-off warmup for a faster steady-state step — usually worth it over a 400–600k-step run, but **benchmark it**: the win is hardware-dependent (the big channel dims are already static, so only the batch/length dims are at play). The cudagraph modes (`reduce-overhead`, `max-autotune`) reserve a static memory pool per shape → **higher peak VRAM**; if the mode you pick raises peak VRAM, **re-run step 2** — the bucket batch sizes were tuned against the old peak. An OOM here on the default (`auto`) mode means the bucket batch sizes themselves are over budget and need lowering.
 
