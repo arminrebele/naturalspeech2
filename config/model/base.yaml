@@ -131,10 +131,12 @@ diffusion_model:
   timestep_eps: 0.001
   min_snr_gamma: 5.0
   # Training-time t distribution: "uniform" | "logit_normal" (paper is silent on t-sampling;
-  # logit-normal per SD3, Esser et al. ICML 2024, concentrates draws in the mid-noise band).
-  # Eval always draws uniform regardless → held-out losses stay comparable across schemes.
+  # logit-normal per SD3, Esser et al. ICML 2024). mean=1.0 shifts the median t 0.5→0.73 onto the
+  # high-t band where the per-t probe showed the denoiser under-uses the condition (early-sampling
+  # lock-in); mid/low-t is already near-Bayes. Eval always draws uniform → held-out losses stay
+  # comparable across schemes.
   t_sampling: "logit_normal"
-  t_logit_mean: 0.0
+  t_logit_mean: 1.0
   t_logit_std: 1.0
 
 # EMA of model weights for sampling. halflife_kimg = halflife in thousands of training examples
