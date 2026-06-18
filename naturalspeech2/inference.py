@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 # Per-phoneme duration ceiling (seconds) for the inference safety guard. Anchored on articulatory
 # reality — no single phoneme in natural speech approaches this (sustained vowels top out ~1–2 s),
-# while a mis-firing (under-trained / OOD) duration predictor blows up to tens of seconds via expm1.
+# while a mis-firing (under-trained / OOD) duration predictor blows up to tens of seconds.
 # Legitimate (≤~2 s) and pathological (≫) sit an order of magnitude apart, so the exact value is
 # insensitive: this generous default rejects nothing real yet still catches runaway-frame OOMs.
 MAX_SECONDS_PER_PHONEME = 4.0
