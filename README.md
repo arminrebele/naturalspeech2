@@ -25,7 +25,7 @@ Below is the complete forward pass through the NaturalSpeech 2 architecture duri
 - **SiLU** [6] activations in FFNs instead of ReLU.
 
 *Training-stability tweaks:*
-- **MSE on log-durations / log-f0** for the duration and pitch predictors, instead of L1 — numerically stabler and standard in follow-up TTS work.
+- **L1 on log-durations** for the duration predictor (NS2's L1, applied in log-space so it stays scale-symmetric across phoneme lengths; L1 → conditional median, which commutes with `expm1`, so there is no log→exp Jensen bias) and **MSE on log-f0** for the pitch predictor — log-space targets are numerically stabler than raw frame/Hz ones.
 
 The core latent denoiser is a 40-block WaveNet-style stack that interleaves dilated convolutions with Q-K-V cross-attention and FiLM conditioning:
 
@@ -257,7 +257,7 @@ We additionally calculate cosine-similarities between the gradients to expose co
 
 For the **alignment and duration** losses specifically, we instead **stop-gradient** their inputs (`detach_aligner_input` / `detach_duration_predictor_input`, default on) so they don't reach the shared phoneme encoder at all. The **duration** detach is the paper recipe (Glow-TTS's `sg[·]` on the duration input, Eq 6; RAD-TTS `torch.detach`s the duration's text input). The **aligner** detach shields the encoder: RAD-TTS achieves the same shielding *structurally* — it computes alignment off the **raw pre-encoder embedding** (`text_embeddings`, not the encoder output `text_enc`), so the CTC/bin gradient never reaches its contextual encoder. Our aligner reads the **post-encoder** `phoneme_encodings`, so we detach for the equivalent shielding; the truly RAD-faithful alternative — tapping the aligner off the phoneme **embedding** (pre-transformer) — is the unbuilt "upstream-tap" option. (Pitch is left **attached**, matching RAD-TTS's F0 predictor, which reads non-detached `text_enc`.) When one task's gradient both dominates and destabilizes a shared backbone, decoupling it is cleaner than re-weighting; the encoder is then shaped only by the generative path (+ pitch). Set the flags `false` to A/B the coupled form.
 
-The aligner/duration **warmups** follow a fs → bin → duration curriculum (fixed absolute steps, anchored to examples-seen — our ~80k-frame/step batch is ~10× the alignment papers', so RAD-TTS's `bin@18k` scales to ~2k): `forward_sum` is full from step 0; `bin` holds to 2k then ramps to full at 8k (premature hardening locks in ~uniform durations before the soft alignment differentiates phoneme lengths — RAD-TTS delays `bin` for the same reason); `duration` holds to 6k then ramps to full at 15k, after `bin` has sharpened the Viterbi path its MSE targets.
+The aligner/duration **warmups** follow a fs → bin → duration curriculum (fixed absolute steps, anchored to examples-seen — our ~80k-frame/step batch is ~10× the alignment papers', so RAD-TTS's `bin@18k` scales to ~2k): `forward_sum` is full from step 0; `bin` holds to 2k then ramps to full at 8k (premature hardening locks in ~uniform durations before the soft alignment differentiates phoneme lengths — RAD-TTS delays `bin` for the same reason); `duration` holds to 6k then ramps to full at 15k, after `bin` has sharpened the Viterbi path its L1 targets.
 
 ```bash
 python scripts/train.py +experiment=gradient_analysis

@@ -349,7 +349,7 @@ class NaturalSpeech2Model(nn.Module):
         duration_phoneme_encodings = (
             phoneme_encodings.detach() if self.detach_duration_predictor_input else phoneme_encodings
         )
-        predicted_durations = self.duration_predictor(  # [B, P] raw frame counts
+        predicted_log_durations = self.duration_predictor(  # [B, P] log-durations
             duration_phoneme_encodings,
             phoneme_tokens_mask,
             prompt_encodings,
@@ -392,14 +392,21 @@ class NaturalSpeech2Model(nn.Module):
             frame_mask,
         )
 
-        # Masked L1 on raw frame durations (summed; per-unit denominator applied in LossWrapper).
-        gt_durations = durations.to(predicted_durations.dtype)  # [B, P]
+        # Masked L1 on log-durations (summed; per-unit denominator applied in LossWrapper). Log-space is
+        # scale-symmetric: a 1-frame error on a 2-frame consonant (catastrophic) outweighs a 1-frame error
+        # on a 50-frame vowel (inaudible), whereas raw-frame L1 weighs them equally and neglects consonants
+        # (Σ|err| dominated by long vowels) → garbled free-running content. L1 (not MSE) makes the predictor
+        # the conditional MEDIAN; since the median commutes with expm1, expm1(median(log1p d)) = median(d)
+        # exactly → no log→exp Jensen tilt (MSE-on-log → exp(E[log d]) = geometric mean = the ~13% length
+        # under-prediction). log1p keeps log(0)→0 for padded/1-frame phonemes. Net predicts log-duration;
+        # expm1(y) → frames.
+        gt_log_durations = torch.log1p(durations.to(predicted_log_durations.dtype))  # [B, P]
         duration_loss_per_phoneme = F.l1_loss(
-            predicted_durations,
-            gt_durations,
+            predicted_log_durations,
+            gt_log_durations,
             reduction='none',
         )  # [B, P]
-        phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').to(predicted_durations.dtype)
+        phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').to(predicted_log_durations.dtype)
         duration_predictor_loss = (duration_loss_per_phoneme * phoneme_mask_flat).sum()
 
         # Pitch loss — predict & supervise in NORMALIZED log-F0 space ((logF0−μ)/σ over voiced frames).
@@ -466,7 +473,7 @@ class NaturalSpeech2Model(nn.Module):
     @staticmethod
     def _cap_durations(durations: torch.Tensor, max_frames_per_phoneme: int | None,
                        on_overflow: str) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """Sync-free per-phoneme duration clamp → guards duration-predictor blow-ups (runaway
+        """Sync-free per-phoneme duration clamp → guards duration-predictor blow-ups (expm1 → runaway
         frames → OOM). Returns (clamped, worst_pre_clamp | None). Clamp is unconditional (no-op below
         cap) so it needs NO sync; the caller reads `worst` folded into the existing max_frames sync and
         then raises/warns. Per-phoneme cap → total bounded by P·cap (no magic number). None = off."""
@@ -524,15 +531,17 @@ class NaturalSpeech2Model(nn.Module):
         # 3. Durations: predicted, unless teacher-forced GT durations are supplied
         #    (diagnostic / controllable generation — skips the duration predictor).
         if durations is None:
-            predicted_durations = self.duration_predictor(                        # [B, P] raw frame counts
+            predicted_log_durations = self.duration_predictor(                    # [B, P] log-durations
                 phoneme_encodings,
                 phoneme_tokens_mask,
                 prompt_encodings,
                 prompt_encodings_mask,
             )
-            # round → clamp ≥1 frame → mask padding to 0.
+            # Inverse of training's log1p: expm1 → round → clamp ≥1 frame → mask padding to 0.
+            # min=1 (not 0) stops an untrained model collapsing valid phonemes to 0 frames →
+            # max_frames=0 → crash downstream.
             phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').long()
-            durations = predicted_durations.round().long().clamp(min=1)
+            durations = torch.expm1(predicted_log_durations).round().long().clamp(min=1)
             durations = durations * phoneme_mask_flat                             # [B, P]
             durations, worst_frames = self._cap_durations(durations, max_frames_per_phoneme, on_overflow)
         else:
