@@ -409,11 +409,11 @@ class NaturalSpeech2Model(nn.Module):
         phoneme_mask_flat = rearrange(phoneme_tokens_mask, 'b p 1 -> b p').to(predicted_log_durations.dtype)
         duration_predictor_loss = (duration_loss_per_phoneme * phoneme_mask_flat).sum()
 
-        # Pitch loss — predict & supervise in NORMALIZED log-F0 space ((logF0−μ)/σ over voiced frames).
-        # The head's zero-init output (0) equals the normalized mean → init MSE = 1, not the raw-space
-        # μ²+σ²≈25 (so no init gradient explosion); the head output is unit-scale; the loss weight is
-        # honest (raw-log MSE silently carried a σ²≈0.12 factor); and the predictor now speaks the SAME
-        # normalized space as the pitch condition. FastSpeech2/FastPitch-standard; de-normalized to Hz
+        # Pitch loss — L1 on NORMALIZED log-F0 ((logF0−μ)/σ) over voiced frames. L1 (not MSE) → the
+        # predictor learns the conditional MEDIAN, which commutes with exp, so de-normalize→exp gives
+        # median(F0) with no log→exp Jensen tilt. Normalization stays: load-bearing for the pitch
+        # *condition* (keeps the pitch term from dominating the phoneme content) and, on the loss, a clean
+        # zero-init=mean start + honest unit scale. FastSpeech2/FastPitch-standard; de-normalized to Hz
         # at inference (·σ+μ → exp).
         voiced_mask = (pitch > 0).to(predicted_norm_logf0.dtype)                                # [B, F]
         frame_mask_flat = rearrange(frame_mask_expanded, 'b f 1 -> b f').to(predicted_norm_logf0.dtype)
@@ -421,7 +421,7 @@ class NaturalSpeech2Model(nn.Module):
         gt_norm_logf0 = (
             (torch.log(pitch.clamp(min=1e-5)) - self.logf0_mean) / self.logf0_std
         ).to(predicted_norm_logf0.dtype)                                                       # [B, F]
-        pitch_loss_per_frame = F.mse_loss(
+        pitch_loss_per_frame = F.l1_loss(
             predicted_norm_logf0,
             gt_norm_logf0,
             reduction='none',

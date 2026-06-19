@@ -25,7 +25,7 @@ Below is the complete forward pass through the NaturalSpeech 2 architecture duri
 - **SiLU** [6] activations in FFNs instead of ReLU.
 
 *Training-stability tweaks:*
-- **L1 on log-durations** for the duration predictor (NS2's L1, applied in log-space so it stays scale-symmetric across phoneme lengths; L1 → conditional median, which commutes with `expm1`, so there is no log→exp Jensen bias) and **MSE on log-f0** for the pitch predictor — log-space targets are numerically stabler than raw frame/Hz ones.
+- **L1 in log-space** for the duration (log-durations) and pitch (normalized log-f0) predictors — NS2 uses L1 for both. Applied in log-space it stays scale-symmetric across the value range, and since L1 → conditional median (which commutes with `exp`/`expm1`) the de-normalized prediction carries no log→exp Jensen bias (an MSE-in-log loss would learn the geometric mean → biased low).
 
 The core latent denoiser is a 40-block WaveNet-style stack that interleaves dilated convolutions with Q-K-V cross-attention and FiLM conditioning:
 
