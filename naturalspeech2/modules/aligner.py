@@ -174,10 +174,11 @@ class AlignerNet(nn.Module):
             self.phoneme_norm, self.phoneme_convs, self.phoneme_proj,
         )  # [B, P, attn_channels]
 
-        # Raw squared-L2 (paper One-TTS-Alignment / RAD-TTS): score = −‖mel−text‖², no temperature,
-        # no normalization. Glow-TTS grounding: log N(mel; μ=text, σ=1) = −½‖·‖²+c (½ dropped per the
-        # paper's softmax(−D)). Sharpness = feature magnitude (set by Xavier init), not a scalar knob;
-        # the downstream first log_softmax normalizes this scale away (keeps the blank calibrated).
+        # Raw squared-L2 (One-TTS-Alignment paper / RAD-TTS): score = −‖mel−text‖², no normalization.
+        # Glow-TTS grounding: log N(mel; μ=text, σ=1) = −½‖·‖²+c (½ dropped per the paper's softmax(−D)).
+        # Sharpness = feature magnitude, set by the aligner's Xavier init — our substitute for the fixed
+        # temp=0.0005 the radtts CODE multiplies onto the squared-L2 (the paper omits it; we follow the
+        # paper). The downstream first log_softmax doesn't remove this scale — it calibrates the blank.
         #
         # FP32 GEMM (autocast disabled): torch.bmm is an autocast op, so .float() alone wouldn't keep
         # the cross-term FP32 in the autocast region — cheap insurance for the log_softmax+prior math.
