@@ -68,15 +68,15 @@ grad_analysis_interval: null
 
 # Frequencies (orthogonal)
 log_interval: 100
-eval_interval: 2000          # held-out eval cadence (decoupled on GPU1, off the training path). 2000 not 1000: a full eval (WER+SIM-o+60 refs) measures ~22.7 min ≈ a 1000-step wall, so 1000 left the daemon no margin (coalescing); 2000 gives ~2x headroom for clean points.
+eval_interval: 3000          # held-out eval cadence (decoupled on GPU1, off the training path). Sized for the NORMAL-run wall (~47 min/2000 steps, measured via drain-timestamp deltas): 3000 ≈ 70 min vs a 120-ref eval ~40 min ≈ 57% → safe margin (60 refs @ 2000 was ~48%; 120 refs @ 2000 ≈ 85% → coalescing risk). Gradient-analysis bolt-on runs train ~15–50% slower (grad replays) → longer wall → they can override setup.eval_interval=2000 for more eval points. Confirm the real 120-ref wall from the daemon log's per-eval "done in Ys".
 checkpoint_interval: 5000    # crash-recovery ckpt.pt every 5000 iters
 
 # Eval block contents
 eval_iters: 200
 audio_tables: [fixed_val_refs, random_val]  # fixed_val_refs: held-out dev+test validation (audio + WER/SIM-o over num_audio_refs); random_val: 1 random val (dev+test) clip @ 5s vs 10s prompt + random custom text (generation showcase, 2 rows, no metrics)
-num_audio_refs: 60              # total held-out refs drawn from the pooled dev+test val set (also the WER + SIM-o sample size — more refs = steadier metrics). random_val + overfit_batch fixed at 2; num_table_rows still caps the rendered wandb rows at 2
+num_audio_refs: 120             # total held-out refs drawn from the pooled dev+test val set (also the WER + SIM-o sample size — more refs = steadier mean + tighter p10/median/p90). VRAM-NEUTRAL: pack_by_budget caps each gen batch at gen_frame_budget regardless of count (more refs = more batches, same peak), so the ~97% GPU1 peak is unchanged; cost is eval wall (~linear). random_val + overfit_batch fixed at 2; num_table_rows still caps the rendered wandb rows at 2
 num_table_rows: 2               # how many of those refs to RENDER in each wandb audio table; WER/metrics still use ALL num_audio_refs. Caps table size so it doesn't balloon as num_audio_refs scales (set ≥ num_audio_refs to show all).
-gen_frame_budget: 40000         # eval-block batched generation: length-sorted refs packed up to batch·max_latent_frames ≤ this. ~ the bsd-halved training batch (≈80k → ≈40k); eager no_grad on the 2nd GPU keeps VRAM well below a training step, so raise if headroom allows. Used by fixed-ref + random_val gen (in-process + daemon).
+gen_frame_budget: 40000         # eval-block batched generation: length-sorted refs packed up to batch·max_latent_frames ≤ this. ~ the bsd-halved training batch (≈80k → ≈40k). DO NOT RAISE: measured GPU1 daemon peak ~25 GB / ~97% of the 4090 at this budget (transient generation/loss-eval spike on top of ~15 GB resident) — no headroom (the earlier "well below a training step" note was wrong). Used by fixed-ref + random_val gen (in-process + daemon).
 inference_data_loss_sweep: []   # empty by default; overfit_test enables for solver diagnostics
 eval_metrics: ["wer", "sim_o"]  # objective metrics on the pooled val refs. WER = HuBERT-CTC (no LM); SIM-o = WavLM-Large-SV speaker cosine (gen vs prompt). On the metric device. Inert for modes with no fixed-ref table.
 metric_batch_samples: 1600000   # batched-WER budget: length-sorted gen clips packed up to batch·max_16kHz_samples ≤ this (≈100 s audio/forward). Conservative for the 2nd GPU under no_grad FP32 — raise given headroom. Per-sample logits sliced to CTC length → ~ per-clip WER. (SIM-o stays per-clip: ECAPA pooling is unmasked.)

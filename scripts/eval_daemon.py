@@ -145,6 +145,12 @@ def evaluate_snapshot(ctx: dict, snap: dict, best_val_loss: float) -> float:
     cfg, step = ctx["cfg"], snap["step"]
     logger.info(f"Evaluating snapshot step {step} ...")
     t0 = time.perf_counter()
+    # GPU-mem probe (host-side allocator counters → no sync/cost): reserved held since the last eval
+    # (drops back ⇒ allocator released it between evals; stays high ⇒ sticky) + this eval's peak.
+    # Settles the expandable_segments release question + gives the exact per-eval peak for budget tuning.
+    dev = ctx["device"]
+    mem_before = torch.cuda.memory_reserved(dev) / 1e9
+    torch.cuda.reset_peak_memory_stats(dev)
     report = run_decoupled_eval(
         model=ctx["model"], loss_model=ctx["loss_model"], loss_wrapper=ctx["loss_wrapper"],
         train_loader=ctx["train_loader"], dev_loader=ctx["dev_loader"], test_loader=ctx["test_loader"],
@@ -179,7 +185,8 @@ def evaluate_snapshot(ctx: dict, snap: dict, best_val_loss: float) -> float:
                             {"best_val_loss": best_val_loss, "best_step": step})
         logger.info(f"New best val loss {best_val_loss:.4f} at step {step} → wrote ema_best.")
     ipc.write_results(run_dir=ctx["run_dir"], report=report)
-    logger.info(f"Snapshot step {step} done in {time.perf_counter() - t0:.1f}s.")
+    logger.info(f"Snapshot step {step} done in {time.perf_counter() - t0:.1f}s; GPU reserved "
+                f"{mem_before:.1f} GB before → {torch.cuda.max_memory_reserved(dev) / 1e9:.1f} GB peak.")
     return best_val_loss
 
 
