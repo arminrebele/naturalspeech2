@@ -31,7 +31,10 @@ research/
 # wandb run artifacts at repo root (NOT config/wandb/ which holds tracked configs)
 /wandb/
 
-docs/notes/
+docs/log.md
+docs/status.md
+docs/server.md
+docs/architecture.md
 docs/paper/
 docs/paper-tex/
 
