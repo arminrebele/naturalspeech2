@@ -6,8 +6,11 @@ defaults:
 # (ISR + warmup_ratio 0.11, inherited from base) WITH the base loss-weight schedule intact (the
 # warmup is part of representative training); GradientAnalyzer profiles per-loss-term gradient norms +
 # pairwise cosines over an explicit window [grad_analysis_start_iter, grad_analysis_end_iter), at
-# grad_analysis_interval (interval null → log_interval; end_iter null → max_iters, as left here). Eval /
-# audio / checkpoints all off — pure gradient geometry.
+# grad_analysis_interval (interval null → log_interval; end_iter null → max_iters, as left here).
+# Eval is ON: the full surface is inherited from base (eval_iters / audio_tables / eval_metrics), so
+# held-out loss + WER/SIM-o + audio run at eval_interval below — on the GPU1 daemon (2-GPU), orthogonal
+# to the per-term grad replays on GPU0; single-GPU falls back to blocking in-process eval. Only
+# checkpoints / safetensors stay off (diagnostic — no artifacts written).
 #
 # Default window = last 200 steps, every step (start max_iters−200 = 34800, interval 1 ⇒ 200 analyzed
 # steps) = the tightest mature-endpoint impact read; still clears the loss-weight warmup (duration full at
@@ -19,19 +22,18 @@ max_iters: 35000
 grad_analysis_start_iter: 34800   # max_iters − 200
 grad_analysis_interval: 1         # every step (consecutive)
 
-allow_ckpt_overwrite: True       # diagnostic: freely re-run its own subdir (inert here — saves all off)
+allow_ckpt_overwrite: True       # diagnostic: freely re-run its own subdir (no ckpt/safetensors written below)
 
 gradient_analysis_run: True
 
 log_interval: 10                 # log norms every 10 steps (not too spammy)
-eval_interval: 10000             # >= max_iters → in-loop eval never fires
-checkpoint_interval: 0
+eval_interval: 2000              # denser than base's 3000: grad-replay steps run ~10× slower → eval wall is a far smaller fraction of train wall, safe to densify. Daemon (GPU1, 2-GPU) keeps it off the training path; single-GPU → blocking in-process eval.
+checkpoint_interval: 0           # no crash-recovery ckpt (short diagnostic; daemon evals off RAM snapshots, not ckpt.pt)
 
-eval_iters: 0
-audio_tables: []                 # no audio / held-out-loss eval at all
-eval_metrics: []                 # no fixed-ref table → metrics already inert; explicit = no ASR/SV load
+# eval_iters / audio_tables / eval_metrics: inherited from base (full surface) so eval fires. Zeroing
+# all three under gradient_analysis_run is what train.py reads as "eval off" → in-process fallback.
 
-best_safetensors: False
+best_safetensors: False          # diagnostic: no inference artifacts
 final_safetensors: False
 
 log_subdir: "logs/experiments"

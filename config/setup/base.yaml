@@ -68,7 +68,7 @@ grad_analysis_interval: null
 
 # Frequencies (orthogonal)
 log_interval: 100
-eval_interval: 3000          # held-out eval cadence (decoupled on GPU1, off the training path). Sized for the NORMAL-run wall (~47 min/2000 steps, measured via drain-timestamp deltas): 3000 ≈ 70 min vs a 120-ref eval ~40 min ≈ 57% → safe margin (60 refs @ 2000 was ~48%; 120 refs @ 2000 ≈ 85% → coalescing risk). Gradient-analysis bolt-on runs train ~15–50% slower (grad replays) → longer wall → they can override setup.eval_interval=2000 for more eval points. Confirm the real 120-ref wall from the daemon log's per-eval "done in Ys".
+eval_interval: 3000          # held-out eval cadence (decoupled on GPU1, off the training path). Sized for the NORMAL-run wall (~47 min/2000 steps, measured via drain-timestamp deltas): 3000 ≈ 70 min vs a 120-ref eval ~40 min ≈ 57% → safe margin (60 refs @ 2000 was ~48%; 120 refs @ 2000 ≈ 85% → coalescing risk). Gradient-analysis runs train ~15–50% slower (grad replays) → longer wall → setup/gradient_analysis.yaml bakes in eval_interval=2000 for more eval points. Confirm the real 120-ref wall from the daemon log's per-eval "done in Ys".
 checkpoint_interval: 5000    # crash-recovery ckpt.pt every 5000 iters
 
 # Eval block contents
