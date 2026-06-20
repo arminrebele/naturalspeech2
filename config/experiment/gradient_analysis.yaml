@@ -6,6 +6,3 @@
 defaults:
   - override /setup: gradient_analysis
   - override /wandb: gradient_analysis
-
-dataset:
-  max_train_clips: 5000000
