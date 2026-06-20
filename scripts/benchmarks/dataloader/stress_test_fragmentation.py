@@ -1,9 +1,11 @@
 """Allocator / memory-fragmentation stress test for the bucket batch sizes.
 
-Cycles random per-bucket dummy batches through a real fwd+bwd+opt step (torch.compiled, like training)
-so back-to-back shape jumps exercise the CUDA allocator — surfacing an OOM deep into training that the
-per-bucket sizing (find_max_batch_sizes) missed. Catches the OOM, reports the failing bucket + peak
-VRAM + memory summary, then re-raises; on success reports peak VRAM over the run. GPU-only.
+Cycles random per-bucket dummy batches through a real fwd+bwd+opt+EMA step (torch.compiled, like
+training) so back-to-back shape jumps exercise the CUDA allocator — surfacing an OOM deep into training
+that the per-bucket sizing (find_max_batch_sizes) missed. The EMA shadow (FP32 GPU copy of all trainable
+params, stepped each iter) runs in the loop, so the reported peak includes it. Catches the OOM, reports
+the failing bucket + peak VRAM + memory summary, then re-raises; on success reports peak VRAM over the
+run. GPU-only.
 
 For compile-mode A/B + shape-leak (graph) analysis, see benchmark_compile_modes.py.
 """
@@ -20,6 +22,7 @@ from naturalspeech2.paths import DATA_DIR, PROJECT_ROOT
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.model import LossWrapper, NaturalSpeech2Model
 from naturalspeech2.config.schema import model_cfg_from_omegaconf
+from naturalspeech2.utils.ema import EMA
 from naturalspeech2.utils.utils import setup_file_logger, compute_denominators, generate_dummy_batch
 
 logger = logging.getLogger(__name__)
@@ -54,6 +57,15 @@ def stress_test(cfg: DictConfig):
         sampling_rate=cfg.dataloader.sampling_rate,
     ).to(device)
 
+    # EMA shadow is FP32 trainable-param GPU memory present on every training step. Build it from the
+    # uncompiled model (param names match the shadow keys) and step it each iter so it counts toward
+    # the reported peak.
+    unoptimized_model = model
+    ema = EMA(unoptimized_model, halflife_kimg=cfg.model.ema.halflife_kimg) if cfg.model.ema.enabled else None
+    if ema is not None:
+        logger.info(f"EMA enabled — shadow holds {ema.num_parameters / 1e6:.1f}M FP32 params "
+                    f"({ema.num_parameters * 4 / 1024**3:.2f} GB).")
+
     logger.info("Compiling model (This will cache multiple graphs during the loop)...")
     model = torch.compile(model)
     optimizer = model.configure_optimizers(
@@ -68,6 +80,7 @@ def stress_test(cfg: DictConfig):
     ).to(device)
 
     logger.info(f"\nStarting {NUM_ITERATIONS} iterations of forced shape fragmentation...")
+    cur_kimg = 0.0
     for i in tqdm(range(NUM_ITERATIONS)):
         # Random shape → force max dynamic-allocation jumping.
         bucket = random.choice(enhanced_buckets)
@@ -90,6 +103,9 @@ def stress_test(cfg: DictConfig):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update(unoptimized_model, batch_size=bucket["batch_size"], cur_kimg=cur_kimg)
+                cur_kimg += bucket["batch_size"] / 1000.0
             torch.cuda.synchronize(device)
         except RuntimeError as e:
             if "out of memory" not in str(e).lower():
@@ -105,6 +121,7 @@ def stress_test(cfg: DictConfig):
 
     logger.info("\n✅ STRESS TEST PASSED SUCCESSFULLY!")
     logger.info(f"Model survived {NUM_ITERATIONS} random shape jumps without memory fragmentation failure.")
+    logger.info(f"Peak VRAM (includes EMA shadow): {'enabled' if ema is not None else 'EMA DISABLED'}")
     logger.info(f"Peak VRAM Reserved: {torch.cuda.max_memory_reserved(device) / 1024**3:.2f} GB")
     logger.info(f"Peak VRAM Allocated: {torch.cuda.max_memory_allocated(device) / 1024**3:.2f} GB")
 

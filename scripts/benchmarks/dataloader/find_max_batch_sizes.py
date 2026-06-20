@@ -10,6 +10,7 @@ from omegaconf import DictConfig, OmegaConf
 from naturalspeech2.paths import DATA_DIR, PROJECT_ROOT
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.model import LossWrapper
+from naturalspeech2.utils.ema import EMA
 from naturalspeech2.utils.utils import setup_file_logger, compute_denominators, generate_dummy_batch
 
 logger = logging.getLogger(__name__)
@@ -29,19 +30,25 @@ def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, mi
             token_vocabulary_size=vocab_size,
             sampling_rate=cfg.dataloader.sampling_rate,
         ).to(device)
+        # EMA shadow is FP32 trainable-param GPU memory present on every training step. Build it from
+        # the uncompiled model (param names match the shadow keys) and step it each iter so it counts
+        # toward the measured peak.
+        unoptimized_model = model
+        ema = EMA(unoptimized_model, halflife_kimg=cfg.model.ema.halflife_kimg) if cfg.model.ema.enabled else None
         model = torch.compile(model)
         optimizer = model.configure_optimizers(
-            cfg.training.weight_decay, 
-            cfg.training.learning_rate, 
+            cfg.training.weight_decay,
+            cfg.training.learning_rate,
             (cfg.training.beta1, cfg.training.beta2)
         )
-        
+
         loss_wrapper = LossWrapper(
             loss_weights=OmegaConf.to_container(cfg.model.loss_weights, resolve=True),
             loss_warmup_steps=OmegaConf.to_container(cfg.model.loss_warmup_steps, resolve=True)
         ).to(device)
-        
+
         # 10 fwd/bwd steps → steady-state memory
+        cur_kimg = 0.0
         for _ in range(10):
             batch = generate_dummy_batch(batch_size, audio_samples, phoneme_samples, min_audio_samples, vocab_size, device)
             denominators = compute_denominators([batch], cfg)
@@ -49,14 +56,17 @@ def worker_process(cfg: DictConfig, audio_samples: int, phoneme_samples: int, mi
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                 loss_dict = model(**batch)
                 loss, _, _ = loss_wrapper(loss_dict, denominators=denominators)
-                
+
             loss.backward()
-            
+
             if cfg.training.grad_clip != 0.0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
-                
+
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update(unoptimized_model, batch_size=batch_size, cur_kimg=cur_kimg)
+                cur_kimg += batch_size / 1000.0
             torch.cuda.synchronize(device)
             
         peak_alloc = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
@@ -142,23 +152,22 @@ def main(cfg: DictConfig) -> None:
         
         logger.info(f"--- Searching for Bucket: {audio_len} audio samples / {phoneme_len} phonemes ({(audio_len/cfg.dataloader.sampling_rate):.2f}s) ---")
         
-        # Phase 1: Exponential search to find the upper bound
-        bs = 2
-        last_alloc, last_res = 0.0, 0.0
-        while True:
+        # Exponential search up, then binary search, for the largest batch that fits. Seed at the
+        # bucket's configured batch_size when present (skips the small trials that obviously fit);
+        # fall back to 2 when it is unset (cold search). Doubling brackets the ceiling from either
+        # seed; if the seed itself OOMs, max_stable_bs stays 0 and the binary search runs downward.
+        bs = bucket.get("batch_size") or 2
+        max_stable_bs, max_alloc, max_res = 0, 0.0, 0.0
+
+        success, alloc, res = test_batch_size(audio_len, phoneme_len, min_audio_len, bs, vocab_size)
+        while success:                                   # double until the first OOM
+            max_stable_bs, max_alloc, max_res = bs, alloc, res
+            bs *= 2
             success, alloc, res = test_batch_size(audio_len, phoneme_len, min_audio_len, bs, vocab_size)
-            if success:
-                last_alloc, last_res = alloc, res
-                bs *= 2
-            else:
-                break
-            
-        # Phase 2: Binary search between bs//2 and bs
-        low = bs // 2
-        high = bs - 1
-        max_stable_bs = low if last_alloc > 0.0 else 0
-        max_alloc, max_res = last_alloc, last_res # Default to last successful exp search result
-        
+
+        # `bs` is now the first OOM (== seed if even that failed). Binary-search the gap between the
+        # last good size and the first OOM for the exact ceiling.
+        low, high = max_stable_bs + 1, bs - 1
         while low <= high:
             mid = (low + high) // 2
             success, alloc, res = test_batch_size(audio_len, phoneme_len, min_audio_len, mid, vocab_size)
