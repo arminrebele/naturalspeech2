@@ -10,6 +10,7 @@ trainer's supervisor respawns it. Eager by default (setup.eval_daemon.compile op
 import argparse
 import logging
 import random
+import sys
 import time
 from pathlib import Path
 
@@ -193,6 +194,17 @@ def main():
     setup_file_logger(logger, log_dir / "eval_daemon.log", root=True)
     logging.captureWarnings(True)   # warnings.warn → logging → eval_daemon.log (matches console/wandb)
     install_warning_filters()       # drop the same known-benign torch/phonemizer/s3prl spam as the trainer
+
+    # Child process → an uncaught traceback goes to stderr, which (unlike the trainer's) wandb never
+    # captures. Route it through logging → eval_daemon.log → the live-uploaded wandb file, so a daemon
+    # crash is visible post-mortem. Then let the process die (no swallow). Ctrl-C stays default.
+    def _log_uncaught(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        logger.critical("Uncaught exception in eval daemon — crashing:", exc_info=(exc_type, exc, tb))
+    sys.excepthook = _log_uncaught
+
     logger.info(f"Eval daemon starting; run_dir={run_dir}")
 
     ctx = build(run_dir)

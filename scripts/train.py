@@ -37,6 +37,7 @@ from naturalspeech2.eval.runner import (
     estimate_loss,
     get_loss_section,
     _mean_skip_nan,
+    record_metric_dist,
     build_fixed_refs_data,
     batch_generate,
     generate_random_val_clips,
@@ -297,17 +298,17 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
             rows.append(row)
 
     if do_wer:
-        deps.metrics_out[f"Evaluation: Metrics/{split}-WER"] = _mean_skip_nan(synth_wers)
+        record_metric_dist(deps.metrics_out, f"Evaluation: Metrics/{split}-WER", synth_wers)
         deps.metrics_out[f"Evaluation: Metrics/{split}-WER-gt"] = _mean_skip_nan(gt_wers)
     if do_sim_o:
-        deps.metrics_out[f"Evaluation: Metrics/{split}-SIM-o"] = _mean_skip_nan(sim_os)
+        record_metric_dist(deps.metrics_out, f"Evaluation: Metrics/{split}-SIM-o", sim_os)
 
     return (title, columns, rows)
 
 
 def render_fixed_train_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
     """Generate audio on the fixed trained-on references (sampled from the train subset)."""
-    return _render_fixed_refs_table(deps, deps.train_refs, "Eval Audio: train (trained-on)", "train")
+    return _render_fixed_refs_table(deps, deps.train_refs, "Evaluation: Trained-on Audio (train)", "train")
 
 
 def render_fixed_val_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
@@ -318,7 +319,7 @@ def render_fixed_val_refs_table(deps: EvalDeps) -> tuple[str, list, list]:
     (matches the chained 'val' loss in estimate_loss). Refs arrive pre-pooled in deps.val_refs."""
     return _render_fixed_refs_table(
         deps, deps.val_refs,
-        "Eval Audio: dev+test (held-out validation)", "val",
+        "Evaluation: Held-out Audio (dev+test)", "val",
     )
 
 
@@ -1004,6 +1005,14 @@ def train(cfg: DictConfig):
         })
         snapshot_writer = SnapshotWriter(eval_run_dir)
         daemon_proc = _spawn_eval_daemon(eval_run_dir, log_dir)
+        if cfg.wandb.log:
+            # The daemon is a child process → its log never reaches wandb's (main-process) console
+            # capture. Upload its file directly: policy="live" re-syncs as it grows + survives
+            # respawns (shared append path), async in wandb's service thread → no training-step cost.
+            # touch first so the live watch registers before the daemon's first write.
+            daemon_log = log_dir / "eval_daemon.log"
+            daemon_log.touch(exist_ok=True)
+            wandb.save(str(daemon_log), base_path=str(log_dir), policy="live")
 
     batch_generator = get_infinite_batches(
         train_loader, 

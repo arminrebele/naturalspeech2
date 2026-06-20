@@ -53,6 +53,23 @@ def _mean_skip_nan(xs: list) -> float:
     return sum(vals) / len(vals) if vals else float("nan")
 
 
+def _dist_stats_skip_nan(xs: list) -> dict:
+    """Mean + p10/median/p90 over non-NaN values (all-NaN → all NaN). Spread companions to the mean;
+    median/p90 resist the occasional catastrophic-WER clip that drags the mean."""
+    vals = [x for x in xs if x == x]
+    if not vals:
+        return {k: float("nan") for k in ("", "-p10", "-median", "-p90")}
+    arr = np.asarray(vals, dtype=float)
+    return {"": float(arr.mean()), "-p10": float(np.percentile(arr, 10)),
+            "-median": float(np.percentile(arr, 50)), "-p90": float(np.percentile(arr, 90))}
+
+
+def record_metric_dist(scalars: dict, base_key: str, values: list) -> None:
+    """Write mean + p10/median/p90 of `values` to scalars under base_key + ('', -p10, -median, -p90)."""
+    for suffix, v in _dist_stats_skip_nan(values).items():
+        scalars[f"{base_key}{suffix}"] = v
+
+
 def atomic_save_safetensors(model: nn.Module, path, *, tmp_suffix=".tmp", bak_suffix="_bak") -> None:
     """Atomic safetensors write: clone each tensor to fresh storage (dodges save_model's LSTM
     _flat_weights dedup crash), serialize to tmp, rotate prev → bak, replace.
@@ -292,8 +309,8 @@ class EvalReport:
 
 # table_name -> (wandb title, split label for metric keys, ref source: 'train' | 'val')
 FIXED_REF_TABLES = {
-    "fixed_train_refs": ("Eval Audio: train (trained-on)", "train", "train"),
-    "fixed_val_refs":   ("Eval Audio: dev+test (held-out validation)", "val", "val"),
+    "fixed_train_refs": ("Evaluation: Trained-on Audio (train)", "train", "train"),
+    "fixed_val_refs":   ("Evaluation: Held-out Audio (dev+test)", "val", "val"),
 }
 
 
@@ -438,10 +455,10 @@ def run_decoupled_eval(
                     row += [sim_os[-1]]
                 rows.append(row)
         if do_wer:
-            report.scalars[f"Evaluation: Metrics/{split}-WER"] = _mean_skip_nan(synth_wers)
+            record_metric_dist(report.scalars, f"Evaluation: Metrics/{split}-WER", synth_wers)
             report.scalars[f"Evaluation: Metrics/{split}-WER-gt"] = _mean_skip_nan(gt_wers)
         if do_sim_o:
-            report.scalars[f"Evaluation: Metrics/{split}-SIM-o"] = _mean_skip_nan(sim_os)
+            record_metric_dist(report.scalars, f"Evaluation: Metrics/{split}-SIM-o", sim_os)
         report.audio_tables[title] = {"columns": columns, "rows": rows}
 
     # --- 3. best-ckpt decision (EMA val loss) ---
