@@ -700,9 +700,10 @@ def train(cfg: DictConfig):
 
     # Daemon offloads eval to GPU1. overfit/aligner_trial need trainer-local eval state so they stay
     # in-process; the main run's eval is plain held-out loss → daemon-compatible. gradient_analysis is
-    # daemon-compatible too WHEN eval is configured (an early-phase grad probe bolted onto a full gated
-    # run): the per-term replays run on GPU0, the daemon evals on GPU1 — orthogonal. It forces in-process
-    # only in its pure form (eval surface all off), where a daemon would have nothing to eval.
+    # daemon-compatible too WHEN eval is configured (its default — a full training run with per-term
+    # backward replays bolted on): the replays run on GPU0, the daemon evals on GPU1 — orthogonal. It
+    # forces in-process only in its pure form (eval surface all off via the knobs), where a daemon would
+    # have nothing to eval.
     gradient_analysis_eval_off = (
         cfg.setup.gradient_analysis_run
         and not cfg.setup.audio_tables
@@ -733,6 +734,14 @@ def train(cfg: DictConfig):
             logger.info(f"Eval daemon requested but inactive (device_count="
                         f"{torch.cuda.device_count()}, ema_enabled={cfg.model.ema.enabled}); "
                         "falling back to in-process eval.")
+
+    # Opt-in denser eval cadence (gradient_analysis sets eval_interval_daemon): apply it ONLY when the
+    # daemon actually offloads eval to GPU1, where it runs in parallel with the ~10x-slower per-term grad
+    # replays "for free". In-process (single-GPU / daemon off) eval blocks the step → keep eval_interval.
+    if use_eval_daemon and cfg.setup.eval_interval_daemon is not None:
+        logger.info(f"Daemon active → densifying eval_interval {cfg.setup.eval_interval} → "
+                    f"{cfg.setup.eval_interval_daemon} (parallel GPU1 eval overlaps the slower steps).")
+        cfg.setup.eval_interval = cfg.setup.eval_interval_daemon
 
     logger.info("Initializing DataLoaders...")
     train_loader, train_dataset = create_dataloader(cfg, cfg.dataset.train_split, cfg.dataset.token_vocabulary_path)

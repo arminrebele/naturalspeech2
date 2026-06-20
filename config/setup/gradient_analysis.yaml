@@ -2,39 +2,28 @@ defaults:
   - base
   - _self_
 
-# Overrides on top of setup/base.yaml — only the deltas live here. Diagnostic mode: trains normally
-# (ISR + warmup_ratio 0.11, inherited from base) WITH the base loss-weight schedule intact (the
-# warmup is part of representative training); GradientAnalyzer profiles per-loss-term gradient norms +
-# pairwise cosines over an explicit window [grad_analysis_start_iter, grad_analysis_end_iter), at
-# grad_analysis_interval (interval null → log_interval; end_iter null → max_iters, as left here).
-# Eval is ON: the full surface is inherited from base (eval_iters / audio_tables / eval_metrics), so
-# held-out loss + WER/SIM-o + audio run at eval_interval below — on the GPU1 daemon (2-GPU), orthogonal
-# to the per-term grad replays on GPU0; single-GPU falls back to blocking in-process eval. Only
-# checkpoints / safetensors stay off (diagnostic — no artifacts written).
+# Overrides on top of setup/base.yaml — only the deltas live here. This mode is a full generalization-
+# regime training run — eval surface + checkpoints + safetensors + the anti-clobber guard
+# (allow_ckpt_overwrite=false) all inherited from base, identical to the main run (and to the prior
+# "+experiment=train_5M + manual grad flags" call this replaces) — with the per-loss-term GradientAnalyzer
+# enabled. Measuring grad geometry under the real eval / save / warmup dynamics is the point.
 #
-# Default window = last 200 steps, every step (start max_iters−200 = 34800, interval 1 ⇒ 200 analyzed
-# steps) = the tightest mature-endpoint impact read; still clears the loss-weight warmup (duration full at
-# 30k per config/model/base.yaml) → every term at full weight. Widen for other reads: an earlier start +
-# a stride (e.g. 33000 / 10) decorrelates the mature estimate; start 0 profiles the full-run trajectory
-# incl. warmup, where the analyzer's WEIGHTED grads give a term's true (warmup-scaled) per-step
-# contribution. Each analyzed step ≈ 10× a normal step (one backward per loss term).
-max_iters: 35000
-grad_analysis_start_iter: 34800   # max_iters − 200
-grad_analysis_interval: 1         # every step (consecutive)
-
-allow_ckpt_overwrite: True       # diagnostic: freely re-run its own subdir (no ckpt/safetensors written below)
+# Default window = the FULL run: base leaves grad_analysis_start_iter=0, grad_analysis_end_iter=null
+# (→ max_iters) and grad_analysis_interval=null (→ log_interval=100), so every term is profiled every 100
+# steps from 0 to max_iters. Each analyzed step ≈ 10x a normal step (one backward per loss term). The knobs
+# stay available — override grad_analysis_{start_iter,end_iter,interval} for a subset / denser read (e.g. a
+# mature-endpoint window: grad_analysis_start_iter≈max_iters−200, grad_analysis_interval=1).
+max_iters: 40000                  # generalization-regime length (matches +experiment=train_5M; override per run, e.g. 80000)
 
 gradient_analysis_run: True
 
-log_interval: 10                 # log norms every 10 steps (not too spammy)
-eval_interval: 2000              # denser than base's 3000: grad-replay steps run ~10× slower → eval wall is a far smaller fraction of train wall, safe to densify. Daemon (GPU1, 2-GPU) keeps it off the training path; single-GPU → blocking in-process eval.
-checkpoint_interval: 0           # no crash-recovery ckpt (short diagnostic; daemon evals off RAM snapshots, not ckpt.pt)
+eval_interval_daemon: 2000        # 2-GPU only: densify eval 3000→2000, the daemon evals on GPU1 in parallel with the ~10x-slower grad replays (free). Single-GPU / daemon-off keeps base eval_interval (3000). See base.yaml.
 
-# eval_iters / audio_tables / eval_metrics: inherited from base (full surface) so eval fires. Zeroing
-# all three under gradient_analysis_run is what train.py reads as "eval off" → in-process fallback.
-
-best_safetensors: False          # diagnostic: no inference artifacts
-final_safetensors: False
-
+# Per-variant runs need a UNIQUE name. log_name (this run's checkpoint subdir + log files + daemon
+# artifacts) is linked to wandb.run_name below, so set just ONE knob per run — the bare variant name (no
+# prefix; the gradient-analysis wandb group already scopes it):
+#   wandb.run_name=softalign
+# Default "gradient_analysis" (from wandb/gradient_analysis.yaml) + allow_ckpt_overwrite=false (inherited):
+# a second un-renamed run REFUSES to clobber the first's ckpt (init_from=scratch anti-clobber) — rename it.
 log_subdir: "logs/experiments"
-log_name: "gradient_analysis"
+log_name: ${wandb.run_name}       # follow the wandb run name → one knob sets checkpoints + logs + the wandb run
