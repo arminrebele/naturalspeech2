@@ -13,7 +13,7 @@ defaults:
 # steps from 0 to max_iters. Each analyzed step ≈ 10x a normal step (one backward per loss term). The knobs
 # stay available — override grad_analysis_{start_iter,end_iter,interval} for a subset / denser read (e.g. a
 # mature-endpoint window: grad_analysis_start_iter≈max_iters−200, grad_analysis_interval=1).
-max_iters: 40000                  # generalization-regime length (matches +experiment=train_5M; override per run, e.g. 80000)
+max_iters: 80000                  # total training steps
 
 gradient_analysis_run: True
 

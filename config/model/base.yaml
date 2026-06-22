@@ -24,11 +24,10 @@ pitch_stats_path: "models/pitch_logf0_stats.pt"
 detach_aligner_input: true
 detach_duration_predictor_input: true
 
-# Soft-alignment conditioning warmstart (RAD-TTS §2.4, [0,6k)): for the first soft_align_steps the diffusion
-# model is conditioned on the aligner's SOFT alignment (A_soft @ phoneme_encodings — differentiable, so the
-# reconstruction loss co-shapes the aligner), then switches to the hard durations path. Ends before bin_loss
-# turns on at 18k. detach_soft_alignment=false = attach (RAD-faithful); true = soft values only (ablation).
-soft_align_steps: 6000          # pure soft conditioning for the first N steps (0 = disabled)
+# Soft-alignment conditioning warmstart: for the first soft_align_steps the diffusion model is conditioned
+# on the aligner's SOFT alignment (A_soft @ phoneme_encodings, differentiable), then switches to the hard
+# durations path.
+soft_align_steps: 12000         # pure soft conditioning for the first N steps (0 = disabled)
 soft_align_ramp_steps: 0        # 0 = sharp soft→hard switch (RAD-TTS); >0 = linear α 1→0 ramp after the hold
 detach_soft_alignment: false    # attach the soft alignment to the diffusion gradient during the warmstart
 
@@ -149,7 +148,7 @@ diffusion_model:
 # i.e. ∝ halflife_kimg / max_iters — the same halflife_kimg smooths ~9× less on a 360k run than on a 40k one.
 ema:
   enabled: true
-  halflife_kimg: 50.0
+  halflife_kimg: 100.0
 
 # Loss Balancing Weights — paper states only ce_rvq = 0.1, no other weight (terms summed as-is;
 # aligner/voicing are our paper-silent additions). Kept: gradient analysis shows aligned diffusion
@@ -174,30 +173,23 @@ loss_weights:
     score_loss: 1.0
     ce_rvq_loss: 0.1
 
-# Loss-weight schedule: hold at 0 for loss_warmup_hold_steps, then linear ramp 0→target over
-# loss_warmup_steps (true-zero hard onset, RAD-TTS-style). hold + ramp = step at full weight; both 0 =
-# full from step 0. FIXED absolute steps, NOT a fraction of max_iters: alignment settling is an
-# optimization-dynamics property (budget-independent) — a % would mis-scale a 30k probe vs the 360k run.
-# Onsets anchored to RAD-TTS's from-scratch config (config_ljs_radtts.json: binarize_start 6k,
-# kl_loss_start 18k). Our bin_loss IS the soft→hard binarization PENALTY, so it maps to kl_loss_start 18k
-# (binarize_start 6k only computes the hard path, doesn't penalize). Batch ≈ ours in frames → no
-# compression. Tuned for the 360k FULL run (18k = 5%), NOT the 40k probes (those only show direction).
-# Curriculum order fs → bin → duration (each waits for the previous to settle):
-#   forward_sum  : full from 0    — the soft-alignment signal everything keys off.
-#   bin          : hold 18k, →24k — hardening early locks in ~uniform durations before the soft alignment
-#                                   differentiates long/short phonemes (= RAD-TTS kl_loss_start 18k).
-#   duration     : hold 24k, →30k — target is the Viterbi path; only stable after bin sharpens, so it
-#                                   starts once bin is fully on (24k).
-#   pitch/voicing: none           — length-matched grid, ~diagonal early; low sensitivity.
-# Diffusion NOT warmed (primary objective; warming would down-weight conditioning-independent denoising).
+# Loss-weight schedule: hold at weight 0 for loss_warmup_hold_steps, then linear ramp 0→target over
+# loss_warmup_steps. Full weight at hold + ramp; both 0 = full from step 0. Absolute steps, not a fraction
+# of max_iters.
+#   conditioning : soft [0,12k), then hard durations
+#   forward_sum  : full from 0
+#   bin          : hold 36k, → full 48k
+#   duration     : hold 48k, → full 60k
+#   pitch/voicing: full from 0
+#   diffusion    : full from 0
 loss_warmup_steps:                # ramp length AFTER the hold (full weight at hold + this)
-  duration_predictor_loss: 6000
+  duration_predictor_loss: 12000
   pitch_predictor_loss: 0
   pitch_voicing_loss: 0
   aligner_loss:
     group_warmup: 0
     forward_sum_loss: 0
-    bin_loss: 6000
+    bin_loss: 12000
   diffusion_loss:
     group_warmup: 0
     data_loss: 0
@@ -205,13 +197,13 @@ loss_warmup_steps:                # ramp length AFTER the hold (full weight at h
     ce_rvq_loss: 0
 
 loss_warmup_hold_steps:           # steps held at weight 0 before the ramp begins
-  duration_predictor_loss: 24000
+  duration_predictor_loss: 48000
   pitch_predictor_loss: 0
   pitch_voicing_loss: 0
   aligner_loss:
     group_hold: 0
     forward_sum_loss: 0
-    bin_loss: 18000
+    bin_loss: 36000
   diffusion_loss:
     group_hold: 0
     data_loss: 0
