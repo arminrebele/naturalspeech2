@@ -153,6 +153,7 @@ class DatasetWrapper(Dataset):
         delete_raw_cache_after_preprocess: bool = False,
         chunk_size: Optional[int] = None,
         build_vocabulary: bool = False,
+        build_if_missing: bool = True,
     ):
         super().__init__()
         self.dataset_source = dataset_source
@@ -177,6 +178,10 @@ class DatasetWrapper(Dataset):
         self.delete_raw_cache_after_preprocess = delete_raw_cache_after_preprocess
         self.chunk_size = chunk_size
         self.build_vocabulary = build_vocabulary
+        # Read-only guard: when False, raise instead of preprocessing if the cache is absent — lets a
+        # pure consumer (the dataloader benchmark) assert the split is already preprocessed rather than
+        # silently kicking off a build.
+        self.build_if_missing = build_if_missing
         if self.chunk_size is not None and not self.resample_on_the_fly:
             raise ValueError(
                 "Chunked storage (chunk_size) requires resample_on_the_fly=True; the pre-resampled "
@@ -403,6 +408,11 @@ class DatasetWrapper(Dataset):
                 logger.info("No preprocessing_config.json found. Cannot verify parameters.")
             return dataset
         except (FileNotFoundError, json.JSONDecodeError, pa.ArrowInvalid, pa.ArrowIOError) as e:
+            if not self.build_if_missing:
+                raise FileNotFoundError(
+                    f"No preprocessed cache at {self.processed_dir} (build_if_missing=False). "
+                    f"Preprocess this split with these settings first."
+                ) from e
             logger.info(f"Local dataset unavailable or corrupted ({type(e).__name__}). Triggering preprocessing...")
 
             dataset = self._load_dataset_split()
@@ -505,6 +515,12 @@ class DatasetWrapper(Dataset):
         logger.info(f"Built {final_dir.name} ({len(idx)} clips pre-filter).")
 
     def _process_train_chunked(self) -> HFDataset:
+        # Read-only consumer: no store at all → fail loud instead of building one.
+        if not self.build_if_missing and not (self.chunks_dir / "meta.json").is_file():
+            raise FileNotFoundError(
+                f"No chunked train store at {self.chunks_dir} (build_if_missing=False). "
+                f"Preprocess the train split first."
+            )
         self.chunks_dir.mkdir(parents=True, exist_ok=True)
         C, N = self.chunk_size, self.max_train_clips
         meta = self._read_chunks_meta()
@@ -518,6 +534,12 @@ class DatasetWrapper(Dataset):
         while (N is None or rows < N) and k < max_k:
             cdir = self.chunks_dir / f"chunk_{k:05d}"
             if not (cdir / "COMPLETE").exists():
+                if not self.build_if_missing:
+                    raise FileNotFoundError(
+                        f"Chunked train store incomplete at {self.chunks_dir} (missing {cdir.name}, "
+                        f"build_if_missing=False). Finish preprocessing, or lower dataset.max_train_clips "
+                        f"to the already-built amount."
+                    )
                 if cdir.exists():
                     shutil.rmtree(cdir)               # clear an aborted partial
                 if raw is None:

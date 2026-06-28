@@ -13,10 +13,11 @@ from naturalspeech2.data.dataset import DatasetWrapper, BucketedCollateFn, Dynam
 logger = logging.getLogger(__name__)
 
 
-def create_dataset(cfg, split: str, token_vocabulary_path: str = None):
+def create_dataset(cfg, split: str, token_vocabulary_path: str = None, build_if_missing: bool = True):
     """Build the DatasetWrapper for `split`, triggering preprocessing if uncached. Single source of the
     train-split construction (chunked store + max_train_clips), shared by create_dataloader and the
-    find_optimal_buckets benchmark so the bucket derivation sees the exact data training will."""
+    find_optimal_buckets benchmark so the bucket derivation sees the exact data training will.
+    build_if_missing=False makes it a read-only consumer (raise if uncached) for the dataloader benchmark."""
     max_audio_length = cfg.dataset.max_audio_length
     max_phoneme_length = cfg.dataset.max_phoneme_length
 
@@ -54,12 +55,13 @@ def create_dataset(cfg, split: str, token_vocabulary_path: str = None):
         # and must not build the vocab — IDs stay train-derived).
         chunk_size=(cfg.dataset.get("chunk_size") if split == cfg.dataset.train_split else None),
         build_vocabulary=(split == cfg.dataset.train_split),
+        build_if_missing=build_if_missing,
     )
 
 
 def create_dataloader(cfg, split: str, token_vocabulary_path: str = None, num_workers: int = None,
-                      batch_size_divisor: int = 1):
-    dataset = create_dataset(cfg, split, token_vocabulary_path)
+                      batch_size_divisor: int = 1, build_if_missing: bool = True):
+    dataset = create_dataset(cfg, split, token_vocabulary_path, build_if_missing=build_if_missing)
 
     bucket_mapping = OmegaConf.to_container(cfg.dataloader.bucket_mapping, resolve=True)
     if batch_size_divisor > 1:

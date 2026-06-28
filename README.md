@@ -182,14 +182,17 @@ For each `(dynamic, mode)` the compile benchmark reports steady-state **ms/step*
 
 Determine the most efficient data loading strategy (resampling during pre-processing vs. on-the-fly) and test worker configurations for your specific hardware-setup. 
 
-This can be done by running [this bash script](scripts/benchmarks/dataloader/run_benchmark_dataloader.sh), which will [benchmark](scripts/benchmarks/dataloader/benchmark_dataloader.py) the dataloader across multiple configurations. You might have to update the tested `WORKER_COUNTS` and `ASSUMED_MAX_BATCH_SIZE` to match your machine. 
-Per default, it only evaluates, if the resampling on-the-fly option will run efficiently on your hardware, but you can use command-line arguments to test other options as well. 
+This is done by running [this bash script](scripts/benchmarks/dataloader/run_benchmark_dataloader.sh), which sweeps `num_workers` for **one** data-loading setting and, per config, [benchmarks](scripts/benchmarks/dataloader/benchmark_dataloader.py) whether CPU dispatch + dataloading stays hidden behind GPU compute (it reports a per-config starvation rate and P95). Tune the tested `WORKER_COUNTS` (to your CPU core count) and, if needed, `NUM_BENCHMARK_STEPS` (1000 is enough for a statistically solid starvation rate / P95) in the script.
 
-`--full` tests both the otf-resampling and the pre-resampling option, `--pre-resample` tests only the pre-resampling option (e.g. if you ran the default otf-setting, but your dataloader starved the GPU).
+The benchmark is **decoupled from preprocessing** and **read-only**: it consumes the already-preprocessed train split and never creates, moves, or deletes data — if the requested setting isn't preprocessed yet it fails loud. The only state it touches is the OS page cache, dropped between configs so each reads cold (unbiased disk I/O); nothing downstream needs the data resident, so the shards just re-`mmap` on demand. The intended loop is therefore: **preprocess your preferred setting → benchmark it → if healthy, ship it; only if it starves, separately preprocess a subset with the alternative setting and re-run.**
 
 ```bash
-python scripts/benchmarks/dataloader/run_benchmark_dataloader.sh
+python scripts/benchmarks/dataloader/run_benchmark_dataloader.sh                       # default: on-the-fly resampling (OTF)
+python scripts/benchmarks/dataloader/run_benchmark_dataloader.sh --pre-resample        # the pre-resampled-FLAC alternative
+python scripts/benchmarks/dataloader/run_benchmark_dataloader.sh dataset.max_train_clips=200000   # extra args pass through to Hydra
 ```
+
+OTF is the default and the expected answer for most setups: it needs no multi-TB FLAC copy and any node can resample on the fly. Only reach for `--pre-resample` if OTF starves the GPU on your hardware — and note it requires you to have pre-resampled that subset first (a separate preprocessing run).
 
 > **Note:** Technically, resampling always happens during pre-processing, since this is necessary to determine the pitch, but the option to resample on-the-fly discards the resampled audio and therefore saves disk space.
 
