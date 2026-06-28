@@ -84,7 +84,7 @@ Running the [training script](scripts/train.py) will automatically initiate our 
 | `eval_daemon.compile` | `true` | `torch.compile` the daemon's eval forward (the in-process forward was already compiled). |
 | `eval_daemon.num_workers` | `4` | Dataloader workers per daemon loader — independent of `dataloader.num_workers`, so the main run isn't slowed. |
 | `eval_daemon.snapshot_dir` | `null` | RAM-backed weight-handoff dir; `null` → `/dev/shm/ns2_eval/<run>`. |
-| `eval_daemon.batch_size_divisor` | `2` | Shrinks the daemon's per-bucket eval batch (÷) on the 2nd GPU for VRAM headroom; grad-accum is ×'d by the same factor, so the logical batch and the metric are unchanged. `1` = full batch. |
+| `eval_daemon.batch_size_divisor` | `1` | Divides the daemon's per-bucket eval batch (÷) on the 2nd GPU; grad-accum is ×'d by the same factor, so the logical batch and the metric are unchanged. `1` = full batch (the daemon's loss forward is `no_grad`, with ample 4090 headroom); raise only if VRAM-constrained. |
 | `eval_metrics` | `["wer","sim_o"]` | Objective metrics on the fixed refs: `wer` (HuBERT-CTC, no LM) and `sim_o` (WavLM-Large-SV speaker cosine vs. the prompt). Drop either to skip it. |
 | `metric_device` | `auto` | Metric-model device (WER + SIM-o): `auto` → idle 2nd GPU if present, else CPU (never silently the training card; override e.g. `cuda:0`). Daemon forces its own card. |
 
