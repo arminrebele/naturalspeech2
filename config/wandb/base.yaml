@@ -1,8 +1,9 @@
-# Canonical production wandb defaults. Per-mode files override group + run_name only.
+# Canonical production wandb defaults. Per-mode files override the group only; the run name is the
+# top-level `run_name` knob (config.yaml), referenced here so wandb + logs + checkpoints share one name.
 
 log: True
 project: "naturalspeech2"
 group: "main_training"
-run_name: "full_run"
+run_name: ${run_name}
 notes: ""
 tags: []

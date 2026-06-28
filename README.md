@@ -263,7 +263,7 @@ The aligner/duration **warmups** follow a fs → bin → duration curriculum (fi
 python scripts/train.py +experiment=gradient_analysis
 ```
 
-This runs as a **full generalization-regime training run** — identical eval, checkpoints, and safetensors to the main run (all inherited from `setup/base.yaml`) — with the per-term backward replays bolted on, so the gradient geometry is read under representative dynamics. By default it profiles **the whole run**: `grad_analysis_start_iter=0` through `grad_analysis_end_iter` (`null` → `max_iters`), sampling every `grad_analysis_interval` steps (`null` → `log_interval`, i.e. every 100); each sampled step costs ~10× a normal one (one backward per term). The window stays overridable for other reads — a **tight mature-endpoint** estimate (`grad_analysis_start_iter≈max_iters−200 grad_analysis_interval=1`, last 200 steps every step) or a **decorrelated** one (`grad_analysis_start_iter=33000 grad_analysis_interval=10`, strided so consecutive-step autocorrelation doesn't shrink the effective sample); where the window spans the warmup a term's norm is its true warmup-scaled per-step contribution (the analyzer reads weighted gradients). Because each replayed step is ~10× slower, the GPU 1 eval daemon gets ample headroom, so the eval cadence densifies to `eval_interval_daemon=2000` when a 2nd GPU is present (single-GPU keeps the main run's wider `eval_interval=3000`). Name each variant once with the bare run name — `wandb.run_name=softalign` (no `gradient_analysis_` prefix; the wandb group already scopes it) — and `setup.log_name` follows it to isolate that run's checkpoints and logs; `allow_ckpt_overwrite=false` (inherited) means a re-used name safely refuses to clobber the prior lineage.
+This runs as a **full generalization-regime training run** — identical eval, checkpoints, and safetensors to the main run (all inherited from `setup/base.yaml`) — with the per-term backward replays bolted on, so the gradient geometry is read under representative dynamics. By default it profiles **the whole run**: `grad_analysis_start_iter=0` through `grad_analysis_end_iter` (`null` → `max_iters`), sampling every `grad_analysis_interval` steps (`null` → `log_interval`, i.e. every 100); each sampled step costs ~10× a normal one (one backward per term). The window stays overridable for other reads — a **tight mature-endpoint** estimate (`grad_analysis_start_iter≈max_iters−200 grad_analysis_interval=1`, last 200 steps every step) or a **decorrelated** one (`grad_analysis_start_iter=33000 grad_analysis_interval=10`, strided so consecutive-step autocorrelation doesn't shrink the effective sample); where the window spans the warmup a term's norm is its true warmup-scaled per-step contribution (the analyzer reads weighted gradients). Because each replayed step is ~10× slower, the GPU 1 eval daemon gets ample headroom, so the eval cadence densifies to `eval_interval_daemon=2000` when a 2nd GPU is present (single-GPU keeps the main run's wider `eval_interval=3000`). Name each variant once with the top-level `run_name=softalign` (no `gradient_analysis_` prefix; the wandb group already scopes it) — that single knob drives the wandb run name, the log folder, and the checkpoint dir together. A re-used name auto-bumps to `softalign-2` (a from-scratch run never overwrites or appends to a prior lineage; delete stale folders by hand).
 
 **4. Hyperparameter-Tuning**
 
@@ -294,13 +294,13 @@ When a run underfits despite a clean overfit test, two read-only probes — run 
 - **Alignment heatmap** decomposes the aligner into three per-frame distributions (Beta-Binomial **prior** alone / **learned** scores alone / **posterior**) with the Viterbi path overlaid, plus pooled scalars. Learned ≈ prior (low `align/learned_vs_prior_tv`, `learned_peak` ≈ `1/P`) ⇒ the aligner is riding the prior, not learning; sharp + content-dependent ⇒ the aligner is fine and the bottleneck is downstream.
 
   ```bash
-  python scripts/diagnostics/alignment_heatmap.py checkpoint=models/checkpoints/main_training/ckpt.pt
+  python scripts/diagnostics/alignment_heatmap.py checkpoint=models/checkpoints/main_training/full_run/ckpt.pt
   ```
 
 - **Conditioning ablation** re-samples from identical noise with the real vs zeroed/shuffled content `condition` and a swapped speaker prompt. A content/speaker RMSE ratio ≪ 1 means the denoiser ignores the phoneme content (a problem downstream of the aligner). It decodes real vs zeroed-condition audio to listen.
 
   ```bash
-  python scripts/diagnostics/condition_ablation.py checkpoint=models/checkpoints/main_training/ckpt.pt
+  python scripts/diagnostics/condition_ablation.py checkpoint=models/checkpoints/main_training/full_run/ckpt.pt
   ```
 
 Both take the architecture from the checkpoint (the resume rule), like the checkpoint benchmark below.
@@ -352,11 +352,11 @@ Both workflows funnel through `generate_audio()` — the Layer-3 wrapper that ph
 
 **Local weights** — your own training run, or anyone who followed the recipe. The CLI is the quickest path:
 
-Checkpoints are written per run under `models/checkpoints/<setup.log_name>/` (e.g. `main_training/`) so a diagnostic run can never clobber the main run's resume point; adjust the paths below to your run's subdir.
+Checkpoints are written per run under `models/checkpoints/<wandb.group>/<run_name>/` (e.g. `main_training/full_run/`) so one run can never clobber another's resume point; adjust the paths below to your run's subdir.
 
 ```bash
 python scripts/inference.py \
-    --checkpoint models/checkpoints/main_training/ema_best.safetensors \
+    --checkpoint models/checkpoints/main_training/full_run/ema_best.safetensors \
     --prompt path/to/reference.wav \
     --text "Hello world." \
     --prompt-seconds 10        # optional: slice the reference to a 10 s window
@@ -369,7 +369,7 @@ import soundfile as sf
 from naturalspeech2.inference import load_inference_model, generate_audio
 from naturalspeech2.modules.encodec import SAMPLING_RATE
 
-model = load_inference_model("models/checkpoints/main_training/ema_best.safetensors", device="cuda")
+model = load_inference_model("models/checkpoints/main_training/full_run/ema_best.safetensors", device="cuda")
 audio, length = generate_audio(model, "path/to/reference.wav", "Hello world.", prompt_seconds=10)
 sf.write("out.wav", audio[:length], samplerate=SAMPLING_RATE)
 ```
@@ -378,8 +378,8 @@ sf.write("out.wav", audio[:length], samplerate=SAMPLING_RATE)
 
 ```bash
 python scripts/export_ema.py \
-    --checkpoint models/checkpoints/main_training/ckpt.pt \
-    --output models/checkpoints/main_training/ema_final.safetensors
+    --checkpoint models/checkpoints/main_training/full_run/ckpt.pt \
+    --output models/checkpoints/main_training/full_run/ema_final.safetensors
 ```
 
 **From Hugging Face** — once weights are published, pass a repo id instead of a path; the weights, config, and token vocabulary are downloaded and cached automatically:
@@ -401,10 +401,10 @@ audio, length = generate_audio(model, "path/to/reference.wav", "Hello world.")
 
 ```bash
 # a resume checkpoint → self-describing; reports both live and EMA metrics
-python scripts/eval_checkpoint.py checkpoint=models/checkpoints/main_training/ckpt.pt
+python scripts/eval_checkpoint.py checkpoint=models/checkpoints/main_training/full_run/ckpt.pt
 
 # the shipped best-dev artifact → EMA-only (metadata read from the sibling ckpt.pt)
-python scripts/eval_checkpoint.py checkpoint=models/checkpoints/main_training/ema_best.safetensors
+python scripts/eval_checkpoint.py checkpoint=models/checkpoints/main_training/full_run/ema_best.safetensors
 ```
 
 It accepts either checkpoint kind. A `ckpt.pt` carries its own config plus both the live and EMA weights, so it needs no extra arguments and reports both. An `ema_*.safetensors` holds only the EMA weights; it reads the architecture and vocabulary from the sibling `ckpt.pt`, or — for a checkpoint downloaded without one — from `model_config=<yaml> token_vocab=<json>`. The benchmark is **read-only**: it never writes `ema_best`.

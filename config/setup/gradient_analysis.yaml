@@ -3,10 +3,10 @@ defaults:
   - _self_
 
 # Overrides on top of setup/base.yaml — only the deltas live here. This mode is a full generalization-
-# regime training run — eval surface + checkpoints + safetensors + the anti-clobber guard
-# (allow_ckpt_overwrite=false) all inherited from base, identical to the main run (and to the prior
-# "+experiment=train_5M + manual grad flags" call this replaces) — with the per-loss-term GradientAnalyzer
-# enabled. Measuring grad geometry under the real eval / save / warmup dynamics is the point.
+# regime training run — eval surface + checkpoints + safetensors all inherited from base, identical to
+# the main run (and to the prior "+experiment=train_5M + manual grad flags" call this replaces) — with
+# the per-loss-term GradientAnalyzer enabled. Measuring grad geometry under the real eval / save / warmup
+# dynamics is the point.
 #
 # Default window = the FULL run: base leaves grad_analysis_start_iter=0, grad_analysis_end_iter=null
 # (→ max_iters) and grad_analysis_interval=null (→ log_interval=100), so every term is profiled every 100
@@ -19,11 +19,6 @@ gradient_analysis_run: True
 
 eval_interval_daemon: 2000        # 2-GPU only: densify eval 3000→2000, the daemon evals on GPU1 in parallel with the ~10x-slower grad replays (free). Single-GPU / daemon-off keeps base eval_interval (3000). See base.yaml.
 
-# Per-variant runs need a UNIQUE name. log_name (this run's checkpoint subdir + log files + daemon
-# artifacts) is linked to wandb.run_name below, so set just ONE knob per run — the bare variant name (no
-# prefix; the gradient-analysis wandb group already scopes it):
-#   wandb.run_name=softalign
-# Default "gradient_analysis" (from wandb/gradient_analysis.yaml) + allow_ckpt_overwrite=false (inherited):
-# a second un-renamed run REFUSES to clobber the first's ckpt (init_from=scratch anti-clobber) — rename it.
-log_subdir: "logs/experiments"
-log_name: ${wandb.run_name}       # follow the wandb run name → one knob sets checkpoints + logs + the wandb run
+# Name each variant once via the top-level run_name — the bare variant name (the gradient-analysis wandb
+# group already scopes it): run_name=softalign. One knob sets the wandb run + logs + checkpoint dir; a
+# re-used name auto-bumps to <name>-2 on scratch (never clobbers the prior lineage).

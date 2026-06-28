@@ -3,6 +3,8 @@
 defaults:
   - override /setup: gradient_analysis
 
+run_name: "5M"                     # one knob → wandb run + logs + checkpoints (a re-used name auto-bumps to 5M-2)
+
 dataset:
   max_train_clips: 5000000
 
@@ -24,4 +26,3 @@ model:
 
 wandb:
   group: "gradient-analysis"
-  run_name: "5M"

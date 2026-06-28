@@ -10,14 +10,13 @@
 # Re-measure the phoneme_length caps (dataloader/base.yaml) before growing max_train_clips — they are
 # hard pad-width caps that climb with N. Deltas vs base only; everything else is inherited.
 
+run_name: train_5M               # default; override per run (e.g. run_name=train_5M_l1dur). One knob → wandb + logs + checkpoints.
+
 dataset:
   max_train_clips: 5000000
 
 setup:
   max_iters: 40000
-  log_subdir: "logs/experiments"
-  log_name: "train_5M"
 
 wandb:
   group: "generalization"
-  run_name: "train_5M"

@@ -3,4 +3,3 @@ defaults:
   - _self_
 
 group: "gradient-analysis"
-run_name: "gradient_analysis"

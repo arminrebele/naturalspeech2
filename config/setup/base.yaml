@@ -2,19 +2,17 @@
 # Full-scale training: `python scripts/train.py`.
 
 device: "cuda"
+# 'scratch' = fresh run: new wandb run + fresh logs/<group>/<run_name>/ + models/checkpoints/<group>/
+# <run_name>/. If that <run_name> already exists (either tree), the name auto-bumps to <name>-2, -3, …
+# so a scratch run NEVER overwrites or appends to a prior one (delete stale folders by hand).
+# 'resume' = continue the named run in place: reattach its checkpoint's wandb run (resume="allow") and
+# APPEND to its existing folder. The run must already exist on disk. Caveat: resume="allow" is the only
+# non-private wandb resume available to us — it DROPS re-logged steps ≤ wandb's last step (the small
+# post-checkpoint overlap), since truncating that tail needs the private 'rewind' API. wandb keeps the
+# old overlap; the local log continues from the resume point. There is intentionally no overwrite knob.
+# For a CLEAN continuation (fresh wandb run + fresh folder, no append/overlap), keep init_from=resume but
+# set the top-level `resume_from` to the source run and give `run_name` a new name (see config.yaml).
 init_from: "scratch"     # 'scratch' or 'resume'
-# Anti-clobber guard for init_from=scratch: refuse to overwrite an existing ckpt.pt / ema_*.safetensors
-# in this run's checkpoint subdir (models/checkpoints/<log_name>/) unless true. base.yaml defaults
-# init_from=scratch, so a bare re-run of a crashed run would otherwise silently destroy its resume
-# point. Main run = false (protect it); diagnostic modes set true (they own + freely re-run their dir).
-allow_ckpt_overwrite: false
-# wandb behavior on init_from=resume (inert on scratch). A prior session logs every log_interval but
-# checkpoints only every checkpoint_interval, so wandb's run.step is usually AHEAD of the resumed ckpt
-# → those re-logged steps would be dropped as non-monotonic. Branch the run at the ckpt step instead:
-#   rewind: truncate the orphaned tail in-place, one continuous run (default)
-#   fork:   start a NEW run branched at the ckpt step (original run preserved)
-#   allow:  legacy reattach (drops the overlap; logs a warning)
-wandb_resume_mode: rewind
 gradient_accumulation_steps: 1
 
 # torch.compile — applies to the training model (and, via dynamic/mode, the daemon eval forward).
@@ -98,6 +96,5 @@ eval_daemon:
 best_safetensors: True
 final_safetensors: True
 
-# Log file location (under PROJECT_ROOT)
-log_subdir: "logs/main"
-log_name: "main_training"
+# Log + checkpoint location is derived, not configured: logs/<wandb.group>/<run_name>/ and
+# models/checkpoints/<wandb.group>/<run_name>/. Set the run via the top-level `run_name` (config.yaml).

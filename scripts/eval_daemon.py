@@ -108,9 +108,9 @@ def build(run_dir: Path):
 
     return {
         "cfg": cfg, "device": device, "sr": sr,
-        # Per-run checkpoint subdir — same derivation as the trainer (run_checkpoint_dir(log_name))
+        # Per-run checkpoint subdir — same derivation as the trainer (run_checkpoint_dir(group, run_name))
         # so both write ema_best + eval_state into the same lineage dir.
-        "ckpt_dir": run_checkpoint_dir(cfg.setup.log_name),
+        "ckpt_dir": run_checkpoint_dir(cfg.wandb.group, cfg.run_name),
         "model": model, "loss_model": loss_model, "loss_wrapper": loss_wrapper,
         "train_loader": train_loader, "dev_loader": dev_loader, "test_loader": test_loader,
         "val_datasets": [dev_dataset, test_dataset], "val_refs": val_refs, "train_refs": train_refs,
@@ -193,12 +193,14 @@ def evaluate_snapshot(ctx: dict, snap: dict, best_val_loss: float) -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--run-dir", required=True, help="RAM-backed IPC dir (from the trainer)")
-    ap.add_argument("--log-dir", required=True, help="run's log dir (scratch vs main) for eval_daemon.log")
+    ap.add_argument("--eval-log", required=True, help="this run's eval_<run_name>.log path (from the trainer)")
     args = ap.parse_args()
     run_dir = Path(args.run_dir)
-    log_dir = Path(args.log_dir)
+    eval_log = Path(args.eval_log)
 
-    setup_file_logger(logger, log_dir / "eval_daemon.log", root=True)
+    # Append: the trainer hands a fresh path on scratch (empty dir) and the same path on resume/respawn,
+    # so appending keeps one continuous per-run eval log without clobbering a respawn's predecessor.
+    setup_file_logger(logger, eval_log, root=True)
     logging.captureWarnings(True)   # warnings.warn → logging → eval_daemon.log (matches console/wandb)
     install_warning_filters()       # drop the same known-benign torch/phonemizer/s3prl spam as the trainer
 

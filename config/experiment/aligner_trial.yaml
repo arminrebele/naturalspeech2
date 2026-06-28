@@ -14,3 +14,5 @@
 defaults:
   - override /setup: aligner_trial
   - override /wandb: aligner_trial
+
+run_name: aligner_trial          # default; the Optuna driver overrides per trial (and bumps on re-run)

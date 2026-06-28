@@ -10,8 +10,6 @@ defaults:
 max_iters: 5000                  # warmup_ratio (0.11 → 550) + ISR inherited from base
 lr_decay_iters: ${setup.max_iters}
 
-allow_ckpt_overwrite: True       # diagnostic: freely re-run its own subdir (inert here — saves all off)
-
 aligner_trial_run: True
 
 # Held-out eval at a fine cadence → tail = decision signal. eval_iters bounds each held-out pass.
@@ -23,6 +21,3 @@ eval_metrics: []                 # no WER/SIM-o during tuning (no fixed-ref tabl
 checkpoint_interval: 0           # no crash-recovery checkpoints for short trials
 best_safetensors: False
 final_safetensors: False         # tuning trials produce no inference artifact
-
-log_subdir: "logs/experiments"
-log_name: "aligner_trial"

@@ -8,8 +8,6 @@ max_iters: 2000
 warmup_iters: 0                  # explicit absolute override of base's warmup_ratio (no warmup; cosine, since ISR asserts warmup>0)
 # lr_decay_iters now inherits base (= ${setup.max_iters})
 
-allow_ckpt_overwrite: True       # diagnostic: freely re-run + overwrite its own checkpoint subdir
-
 overfit_single_batch: True
 
 log_interval: 10
@@ -21,6 +19,3 @@ audio_tables: [overfit_batch]
 inference_data_loss_sweep: [150, 300, 600, 1000]
 
 best_safetensors: False          # no dev_loss gating on overfit
-
-log_subdir: "logs/experiments"
-log_name: "overfit_test"

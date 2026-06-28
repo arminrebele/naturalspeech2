@@ -12,6 +12,8 @@ defaults:
   - override /setup: overfit_test
   - override /wandb: overfit_test
 
+run_name: overfit_test           # default; a re-run auto-bumps to overfit_test-2 (never overwrites)
+
 training:
   lr_schedule: "cosine"
 

@@ -59,7 +59,7 @@ def make_objective(workdir: Path, max_iters: int, extra: list):
             "+experiment=aligner_trial",
             f"setup.max_iters={max_iters}",
             f"setup.aligner_trial_out={out_path}",
-            f"wandb.run_name=aligner_opt_{trial.number:04d}",
+            f"run_name=aligner_opt_{trial.number:04d}",   # one knob → wandb run + logs + checkpoint dir
             "wandb.group=aligner-optuna",
             *[f"model.aligner.{k}={v}" for k, v in params.items()],
             *extra,

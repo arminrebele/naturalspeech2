@@ -16,7 +16,3 @@ eval_interval: 100000000        # disable periodic eval (range_test is also daem
 checkpoint_interval: 0          # no checkpoints
 best_safetensors: false
 final_safetensors: false
-allow_ckpt_overwrite: true      # diagnostic: freely re-runnable
-
-log_subdir: "logs/experiments"
-log_name: "lr_range_test"

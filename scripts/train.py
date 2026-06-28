@@ -48,7 +48,7 @@ from naturalspeech2.eval.runner import (
 )
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper, GradientAnalyzer
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
-from naturalspeech2.paths import PROJECT_ROOT, run_checkpoint_dir
+from naturalspeech2.paths import PROJECT_ROOT, run_checkpoint_dir, run_log_dir
 from naturalspeech2.utils.ema import EMA
 from naturalspeech2.utils.utils import (
     setup_file_logger, compute_denominators,
@@ -463,12 +463,12 @@ def _pdeathsig_preexec():
         pass
 
 
-def _spawn_eval_daemon(run_dir, log_dir):
+def _spawn_eval_daemon(run_dir, eval_log_path):
     """Launch the eval daemon as a fresh subprocess pinned to GPU1 (clean CUDA context, no fork).
-    log_dir = the run's log dir (scratch vs main) → daemon writes eval_daemon.log alongside the run log."""
+    eval_log_path = this run's eval_<run_name>.log, which the daemon appends to (beside the trainer log)."""
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": "1"}
     proc = subprocess.Popen(
-        [sys.executable, str(EVAL_DAEMON_SCRIPT), "--run-dir", str(run_dir), "--log-dir", str(log_dir)],
+        [sys.executable, str(EVAL_DAEMON_SCRIPT), "--run-dir", str(run_dir), "--eval-log", str(eval_log_path)],
         env=env, cwd=str(PROJECT_ROOT), preexec_fn=_pdeathsig_preexec,
     )
     logger.info(f"Spawned eval daemon (pid {proc.pid}) on GPU1; run_dir={run_dir}")
@@ -633,6 +633,17 @@ def run_eval_block(
     return best_val_loss
 
 
+def _next_free_run_name(group: str, base_name: str) -> str:
+    """First of <base_name>, <base_name>-2, <base_name>-3, … whose checkpoint AND log dirs are both
+    free → a fresh run never overwrites or appends to an existing lineage (no clobber knob)."""
+    name = base_name
+    n = 2
+    while run_checkpoint_dir(group, name).exists() or run_log_dir(group, name).exists():
+        name = f"{base_name}-{n}"
+        n += 1
+    return name
+
+
 @hydra.main(version_base=None, config_path="../config", config_name="config")
 def train(cfg: DictConfig):
 
@@ -688,15 +699,50 @@ def train(cfg: DictConfig):
             f"{nonzero_dropouts}. Add them to model/overfit_test.yaml overrides."
         )
 
-    log_dir = PROJECT_ROOT / cfg.setup.log_subdir
-    log_name = f"{cfg.setup.log_name}.log"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    # Per-lineage checkpoint subdir (CHECKPOINTS_DIR/<log_name>) — isolates this run's ckpt.pt +
-    # ema_* from every other run so a diagnostic can't clobber the main run's resume point. Created
-    # before any write (parent CHECKPOINTS_DIR may be absent on fresh containers).
-    ckpt_dir = run_checkpoint_dir(cfg.setup.log_name)
+    # Resolve OUTPUT identity (where this run writes: logs/<group>/<run_name>/ + models/checkpoints/
+    # <group>/<run_name>/, fully mirrored) and, on resume, the SOURCE ckpt to read.
+    #   scratch          → fresh OUTPUT; src_ckpt_dir = None (random init).
+    #   resume, default  → continue THIS run in place: source == output, reattach wandb + APPEND log.
+    #   resume + resume_from → seed a CLEAN new run from another checkpoint: source = resume_from
+    #     ("<name>" in this group, or "<group>/<name>" cross-group), OUTPUT = a fresh run_name (new wandb
+    #     run, fresh folder, no append). The OUTPUT name auto-bumps to <name>-2,… if it already exists, so
+    #     a fresh run never overwrites/appends to a prior lineage (no clobber knob — delete dirs by hand).
+    # The resolved OUTPUT name is written back to cfg.run_name → propagates to wandb.run_name (${run_name})
+    # and the daemon handshake. resume_from is inert on scratch.
+    group = cfg.wandb.group
+    base_run_name = cfg.run_name
+    assert cfg.resume_from is None or cfg.setup.init_from == 'resume', (
+        f"resume_from={cfg.resume_from!r} requires init_from=resume (it names the source checkpoint to "
+        f"seed a fresh run from); init_from is {cfg.setup.init_from!r}."
+    )
+    src_ckpt_dir = None
+    if cfg.setup.init_from == 'resume':
+        if cfg.resume_from is None:
+            src_group, src_name = group, base_run_name              # continue this run in place
+        elif "/" in cfg.resume_from:
+            src_group, src_name = cfg.resume_from.split("/", 1)      # cross-group source
+        else:
+            src_group, src_name = group, cfg.resume_from            # source in the current group
+        src_ckpt_dir = run_checkpoint_dir(src_group, src_name)
+        resume_append = (src_group == group and src_name == base_run_name)
+        run_name = base_run_name if resume_append else _next_free_run_name(group, base_run_name)
+    else:
+        resume_append = False
+        run_name = _next_free_run_name(group, base_run_name)
+    cfg.run_name = run_name
+
+    ckpt_dir = run_checkpoint_dir(group, run_name)
+    log_dir = run_log_dir(group, run_name)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    setup_file_logger(logger, log_dir / log_name, root=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    # APPEND only when continuing the same run in place; otherwise a fresh log (the dir is brand new).
+    setup_file_logger(logger, log_dir / f"{run_name}.log", root=True, mode="a" if resume_append else "w")
+    if run_name != base_run_name:
+        logger.info(f"run_name '{base_run_name}' already exists under group '{group}' → using fresh "
+                    f"'{run_name}' (never overwrites/appends to a prior lineage).")
+    if src_ckpt_dir is not None and not resume_append:
+        logger.info(f"Clean resume: seeding new run '{group}/{run_name}' from checkpoint "
+                    f"'{src_group}/{src_name}' (fresh wandb run + log, no append).")
 
     # Daemon offloads eval to GPU1. overfit/aligner_trial need trainer-local eval state so they stay
     # in-process; the main run's eval is plain held-out loss → daemon-compatible. gradient_analysis is
@@ -771,22 +817,9 @@ def train(cfg: DictConfig):
 
     # Instantiate Model
     if cfg.setup.init_from == 'scratch':
-        # Anti-clobber: refuse to overwrite a prior run's saved weights unless explicitly allowed.
-        # base.yaml defaults init_from='scratch', so a bare re-run of a crashed run (which meant to
-        # resume) would otherwise silently destroy its ckpt.pt. Diagnostic modes set
-        # allow_ckpt_overwrite=true (they own + freely re-run their isolated subdir).
-        existing = [f for f in ("ckpt.pt", "ema_best.safetensors", "ema_final.safetensors")
-                    if (ckpt_dir / f).exists()]
-        assert cfg.setup.allow_ckpt_overwrite or not existing, (
-            f"init_from='scratch' but {ckpt_dir} already holds {existing}. Refusing to clobber a "
-            f"prior run's checkpoints. To continue it, set setup.init_from=resume; to discard and "
-            f"restart from scratch, pass setup.allow_ckpt_overwrite=true (or clear the directory)."
-        )
+        # ckpt_dir is guaranteed brand-new here (the run-name resolver bumped past any existing dir), so
+        # a scratch run can never clobber a prior lineage — no anti-clobber guard needed.
         logger.info("Initializing a new model from scratch...")
-        # Fresh run → drop the daemon's persistent best-tracking from a prior run in this dir, so the
-        # ema_best gate restarts from inf (matches the in-process best_val_loss=1e9 reset). Stale weight
-        # files are left untouched (never read on scratch; overwritten as the run progresses).
-        (ckpt_dir / "eval_state.json").unlink(missing_ok=True)
         model_cfg = model_cfg_from_omegaconf(cfg.model)
         model = NaturalSpeech2Model(
             model_cfg,
@@ -794,7 +827,9 @@ def train(cfg: DictConfig):
             sampling_rate=sampling_rate,
         )
     elif cfg.setup.init_from == 'resume':
-        ckpt_path = ckpt_dir / 'ckpt.pt'
+        # Read from the SOURCE ckpt (== ckpt_dir when continuing in place; a different lineage when
+        # seeding a clean run via resume_from). New checkpoints still write to the OUTPUT ckpt_dir.
+        ckpt_path = src_ckpt_dir / 'ckpt.pt'
         checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
 
         # Rebuild from the checkpoint's own cfg → architecture matches even if base.yaml drifted.
@@ -830,7 +865,8 @@ def train(cfg: DictConfig):
                     f"run's value> on the CLI."
                 )
 
-        logger.info(f"Resuming training at iteration {start_iter} from checkpoint in {ckpt_dir}...")
+        logger.info(f"Resuming training at iteration {start_iter} from checkpoint in {src_ckpt_dir}"
+                    f"{'' if resume_append else f' → writing fresh run to {ckpt_dir}'}...")
 
     # Endpoint when early stopping is OFF = max_iters; start_iter == max_iters ⇒ run already finished, an
     # empty range only re-saves → assert loudly (no known use for a zero-iteration run). With early stopping
@@ -873,7 +909,9 @@ def train(cfg: DictConfig):
     
     if cfg.setup.init_from == 'resume':
         optimizer.load_state_dict(checkpoint['optimizer'])
-        resume_wandb_id = checkpoint.get('wandb_id')
+        # Reattach the source's wandb run only when continuing it in place; a clean resume (resume_from)
+        # is a new run, so drop the source's wandb_id → wandb.init mints a fresh run below.
+        resume_wandb_id = checkpoint.get('wandb_id') if resume_append else None
         resume_ema_state = checkpoint.get('ema')
         resume_cur_kimg = checkpoint.get('cur_kimg', 0.0)
         logger.info("Resumed optimizer from checkpoint.")
@@ -925,41 +963,16 @@ def train(cfg: DictConfig):
             tags=list(cfg.wandb.tags),
             config=OmegaConf.to_container(cfg, resolve=True),
         )
-        # Resume-overlap handling. A prior session logs every log_interval but checkpoints only every
-        # checkpoint_interval, so wandb's run.step is almost always AHEAD of the ckpt we resume from;
-        # those extra steps were logged from weights we just discarded. Plain resume='allow' silently
-        # DROPS every re-logged step <= run.step. Branch the run at the ckpt iter instead (step ==
-        # iter_num since every wandb.log passes step=iter_num):
-        #   rewind → resume_from truncates the orphaned tail in-place (one continuous run; default)
-        #   fork   → fork_from starts a NEW run branched at the ckpt (original preserved). NOTE: wandb
-        #            private-preview feature — 400s with "Forking is in private preview" unless the
-        #            account is enabled; 'rewind' (resume_from) is in the same preview family. Use 'new'.
-        #   new    → brand-new independent run; the ckpt's wandb_id is ignored entirely (source run
-        #            untouched, no fork lineage). The non-gated way to log a resumed diagnostic
-        #            (e.g. gradient_analysis off a finished run) without polluting the source A/B run.
-        #   allow  → legacy reattach (keeps the drop) + a loud guard below
+        # Continuing a run in place (resume_append) → reattach its wandb run (resume="allow", the only
+        # non-private resume). resume_wandb_id is None on scratch AND on a clean resume_from run (both
+        # mint a fresh run). Reattach caveat: a prior session logs every log_interval but checkpoints
+        # less often, so wandb's run.step is usually AHEAD of the resumed ckpt step → re-logged steps ≤
+        # run.step drop client-side as non-monotonic (the small post-checkpoint overlap). Truncating that
+        # tail needs the private 'rewind' API we can't use; wandb keeps the old overlap, the local log
+        # continues from the resume point. For an entirely clean continuation, use resume_from instead.
         if resume_wandb_id:
-            branch = f"{resume_wandb_id}?_step={start_iter - 1}"
-            mode = cfg.setup.wandb_resume_mode
-            if mode == "rewind":
-                init_kwargs["resume_from"] = branch
-                logger.info(f"wandb resume mode 'rewind': truncating run {resume_wandb_id} history "
-                            f"after step {start_iter - 1} and re-logging from there.")
-            elif mode == "fork":
-                init_kwargs["fork_from"] = branch
-                logger.info(f"wandb resume mode 'fork': forking a new run from {resume_wandb_id} at "
-                            f"step {start_iter - 1} (original run preserved).")
-            elif mode == "new":
-                # Leave init_kwargs untouched (no resume_from/fork_from/id) so wandb.init mints a
-                # fresh run id; the ckpt's run is left alone. Logs from start_iter onward.
-                logger.info(f"wandb resume mode 'new': starting a fresh independent run; ckpt's run "
-                            f"{resume_wandb_id} left untouched (no fork lineage).")
-            elif mode == "allow":
-                init_kwargs["id"] = resume_wandb_id
-                init_kwargs["resume"] = "allow"
-            else:
-                raise ValueError(
-                    f"Unknown setup.wandb_resume_mode={mode!r}; expected 'rewind', 'fork', 'new', or 'allow'.")
+            init_kwargs["id"] = resume_wandb_id
+            init_kwargs["resume"] = "allow"
 
         wandb.init(**init_kwargs)
 
@@ -967,12 +980,13 @@ def train(cfg: DictConfig):
             wandb.define_metric("LR Range Test/lr")
             wandb.define_metric("LR Range Test/loss", step_metric="LR Range Test/lr")
 
-        # Legacy reattach can't overwrite the orphaned tail → warn loudly which steps will be dropped.
-        if resume_wandb_id and cfg.setup.wandb_resume_mode == "allow" and wandb.run.step >= start_iter:
+        # resume="allow" can't overwrite the orphaned tail → warn loudly which steps will be dropped.
+        if resume_wandb_id and wandb.run.step >= start_iter:
             logger.warning(
                 f"⚠️ wandb run {resume_wandb_id} is at step {wandb.run.step} but resuming from ckpt "
                 f"iter {start_iter - 1}: re-logged steps {start_iter}..{wandb.run.step} will be DROPPED "
-                f"client-side (non-monotonic). Set setup.wandb_resume_mode=rewind to overwrite them."
+                f"client-side (non-monotonic) — the post-checkpoint overlap. Truncating it needs the "
+                f"private 'rewind' API we can't use; for a clean continuation use resume_from + a new run_name."
             )
 
         # Replay the buffered pre-init logs into the now-hooked stdout → wandb Logs tab, in original
@@ -1004,6 +1018,10 @@ def train(cfg: DictConfig):
     if use_eval_daemon:
         run_tag = wandb.run.id if cfg.wandb.log else f"pid{os.getpid()}"
         eval_run_dir = ipc.resolve_run_dir(cfg.setup.eval_daemon.snapshot_dir, run_tag)
+        # Per-run eval-daemon log beside the trainer log (logs/<group>/<run_name>/eval_<run_name>.log).
+        # The daemon opens it append; the dir is fresh on scratch so it starts empty, and a respawn (or
+        # a resume) continues the same file. cfg.run_name was resolved above → handshake carries it.
+        daemon_log = log_dir / f"eval_{run_name}.log"
         ipc.write_daemon_init(eval_run_dir, {
             "model_cfg": model_cfg_dict,
             "token_vocabulary_size": token_vocabulary_size,
@@ -1013,13 +1031,12 @@ def train(cfg: DictConfig):
             "cfg": OmegaConf.to_container(cfg, resolve=True),
         })
         snapshot_writer = SnapshotWriter(eval_run_dir)
-        daemon_proc = _spawn_eval_daemon(eval_run_dir, log_dir)
+        daemon_proc = _spawn_eval_daemon(eval_run_dir, daemon_log)
         if cfg.wandb.log:
             # The daemon is a child process → its log never reaches wandb's (main-process) console
             # capture. Upload its file directly: policy="live" re-syncs as it grows + survives
             # respawns (shared append path), async in wandb's service thread → no training-step cost.
             # touch first so the live watch registers before the daemon's first write.
-            daemon_log = log_dir / "eval_daemon.log"
             daemon_log.touch(exist_ok=True)
             wandb.save(str(daemon_log), base_path=str(log_dir), policy="live")
 
@@ -1329,10 +1346,9 @@ def train(cfg: DictConfig):
                     prev_unique_graphs = ug
                 eval_ran_since_graph_check = False
 
-            # Gradient-analysis metrics: compute ONCE + accumulate here, OUTSIDE the wandb block, so
-            # the end-of-run summary survives regardless of wandb (it's printed via logger). When this
-            # mode is bolted onto a resumed run, setup.wandb_resume_mode (default 'rewind') now keeps
-            # live logs from being dropped, but the summary stays wandb-independent on principle.
+            # Gradient-analysis metrics: compute ONCE + accumulate here, OUTSIDE the wandb block, so the
+            # end-of-run summary survives regardless of wandb (it's printed via logger). The summary
+            # stays wandb-independent on principle (a resumed run drops only the small re-logged overlap).
             # `analyzer is not None` ⟹ already in the window.
             grad_norms = cos_sims = None
             if analyzer is not None:
@@ -1410,7 +1426,7 @@ def train(cfg: DictConfig):
                     if daemon_respawn_count <= EVAL_DAEMON_MAX_RESPAWNS:
                         logger.warning(f"Eval daemon exited (code {daemon_proc.returncode}); "
                                        f"respawning ({daemon_respawn_count}/{EVAL_DAEMON_MAX_RESPAWNS}).")
-                        daemon_proc = _spawn_eval_daemon(eval_run_dir, log_dir)
+                        daemon_proc = _spawn_eval_daemon(eval_run_dir, daemon_log)
                     elif daemon_respawn_count == EVAL_DAEMON_MAX_RESPAWNS + 1:
                         logger.error("Eval daemon exceeded max respawns; leaving it down "
                                      "(training continues, eval paused).")

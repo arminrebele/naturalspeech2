@@ -14,6 +14,23 @@ defaults:
 # t/ε, prompt windows, eval prompt picks, DataLoader RNG). cuDNN determinism NOT enforced.
 seed: 42
 
+# THE single run-identity knob. Drives the wandb run name, the per-run log folder + files
+# (logs/<wandb.group>/<run_name>/{<run_name>.log, eval_<run_name>.log}) and the checkpoint dir
+# (models/checkpoints/<wandb.group>/<run_name>/). Pass one override per run — e.g. run_name=softalign.
+# Default "unnamed" is a deliberate fallback (the wandb group still scopes it); on init_from=scratch a
+# name already on disk auto-bumps to <name>-2, -3, … so a forgotten override never overwrites or appends
+# to a prior run. init_from=resume keeps the name as-is (it must already exist) and APPENDS.
+run_name: unnamed
+
+# Source checkpoint for init_from=resume (inert on scratch). null → resume THIS run (run_name) in
+# place: reattach its wandb run + append its log (crash-recovery). To instead seed a CLEAN new run
+# from a checkpoint, set resume_from to the SOURCE run and give run_name a NEW name → fresh wandb run +
+# fresh logs/<group>/<run_name>/ folder, full state (weights+optimizer+iter+EMA+LR) loaded from the
+# source, no append/overlap-drop. Forms: "<name>" (source in the current wandb.group) or
+# "<group>/<name>" (cross-group, e.g. resume_from=generalization/train_5M run_name=gradrun). The output
+# always lands in the current group under run_name; only the read location follows resume_from.
+resume_from: null
+
 # Splits that `scripts/preprocess.py` builds (null → train + dev + test). Train is always built
 # first regardless of order (it builds the vocab; dev/test require it to exist).
 preprocess_splits: null

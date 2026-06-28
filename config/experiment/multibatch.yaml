@@ -17,19 +17,17 @@
 #   setup.max_iters         — train longer if held-out still improving; cut if plateaued / overfitting.
 #   dataset.max_train_clips — the train-size ladder (free knob): raise/lower the slice size.
 
+run_name: multibatch_train       # default; override per run. One knob → wandb + logs + checkpoints (a re-used name auto-bumps to -2).
+
 dataset:
   max_train_clips: 4000          # small `train` slice (~56 full batches); the generalization-probe size knob
 
 setup:
   max_iters: 20000               # ISR + warmup_ratio (0.11 → 2200) inherited from base — same schedule type as the full run
-  allow_ckpt_overwrite: true     # probe re-run often across the train-size ladder → freely overwrite its own subdir
   log_interval: 25               # finer than base's 100 — watch early generalization
   audio_tables: [fixed_train_refs, fixed_val_refs]   # trained-on (train slice) + held-out (dev+test pooled), both stable across runs
   inference_data_loss_sweep: []  # overfit-only / teacher-forced; blind to conditioning, unused here
   # num_audio_refs (60) + eval_metrics (["wer","sim_o"]) inherited from setup/base; WER/SIM-o land on both train (trained-on) and val (held-out).
-  log_subdir: "logs/experiments"
-  log_name: "multibatch"
 
 wandb:
   group: "generalization"
-  run_name: "multibatch_train"
