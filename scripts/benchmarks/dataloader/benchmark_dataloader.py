@@ -29,11 +29,15 @@ WARMUP_STEPS = int(os.environ["WARMUP_STEPS"])
 # batch sizes are pre-validated, so VRAM can't OOM and num_workers doesn't change it).
 #   - run_benchmark_dataloader.sh stops the ascending num_workers sweep on this exit code (a higher
 #     worker count would only use more host RAM, so the rest would fail too).
-#   - RAM watchdog trips before the OS OOM killer fires (which could kill a co-tenant job on a shared box).
-#   - STALL watchdog hard-exits if a step wedges (RAM thrashing / a stuck worker → the box is unusable);
-#     generous enough to clear the first torch.compile.
+#   - Per-step RAM check (main thread) aborts gracefully before the OS OOM killer fires (which could
+#     kill a co-tenant job on a shared box).
+#   - Watchdog thread hard-exits on any of: a wedged step (no progress > STEP_TIMEOUT), host RAM ≥
+#     RAM_ABORT_PERCENT, or swap GROWTH ≥ SWAP_ABORT_GB. The swap guard catches the thrashing the other
+#     two miss — the kernel can hold RAM% under the limit by paging out, and steps that merely crawl
+#     (not fully wedge for STEP_TIMEOUT) never trip the stall timer, yet the box is already unusable.
 ABORT_EXIT_CODE = 42
-RAM_ABORT_PERCENT = float(os.environ.get("RAM_ABORT_PERCENT", "96"))
+RAM_ABORT_PERCENT = float(os.environ.get("RAM_ABORT_PERCENT", "90"))
+SWAP_ABORT_GB = float(os.environ.get("SWAP_ABORT_GB", "2"))
 STEP_TIMEOUT_SECONDS = float(os.environ.get("STEP_TIMEOUT_SECONDS", "300"))
 
 @hydra.main(version_base=None, config_path="../../../config", config_name="config")
@@ -118,6 +122,47 @@ def benchmark(cfg: DictConfig):
 
     logger.info(f"\nStarting benchmark: {NUM_BENCHMARK_STEPS} steps ({WARMUP_STEPS} warmup)")
 
+    # Watchdog thread, armed BEFORE the first fetch so a worker deadlock on startup is covered too. It
+    # hard-exits (os._exit frees the box without waiting on possibly-stuck cleanup; the shell stops the
+    # sweep on the code) on any of three triggers — the main-thread per-step check below stays the graceful
+    # path, while this is the net that fires even when the loop is too wedged or laggy to self-check:
+    #   - STALL: no step progress for STEP_TIMEOUT_SECONDS — a fully wedged step.
+    #   - RAM:   host RAM ≥ RAM_ABORT_PERCENT.
+    #   - SWAP:  swap grew ≥ SWAP_ABORT_GB since startup — thrashing onset, the one the other two miss (the
+    #            kernel can keep RAM% under the limit by paging out, and a box that merely crawls never trips
+    #            the stall timer). Baseline-subtracted: pre-existing / co-tenant swap doesn't count.
+    last_progress = [time.monotonic()]
+    watchdog_stop = threading.Event()
+    swap_baseline = psutil.swap_memory().used
+
+    def _watchdog():
+        while not watchdog_stop.wait(timeout=5.0):
+            stalled = time.monotonic() - last_progress[0]
+            ram_percent = psutil.virtual_memory().percent
+            swap_growth_gb = (psutil.swap_memory().used - swap_baseline) / 1e9
+            if stalled > STEP_TIMEOUT_SECONDS:
+                logger.error(
+                    f"Stall watchdog: no step progress for {stalled:.0f}s (> {STEP_TIMEOUT_SECONDS:.0f}s) "
+                    f"at num_workers={cfg.dataloader.num_workers} — likely RAM thrashing or a stuck "
+                    f"worker. Hard-exiting to free the box."
+                )
+                os._exit(ABORT_EXIT_CODE)
+            if ram_percent >= RAM_ABORT_PERCENT:
+                logger.error(
+                    f"RAM watchdog (thread): host RAM at {ram_percent:.0f}% (≥ {RAM_ABORT_PERCENT:.0f}%) "
+                    f"at num_workers={cfg.dataloader.num_workers}. Hard-exiting to free the box."
+                )
+                os._exit(ABORT_EXIT_CODE)
+            if swap_growth_gb >= SWAP_ABORT_GB:
+                logger.error(
+                    f"Swap watchdog: {swap_growth_gb:.1f} GB pushed to swap since start "
+                    f"(≥ {SWAP_ABORT_GB:.0f} GB) at num_workers={cfg.dataloader.num_workers} — the box is "
+                    f"thrashing (RAM% can stay under the limit while the kernel swaps). Hard-exiting."
+                )
+                os._exit(ABORT_EXIT_CODE)
+
+    threading.Thread(target=_watchdog, daemon=True).start()
+
     loader_iter = iter(loader)
     batch = next(loader_iter)
     denominators = compute_denominators([batch], cfg)
@@ -130,25 +175,6 @@ def benchmark(cfg: DictConfig):
     gpu_h2d_start = torch.cuda.Event(enable_timing=True)
     gpu_bwd_start = torch.cuda.Event(enable_timing=True)
     gpu_end = torch.cuda.Event(enable_timing=True)
-
-    # Stall watchdog (separate thread): if the main loop wedges — RAM thrashing or a stuck DataLoader
-    # worker — the per-step RAM check below can't run, so a daemon thread hard-exits the process to free
-    # the box. os._exit skips the (possibly also-stuck) cleanup; the shell stops the sweep on the code.
-    last_progress = [time.monotonic()]
-    watchdog_stop = threading.Event()
-
-    def _stall_watchdog():
-        while not watchdog_stop.wait(timeout=5.0):
-            stalled = time.monotonic() - last_progress[0]
-            if stalled > STEP_TIMEOUT_SECONDS:
-                logger.error(
-                    f"Stall watchdog: no step progress for {stalled:.0f}s (> {STEP_TIMEOUT_SECONDS:.0f}s) "
-                    f"at num_workers={cfg.dataloader.num_workers} — likely RAM thrashing or a stuck "
-                    f"worker. Hard-exiting to free the box."
-                )
-                os._exit(ABORT_EXIT_CODE)
-
-    threading.Thread(target=_stall_watchdog, daemon=True).start()
 
     for i in range(NUM_BENCHMARK_STEPS + WARMUP_STEPS):
         last_progress[0] = time.monotonic()   # feed the stall watchdog

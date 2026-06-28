@@ -46,7 +46,12 @@ export WARMUP_STEPS=100
 
 # Proactive host-RAM watchdog threshold: the benchmark self-aborts (exit 42 → sweep stops) above this
 # %, before the OS OOM killer can fire and kill a co-tenant job on a shared box. Raise/lower per host.
-export RAM_ABORT_PERCENT=96
+export RAM_ABORT_PERCENT=90
+
+# Swap-thrash threshold (GB): the watchdog also aborts if swap grows by this much during a config. The
+# kernel can hold RAM% under the limit by paging out, so this catches the thrashing the RAM % alone
+# misses (box laggy/unusable but steps still crawling). Lower it to be stricter on swap-light hosts.
+export SWAP_ABORT_GB=2
 
 # num_workers values to sweep (tune to your CPU core count)
 WORKER_COUNTS=(8 16 24 30)
