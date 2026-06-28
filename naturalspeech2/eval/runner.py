@@ -11,7 +11,10 @@ Contents:
 from __future__ import annotations
 
 import itertools
+import logging
 import random
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -24,6 +27,40 @@ from naturalspeech2.eval.metrics import compute_sim_o, compute_wer, compute_wer_
 from naturalspeech2.inference import generate_audio_batch
 from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 from naturalspeech2.utils.utils import compute_denominators, pack_by_budget
+
+logger = logging.getLogger(__name__)
+
+
+class _PhaseProfiler:
+    """Per-phase eval wall + cumulative GPU peak-allocated, logged once at the end so the per-eval cost
+    can be attributed to its knobs (gen_frame_budget / metric_batch_samples / batch_size_divisor).
+    ZERO added CUDA sync: memory reads are host-side allocator counters, and every phase already ends
+    reading its result to CPU (loss .item(), gens→numpy, WER/SIM-o→python), which syncs naturally → the
+    perf_counter deltas are accurate without an explicit synchronize. peak-allocated is CUMULATIVE since
+    the one reset at eval start (no per-phase reset → no clash with the caller's reserved-peak probe); it
+    JUMPS at the phase that drives VRAM. CPU device → timing only."""
+    _ORDER = ("live_loss", "ema_loss", "generation", "wer", "sim_o")
+
+    def __init__(self, device):
+        self.device = device
+        self.cuda = isinstance(device, str) and device.startswith("cuda")
+        if self.cuda:
+            torch.cuda.reset_peak_memory_stats(device)
+        self.secs: dict[str, float] = {}
+        self.peak_gb: dict[str, float] = {}
+
+    @contextmanager
+    def phase(self, name: str):
+        t0 = time.perf_counter()
+        yield
+        self.secs[name] = self.secs.get(name, 0.0) + (time.perf_counter() - t0)
+        if self.cuda:
+            self.peak_gb[name] = torch.cuda.max_memory_allocated(self.device) / 1e9
+
+    def summary(self) -> str:
+        return " | ".join(
+            f"{n} {self.secs[n]:.0f}s" + (f"/{self.peak_gb[n]:.1f}GB-alloc" if n in self.peak_gb else "")
+            for n in self._ORDER if n in self.secs) or "(no phases run)"
 
 
 # ----------------------------------------------------------------------------
@@ -378,22 +415,25 @@ def run_decoupled_eval(
     # weighted losses + EMA-dev best-pick match the trainer. The daemon's LossWrapper is a fresh
     # instance (frozen at step 0) and estimate_loss calls it without a step.
     loss_wrapper._update_weights(snapshot_step)
+    prof = _PhaseProfiler(device)   # per-phase wall + peak-alloc; resets the alloc-peak counter at eval start
 
     # --- 1. live losses (overfitting signal, comparable to the per-step train curve) ---
     # live_trainable=None → EMA-only checkpoint (no live counterpart): skip rather than log a
     # '-live' series that just duplicates the EMA numbers below.
     if eval_iters > 0 and live_trainable is not None:
         _load_trainable(model, live_trainable)
-        live = estimate_loss(loss_model, train_loader, dev_loader, test_loader, loss_wrapper,
-                             eval_iters, gas, device, cfg, eval_train=eval_train)
+        with prof.phase("live_loss"):
+            live = estimate_loss(loss_model, train_loader, dev_loader, test_loader, loss_wrapper,
+                                 eval_iters, gas, device, cfg, eval_train=eval_train)
         _record_losses(report.scalars, live, suffix="-live")
 
     # --- 2. EMA losses (primary, best-selection + shipped quality) ---
     _load_trainable(model, shadow_trainable)
     ema_losses = None
     if eval_iters > 0:
-        ema_losses = estimate_loss(loss_model, train_loader, dev_loader, test_loader, loss_wrapper,
-                                   eval_iters, gas, device, cfg, eval_train=eval_train)
+        with prof.phase("ema_loss"):
+            ema_losses = estimate_loss(loss_model, train_loader, dev_loader, test_loader, loss_wrapper,
+                                       eval_iters, gas, device, cfg, eval_train=eval_train)
         _record_losses(report.scalars, ema_losses, suffix="")
 
     # --- 2b. EMA audio + WER on fixed refs ---
@@ -406,8 +446,9 @@ def run_decoupled_eval(
     refs_by_source = {"train": train_refs, "val": val_refs}
     for table_name in cfg.setup.audio_tables:
         if table_name == "random_val":
-            target_text, clips = generate_random_val_clips(
-                model, val_datasets, sampling_rate, EVAL_TEXT_PROMPTS)
+            with prof.phase("generation"):
+                target_text, clips = generate_random_val_clips(
+                    model, val_datasets, sampling_rate, EVAL_TEXT_PROMPTS)
             report.audio_tables[RANDOM_VAL_TITLE] = {
                 "columns": RANDOM_VAL_COLUMNS,
                 "rows": [[snapshot_step, p_len, target_text,
@@ -431,29 +472,36 @@ def run_decoupled_eval(
         # metric is on, else just the rendered rows.
         k = len(refs) if (do_wer or do_sim_o) else min(num_table_rows, len(refs))
         proxies = [len(refs[i].original_np) // ENCODER_HOP_LENGTH for i in range(k)]
-        gens = batch_generate(model, [refs[i].prompt_tensor for i in range(k)],
-                              [refs[i].text for i in range(k)], proxies, cfg.setup.gen_frame_budget)
-        wer_list = (compute_wer_batch(gens, [refs[i].text for i in range(k)], src_sr=sampling_rate,
-                                      batch_samples=cfg.setup.metric_batch_samples) if do_wer else None)
+        with prof.phase("generation"):
+            gens = batch_generate(model, [refs[i].prompt_tensor for i in range(k)],
+                                  [refs[i].text for i in range(k)], proxies, cfg.setup.gen_frame_budget)
+        wer_list = None
+        if do_wer:
+            with prof.phase("wer"):
+                wer_list = compute_wer_batch(gens, [refs[i].text for i in range(k)], src_sr=sampling_rate,
+                                             batch_samples=cfg.setup.metric_batch_samples)
+        # sim_o is the only non-trivial GPU work in this per-clip loop (WER was batched above; row-build
+        # is cheap CPU), so the loop's wall ≈ the per-clip SIM-o cost.
         rows, synth_wers, gt_wers, sim_os = [], [], [], []
-        for i in range(k):
-            ref, gen = refs[i], gens[i]
-            if do_wer:
-                synth_wer, hyp = wer_list[i]
-                synth_wers.append(synth_wer)
-                gt_wers.append(ref.gt_wer)
-            if do_sim_o:
-                sim_os.append(compute_sim_o(gen, ref.prompt_embedding, src_sr=sampling_rate))
-            if i < num_table_rows:
-                row = [snapshot_step, prompt_seconds, ref.text,
-                       AudioClip(ref.original_np, sampling_rate),
-                       AudioClip(ref.prompt_np, sampling_rate),
-                       AudioClip(gen, sampling_rate)]
+        with prof.phase("sim_o"):
+            for i in range(k):
+                ref, gen = refs[i], gens[i]
                 if do_wer:
-                    row += [hyp, synth_wer]
+                    synth_wer, hyp = wer_list[i]
+                    synth_wers.append(synth_wer)
+                    gt_wers.append(ref.gt_wer)
                 if do_sim_o:
-                    row += [sim_os[-1]]
-                rows.append(row)
+                    sim_os.append(compute_sim_o(gen, ref.prompt_embedding, src_sr=sampling_rate))
+                if i < num_table_rows:
+                    row = [snapshot_step, prompt_seconds, ref.text,
+                           AudioClip(ref.original_np, sampling_rate),
+                           AudioClip(ref.prompt_np, sampling_rate),
+                           AudioClip(gen, sampling_rate)]
+                    if do_wer:
+                        row += [hyp, synth_wer]
+                    if do_sim_o:
+                        row += [sim_os[-1]]
+                    rows.append(row)
         if do_wer:
             record_metric_dist(report.scalars, f"Evaluation: Metrics/{split}-WER", synth_wers)
             report.scalars[f"Evaluation: Metrics/{split}-WER-gt"] = _mean_skip_nan(gt_wers)
@@ -467,4 +515,8 @@ def run_decoupled_eval(
         report.new_best = True
         report.best_val_loss = ema_losses['val']['total_loss']
 
+    # Per-phase wall + cumulative peak-alloc → attribute the eval cost to its knobs. The GB value JUMPS
+    # at the phase driving VRAM; the seconds show which phase to target for speed (gen_frame_budget for
+    # generation, metric_batch_samples for wer, batch_size_divisor/eval_iters for the loss phases).
+    logger.info(f"Eval phase profile (step {snapshot_step}): {prof.summary()}")
     return report
