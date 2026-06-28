@@ -21,7 +21,8 @@ from naturalspeech2.config.schema import model_cfg_from_omegaconf
 from naturalspeech2.data.loaders import create_dataloader
 from naturalspeech2.data.phoneme_tokenizer import PhonemeTokenizer
 from naturalspeech2.model import NaturalSpeech2Model, LossWrapper
-from naturalspeech2.utils.compile_tracking import compile_kwargs, read_compile_stats, format_break_reasons
+from naturalspeech2.utils.compile_tracking import (
+    compile_kwargs, read_compile_stats, format_break_reasons, unexpected_break_reasons)
 from naturalspeech2.eval import set_metric_device
 from naturalspeech2.eval import ipc
 from naturalspeech2.eval.runner import (
@@ -165,13 +166,16 @@ def evaluate_snapshot(ctx: dict, snap: dict, best_val_loss: float) -> float:
         cstats = read_compile_stats()
         for key in ("unique_graphs", "graph_breaks_total", "n_break_reasons", "cache_size_limit"):
             report.scalars[f"Evaluation: Compile/{key}"] = cstats[key]
-        reasons = set(cstats["break_reasons"])
-        if reasons != ctx.get("_compile_reasons"):
-            added = reasons - (ctx.get("_compile_reasons") or set())
-            if added and ctx.get("_compile_reasons"):
-                logger.warning(f"⚠️ New daemon graph-break reason(s): {sorted(added)} — "
-                               f"expected only the 2 intended disable sites.")
-            ctx["_compile_reasons"] = reasons
+        # Warn (once each) only for reasons outside the fixed 5-reason baseline — same incremental-
+        # appearance caveat as the trainer (the eval forward hits the same mel/disable/CTC breaks).
+        new_unexpected = unexpected_break_reasons(cstats["break_reasons"]) - ctx.setdefault("_warned_reasons", set())
+        if new_unexpected:
+            logger.warning(f"⚠️ Unexpected daemon graph-break reason(s): {sorted(new_unexpected)} — beyond the "
+                           f"5-reason structural baseline (2 @torch.compiler.disable sites, torchaudio "
+                           f"isinstance, CTC dynamic-shape + fake-tensor).")
+            ctx["_warned_reasons"] |= new_unexpected
+        # Leak check stays strict: the daemon pre-warms EVERY bucket up front (no late-bucket case), so
+        # any cross-snapshot unique_graphs growth = eval shapes recompiling beyond the buckets = a leak.
         prev_ug = ctx.get("_compile_ug")
         if prev_ug is not None and cstats["unique_graphs"] > prev_ug:
             logger.warning(f"⚠️ Daemon unique_graphs grew {prev_ug}→{cstats['unique_graphs']} across "

@@ -38,11 +38,35 @@ def read_compile_stats() -> dict:
     }
 
 
+def _reason_first_line(reason: str) -> str:
+    """Dynamo reason keys are multi-line blobs (Explanation/Hint/docs URL); the first line is the stable
+    identity. Matching on it keeps reason-set logic robust to the variable debug-context tail."""
+    return reason.split("\n", 1)[0].strip()
+
+
 def format_break_reasons(break_reasons: dict) -> str:
-    """One-line 'N× reason; ...' breakdown, descending by count. Dynamo's reason keys are multi-line
-    blobs (Explanation/Hint/docs URL), so keep only each key's first line — otherwise this "one-liner"
-    spans ~40 lines. Full per-break detail is reproducible via TORCH_LOGS=graph_breaks."""
+    """One-line 'N× reason; ...' breakdown, descending by count — first line of each reason only,
+    else this "one-liner" spans ~40 lines. Full per-break detail via TORCH_LOGS=graph_breaks."""
     if not break_reasons:
         return "(none)"
-    first_line = lambda r: r.split("\n", 1)[0].strip()
-    return "; ".join(f"{n}× {first_line(r)}" for r, n in sorted(break_reasons.items(), key=lambda kv: -kv[1]))
+    return "; ".join(f"{n}× {_reason_first_line(r)}" for r, n in sorted(break_reasons.items(), key=lambda kv: -kv[1]))
+
+
+# The intended structural graph breaks for this model, matched on each reason's first line. They appear
+# INCREMENTALLY over the first ~hundreds of steps (a reason only registers once its code path + shape
+# first executes), so the tripwire compares against THIS fixed baseline, not the previous step's set —
+# else an expected reason showing up late false-fires. Anything outside this set is a real regression.
+EXPECTED_BREAK_REASON_PREFIXES = frozenset({
+    "Attempted to call function marked as skipped",         # torchaudio MelSpectrogram torch.jit.isinstance
+    "Skip calling `torch.compiler.disable()`d function",    # intended @torch.compiler.disable site (encodec / aligner)
+    "Skip inlining `torch.compiler.disable()`d function",   # intended @torch.compiler.disable site (encodec / aligner)
+    "Dynamic shape operator",                               # aligner CTC forward-sum: data-dependent output shape
+    "Operator does not support running with fake tensors",  # aligner CTC: aten._use_cudnn_ctc_loss fake-tensor probe
+})
+
+
+def unexpected_break_reasons(break_reasons: dict) -> set:
+    """First lines of any graph-break reasons OUTSIDE the intended structural baseline — i.e. genuine
+    regressions / new inefficiencies. Empty in a healthy run regardless of when each baseline reason
+    first appeared."""
+    return {_reason_first_line(r) for r in break_reasons} - EXPECTED_BREAK_REASON_PREFIXES

@@ -55,7 +55,8 @@ from naturalspeech2.utils.utils import (
     install_prewandb_log_buffer, flush_prewandb_log_buffer,
 )
 from naturalspeech2.utils.warning_filters import install_warning_filters
-from naturalspeech2.utils.compile_tracking import compile_kwargs, read_compile_stats, format_break_reasons
+from naturalspeech2.utils.compile_tracking import (
+    compile_kwargs, read_compile_stats, format_break_reasons, unexpected_break_reasons)
 
 logger = logging.getLogger(__name__)
 
@@ -1090,7 +1091,8 @@ def train(cfg: DictConfig):
     last_log_time = time.perf_counter()
     last_log_iter = start_iter - 1
     prev_unique_graphs = None           # eval-aware recompile-leak check (None until warmup baseline)
-    prev_break_reasons = set()          # text-log break reasons only when the SET changes
+    compile_baseline_graphs = None      # unique_graphs plateau captured at first post-warmup log → leak ceiling
+    warned_break_reasons = set()        # out-of-baseline reasons already warned (warn once each)
     eval_ran_since_graph_check = False  # in-process eval compiles eval-mode graphs once → not a leak
 
     # Filled on the first loop iter when overfit_batch table is active. Overfit cycling yields
@@ -1319,30 +1321,42 @@ def train(cfg: DictConfig):
                     logger.info(f"torch.compile: {cstats['unique_graphs']} graphs | {cstats['graph_breaks_total']} "
                                 f"breaks [{format_break_reasons(cstats['break_reasons'])}] | "
                                 f"cache_size_limit={cstats['cache_size_limit']}")
-                # Structural-breaks tripwire: log only when the reason SET changes (no per-step strings).
-                # Baseline = 5 fixed reasons: 2 intended @torch.compiler.disable sites, torchaudio-
-                # MelSpectrogram torch.jit.isinstance skips, CTC loss dynamic-shape + fake-tensor probe.
-                reason_set = set(cstats["break_reasons"])
-                if reason_set != prev_break_reasons:
-                    added = reason_set - prev_break_reasons
-                    if added and prev_break_reasons:
-                        logger.warning(f"⚠️ New torch.compile graph-break reason(s): {sorted(added)} — "
-                                       f"beyond the 5-reason structural baseline (2 intended "
-                                       f"@torch.compiler.disable sites, torchaudio isinstance skips, "
-                                       f"CTC-loss dynamic-shape + fake-tensor).")
-                    prev_break_reasons = reason_set
-                # Eval-aware leak check: a unique_graphs grow at a non-eval step past warmup = real leak.
+                # Structural-breaks tripwire: warn (once each) ONLY for reasons outside the fixed 5-reason
+                # baseline. The expected reasons register incrementally over warmup (a reason appears only
+                # once its code path + shape first runs — e.g. the CTC fake-tensor break shows up ~step 100),
+                # so comparing against the baseline (not the previous step's set) is what stops an expected
+                # late reason from false-firing. Anything left is a genuine regression / new inefficiency.
+                new_unexpected = unexpected_break_reasons(cstats["break_reasons"]) - warned_break_reasons
+                if new_unexpected:
+                    logger.warning(f"⚠️ Unexpected torch.compile graph-break reason(s): {sorted(new_unexpected)} — "
+                                   f"beyond the 5-reason structural baseline (2 @torch.compiler.disable sites, "
+                                   f"torchaudio isinstance, CTC dynamic-shape + fake-tensor). A regression or new "
+                                   f"inefficiency; inspect with TORCH_LOGS=graph_breaks.")
+                    warned_break_reasons |= new_unexpected
+                # Eval-aware recompile-leak check. unique_graphs plateaus once every bucket (× its static+
+                # symbolic promotion) has compiled, but a RARE bucket can first compile long after warmup —
+                # a one-off bump, not a leak. So tolerate growth up to a bucket-derived ceiling (post-warmup
+                # baseline + 2 per bucket) and flag only growth PAST it: a genuine shape leak (shapes not
+                # bucketed) climbs without bound and blows through it, while a late bucket stays well under.
+                # The first in-process eval compiles an eval-mode graph family once (benign) → carved out.
                 ug = cstats["unique_graphs"]
                 if rel_step >= COMPILE_WARMUP_STEP:
+                    if compile_baseline_graphs is None:
+                        compile_baseline_graphs = ug
+                    n_buckets = len(cfg.dataloader.bucket_mapping)
+                    leak_ceiling = compile_baseline_graphs + 2 * n_buckets
                     if prev_unique_graphs is not None and ug > prev_unique_graphs:
                         if eval_ran_since_graph_check:
                             logger.info(f"unique_graphs {prev_unique_graphs}→{ug} after an eval — one-time "
                                         f"eval-mode graph compilation, not a leak.")
+                        elif ug > leak_ceiling:
+                            logger.warning(f"⚠️ unique_graphs grew to {ug}, past the leak ceiling {leak_ceiling} "
+                                           f"(post-warmup baseline {compile_baseline_graphs} + 2×{n_buckets} buckets) "
+                                           f"at a non-eval step — batch shapes are LEAKING (recompiling beyond the "
+                                           f"buckets). Re-run with TORCH_LOGS=recompiles to see the failing guard.")
                         else:
-                            logger.warning(f"⚠️ unique_graphs grew {prev_unique_graphs}→{ug} at a non-eval step after "
-                                           f"warmup — batch shapes are LEAKING (recompiling beyond the "
-                                           f"{len(cfg.dataloader.bucket_mapping)} buckets). Re-run with "
-                                           f"TORCH_LOGS=recompiles to see the failing guard.")
+                            logger.info(f"unique_graphs {prev_unique_graphs}→{ug} (≤ ceiling {leak_ceiling}) — a rare "
+                                        f"bucket compiling after warmup, within the bucket tolerance (not a leak).")
                     prev_unique_graphs = ug
                 eval_ran_since_graph_check = False
 
