@@ -23,6 +23,19 @@ class _MaybeGuardRelFilter(logging.Filter):
         return "_maybe_guard_rel() was called on non-relation" not in record.getMessage()
 
 
+class _WordsMismatchFilter(logging.Filter):
+    """Drop phonemizer's 'words count mismatch on N% of the lines' records. espeak's word-count
+    heuristic logs this per phonemized utterance even in words_mismatch='ignore' mode (the Ignore
+    processor still calls _resume(), which logs the summary), so eval generation floods the daemon log
+    (~80 lines/eval). A Filter, NOT setLevel(ERROR): phonemizer's get_logger() resets the 'phonemizer'
+    logger level back to WARNING when the espeak backend is built (after our install) but never clears
+    filters, and its NullHandler only blocks phonemizer's OWN stderr — the record still propagates to
+    the root file handler. Targets the one message → real phonemizer warnings/errors stay visible."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "words count mismatch" not in record.getMessage()
+
+
 def install_warning_filters() -> None:
     """Register all suppressions for the current process (idempotent enough — called once per entry)."""
 
@@ -40,10 +53,10 @@ def install_warning_filters() -> None:
         "ignore",
         message=r"TensorFloat32 tensor cores for float32 matrix multiplication available but not enabled")
 
-    # --- phonemizer: espeak word-count heuristic on our punctuation-split fragments. words_mismatch
-    # is already 'ignore' in the installed backend, but Ignore._resume() still logs the per-call
-    # summary → silence the logger itself (mismatches are inherent to fragment-wise phonemization). ---
-    logging.getLogger("phonemizer").setLevel(logging.ERROR)
+    # --- phonemizer: espeak word-count heuristic on our punctuation-split fragments (benign — mismatches
+    # are inherent to fragment-wise phonemization). Message-scoped Filter, not setLevel: phonemizer's
+    # get_logger() resets the logger level at backend build (clobbering setLevel) but leaves filters. ---
+    logging.getLogger("phonemizer").addFilter(_WordsMismatchFilter())
 
     # --- third-party s3prl/WavLM deprecations (in-process eval load path only), benign ---
     warnings.filterwarnings("ignore", message=r"torch\.nn\.utils\.weight_norm is deprecated")
