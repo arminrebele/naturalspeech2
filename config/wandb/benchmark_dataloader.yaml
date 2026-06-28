@@ -1,5 +1,9 @@
+# Dataloader benchmark wandb defaults. Logs to naturalspeech2-eval (NOT the training project) — same rule
+# as the checkpoint benchmarks + heatmap diagnostics: infra/benchmark runs stay out of training. The
+# group below is the standalone default; run_benchmark_dataloader.sh overrides it with a per-invocation
+# timestamp so reruns of the sweep don't mix.
 log: True
-project: "naturalspeech2"
+project: "naturalspeech2-eval"
 group: "benchmark-dataloader"
 run_name: "benchmark_dataloader"
 notes: ""

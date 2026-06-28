@@ -34,9 +34,13 @@ while [[ "$#" -gt 0 ]]; do
   esac
 done
 
-# Output log file
-LOG_FILE="logs/benchmarks/dataloader_benchmark.log"
+# Output logs — absolute so they survive Hydra's per-run chdir in the python processes that read them
+# (the benchmark appends result rows; log_sweep_summary.py reads the rows + the combined log).
+LOG_FILE="$(pwd)/logs/benchmarks/dataloader_benchmark.log"
+SWEEP_RESULTS_FILE="$(pwd)/logs/benchmarks/dataloader_benchmark_results.jsonl"   # per-config rows → sweep table
+export LOG_FILE SWEEP_RESULTS_FILE
 mkdir -p "$(dirname "$LOG_FILE")"
+: > "$SWEEP_RESULTS_FILE"   # fresh per sweep (one JSON line per config, success or abort)
 
 # Measured steps per config (+ warmup, which is skipped). 1000 gives a stable starvation rate (binomial
 # standard error <~1.6 %) and a ~50-sample P95 tail — enough to argue healthy/starved confidently
@@ -55,6 +59,11 @@ export SWAP_ABORT_GB=2
 
 # num_workers values to sweep (tune to your CPU core count)
 WORKER_COUNTS=(8 16 24 30)
+
+# Unique W&B group per sweep invocation (timestamped) so reruns don't pile into / mix with one another —
+# each invocation's per-worker runs + its sweep-summary run cluster on their own. Filter by the
+# 'benchmark-dataloader-' prefix in W&B to see all sweeps.
+SWEEP_GROUP="benchmark-dataloader-$(date +%Y%m%d_%H%M%S)"
 
 echo "Dataloader benchmark | setting=$RUN_TAG | dataset=$DATASET_NAME | $NUM_BENCHMARK_STEPS steps + $WARMUP_STEPS warmup per config" > $LOG_FILE
 echo "Read-only consumer: the '$RUN_TAG' setting must already be preprocessed (it is never built or deleted here)." | tee -a $LOG_FILE
@@ -75,6 +84,7 @@ for workers in "${WORKER_COUNTS[@]}"; do
     "${EXTRA_OVERRIDES[@]}" \
     dataloader.num_workers=$workers \
     wandb=benchmark_dataloader \
+    wandb.group="$SWEEP_GROUP" \
     wandb.run_name="workers_${workers}_${RUN_TAG}" \
     2>&1 | tee -a $LOG_FILE
   rc=${PIPESTATUS[0]}   # python's exit code (not tee's)
@@ -84,12 +94,19 @@ for workers in "${WORKER_COUNTS[@]}"; do
   # already logged. 42 = the benchmark's own RAM/stall watchdog; 137 = the OS OOM killer beat it.
   if [ "$rc" -ne 0 ]; then
     if [ "$rc" -eq 42 ]; then
-      echo "ABORTING SWEEP: num_workers=$workers tripped the host-RAM / stall watchdog. Higher worker counts use more RAM and would fail too." | tee -a $LOG_FILE
+      abort_status="WATCHDOG_ABORT(42)"
+      echo "ABORTING SWEEP: num_workers=$workers tripped the host-RAM / stall / swap watchdog. Higher worker counts use more RAM and would fail too." | tee -a "$LOG_FILE"
     elif [ "$rc" -eq 137 ]; then
-      echo "ABORTING SWEEP: num_workers=$workers was OOM-killed (exit 137). Higher worker counts would too; consider lowering RAM_ABORT_PERCENT to catch it gracefully first." | tee -a $LOG_FILE
+      abort_status="OOM_KILLED(137)"
+      echo "ABORTING SWEEP: num_workers=$workers was OOM-killed (exit 137). Higher worker counts would too; consider lowering RAM_ABORT_PERCENT to catch it gracefully first." | tee -a "$LOG_FILE"
     else
-      echo "ABORTING SWEEP: num_workers=$workers exited $rc — see the log above." | tee -a $LOG_FILE
+      abort_status="ERROR($rc)"
+      echo "ABORTING SWEEP: num_workers=$workers exited $rc — see the log above." | tee -a "$LOG_FILE"
     fi
+    # The aborted config never reached its own result write → record its row here so it still shows up in
+    # the sweep comparison table.
+    printf '{"num_workers": %d, "setting": "%s", "valid_steps": null, "starvation_rate": null, "iter_time_p95": null, "cpu_gpu_ratio_p95": null, "status": "%s"}\n' \
+      "$workers" "$RUN_TAG" "$abort_status" >> "$SWEEP_RESULTS_FILE"
     break
   fi
 
@@ -97,4 +114,18 @@ for workers in "${WORKER_COUNTS[@]}"; do
   sleep 2
 done
 
-echo -e "\nAll configs done. Compare the per-config starvation rate / P95 in $LOG_FILE and W&B."
+# Dedicated 'sweep' W&B run: upload the combined log + the cross-config comparison table (runs after a
+# clean finish AND after an early abort). Light process (no torch/dataset) → safe even right after a
+# thrash/OOM abort; the brief settle lets a just-killed config's RAM/process drain first.
+echo -e "\nUploading combined sweep log + comparison table to a dedicated W&B run..." | tee -a "$LOG_FILE"
+sleep 3
+python scripts/benchmarks/dataloader/log_sweep_summary.py \
+  dataset=$DATASET_NAME \
+  $MODE_OVERRIDES \
+  "${EXTRA_OVERRIDES[@]}" \
+  wandb=benchmark_dataloader \
+  wandb.group="$SWEEP_GROUP" \
+  wandb.run_name="sweep_${RUN_TAG}" \
+  2>&1 | tee -a "$LOG_FILE"
+
+echo -e "\nAll configs done. Combined log + comparison table in $LOG_FILE and the 'sweep_${RUN_TAG}' W&B run."

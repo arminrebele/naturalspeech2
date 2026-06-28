@@ -1,5 +1,6 @@
 import time
 import os
+import json
 import sys
 import threading
 import logging
@@ -24,6 +25,10 @@ logger = logging.getLogger(__name__)
 
 NUM_BENCHMARK_STEPS = int(os.environ["NUM_BENCHMARK_STEPS"])
 WARMUP_STEPS = int(os.environ["WARMUP_STEPS"])
+# Sweep aggregation (optional): when run by run_benchmark_dataloader.sh, each config appends its result
+# row here (absolute path → survives Hydra's chdir); log_sweep_summary.py reads them into the dedicated
+# sweep run's comparison table. Unset for a standalone single-config run → no row written.
+SWEEP_RESULTS_FILE = os.environ.get("SWEEP_RESULTS_FILE")
 
 # Host-resource safeguards (the only OOM risk here is host RAM from the DataLoader workers — bucket
 # batch sizes are pre-validated, so VRAM can't OOM and num_workers doesn't change it).
@@ -273,6 +278,7 @@ def benchmark(cfg: DictConfig):
     watchdog_stop.set()   # disarm before the (network-bound) summary upload
 
     valid_steps = len(iter_times)
+    setting = "otf" if cfg.dataloader.resample_on_the_fly else "pre"
     logger.info("\n--- Benchmark Results ---")
     if valid_steps > 0:
         logger.info(f"Total Iter Time   : {np.mean(iter_times):.4f}s avg | P95: {np.percentile(iter_times, 95):.4f}s")
@@ -285,11 +291,23 @@ def benchmark(cfg: DictConfig):
         logger.info(f"Starvation Rate   : {(starved_steps / valid_steps) * 100:.1f}% ({starved_steps}/{valid_steps} steps)")
         logger.info(f"Overall Status    : {'STARVED ❌' if starved_steps > 0 else 'HEALTHY ✅'}")
 
+        starvation_rate = starved_steps / valid_steps
+        status = "STARVED" if starved_steps > 0 else "HEALTHY"
+        result_row = {
+            "num_workers": cfg.dataloader.num_workers,
+            "setting": setting,
+            "valid_steps": valid_steps,
+            "starvation_rate": starvation_rate,
+            "iter_time_p95": float(np.percentile(iter_times, 95)),
+            "cpu_gpu_ratio_p95": float(np.percentile(cpu_gpu_ratios, 95)),
+            "status": status,
+        }
+
         if cfg.wandb.log:
             # Structured run-level summary → the W&B runs table compares worker counts at a glance.
             wandb.run.summary.update({
                 "summary/num_workers": cfg.dataloader.num_workers,
-                "summary/setting": "otf" if cfg.dataloader.resample_on_the_fly else "pre",
+                "summary/setting": setting,
                 "summary/valid_steps": valid_steps,
                 "summary/batches_per_epoch": len(loader),
                 "summary/iter_time_mean": float(np.mean(iter_times)),
@@ -301,11 +319,23 @@ def benchmark(cfg: DictConfig):
                 "summary/gpu_time_mean": float(np.mean(gpu_times)),
                 "summary/cpu_gpu_ratio_mean": float(np.mean(cpu_gpu_ratios)),
                 "summary/cpu_gpu_ratio_p95": float(np.percentile(cpu_gpu_ratios, 95)),
-                "summary/starvation_rate": starved_steps / valid_steps,
-                "summary/status": "STARVED" if starved_steps > 0 else "HEALTHY",
+                "summary/starvation_rate": starvation_rate,
+                "summary/status": status,
             })
     else:
         logger.warning("No valid steps recorded (all skipped as warmup/loop/recompile). Nothing to report.")
+        result_row = {
+            "num_workers": cfg.dataloader.num_workers, "setting": setting, "valid_steps": 0,
+            "starvation_rate": None, "iter_time_p95": None, "cpu_gpu_ratio_p95": None,
+            "status": "NO_VALID_STEPS",
+        }
+
+    # Append this config's row for the dedicated sweep run's comparison table (log_sweep_summary.py).
+    # A self-abort (RAM/stall/swap → sys.exit/os._exit before here) never reaches this — the shell writes
+    # that config's row instead.
+    if SWEEP_RESULTS_FILE:
+        with open(SWEEP_RESULTS_FILE, "a") as f:
+            f.write(json.dumps(result_row) + "\n")
 
     if cfg.wandb.log:
         wandb.finish()
