@@ -673,11 +673,10 @@ def train(cfg: DictConfig):
     torch.manual_seed(cfg.seed)
     random.seed(cfg.seed)
 
-    # Warmup is canonically a fraction of the run (cfg.setup.warmup_ratio); resolve to an absolute
-    # step count unless a config pins warmup_iters explicitly (e.g. overfit_test=0). ISR's
-    # post-warmup LR = peak·√(warmup/it) is run-length-independent only for a fixed warmup.
-    if cfg.setup.warmup_iters is None:
-        cfg.setup.warmup_iters = round(cfg.setup.warmup_ratio * cfg.setup.max_iters)
+    # warmup_iters is an explicit absolute step count in every config (no ratio derivation): ISR's
+    # post-warmup LR = peak·√(warmup/it) is run-length-independent only for a fixed warmup, so a short
+    # test run is a true prefix of the full run iff both pin the same warmup_iters.
+    assert cfg.setup.warmup_iters is not None, "setup.warmup_iters must be set (absolute steps)"
 
     # Startup assertions — catch config-pilot-error before the first eval fires.
     if "overfit_batch" in cfg.setup.audio_tables:
@@ -852,9 +851,9 @@ def train(cfg: DictConfig):
         model_cfg_dict = checkpoint['model_cfg']
         start_batch_idx = checkpoint['batch_idx'] # Already points to the next batch due to pre-fetch
 
-        # warmup_iters/lr_decay_iters resolve from max_iters (the planned length) at entry. Pin them to the
-        # checkpoint's values on resume so extending the run (early_stopping.enabled=true, or raising
-        # max_iters) — or any drift in max_iters/warmup_ratio — can't rescale or step-jump the LR (ISR:
+        # warmup_iters is pinned per-config; lr_decay_iters tracks max_iters (${setup.max_iters}). Restore
+        # both from the checkpoint on resume so extending the run (early_stopping.enabled=true, or raising
+        # max_iters) — or any config edit — can't rescale or step-jump the LR (ISR:
         # peak·√(warmup/it)). Pre-fix ckpts lack the keys → warn, keep cfg value.
         for k in ('warmup_iters', 'lr_decay_iters'):
             if k in checkpoint:

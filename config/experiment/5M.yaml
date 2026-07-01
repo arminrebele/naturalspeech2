@@ -8,21 +8,5 @@ run_name: "5M"                     # one knob → wandb run + logs + checkpoints
 dataset:
   max_train_clips: 5000000
 
-setup:
-  warmup_iters: 4400
-
-model:
-  ema:
-    halflife_kimg: 50
-  soft_align_steps: 6000
-  loss_warmup_steps:
-    duration_predictor_loss: 6000
-    aligner_loss:
-      bin_loss: 6000
-  loss_warmup_hold_steps:
-    duration_predictor_loss: 24000
-    aligner_loss:
-      bin_loss: 18000
-
 wandb:
   group: "gradient-analysis"

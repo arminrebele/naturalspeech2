@@ -4,7 +4,7 @@ defaults:
 
 # Overrides on top of setup/base.yaml — only the deltas live here. This mode is a full generalization-
 # regime training run — eval surface + checkpoints + safetensors all inherited from base, identical to
-# the main run (and to the prior "+experiment=train_5M + manual grad flags" call this replaces) — with
+# the main run — with
 # the per-loss-term GradientAnalyzer enabled. Measuring grad geometry under the real eval / save / warmup
 # dynamics is the point.
 #

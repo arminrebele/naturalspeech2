@@ -1,0 +1,14 @@
+# @package _global_
+#
+# Going-forward 10.8M test/tune/eval config: full train store on the standard scaffold
+# (44k pinned warmup + 1× aligner curriculum from base), 80k gradient-analysis setup.
+# Full train is the base default (dataset.max_train_clips: null) — no override needed; that
+# subset cap is the only thing 5M.yaml changes (to 5,000,000).
+
+defaults:
+  - override /setup: gradient_analysis
+
+run_name: "10M"                    # one knob → wandb run + logs + checkpoints (a re-used name auto-bumps to 10M-2)
+
+wandb:
+  group: "gradient-analysis"

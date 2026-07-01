@@ -27,7 +27,7 @@ run_name: unnamed
 # from a checkpoint, set resume_from to the SOURCE run and give run_name a NEW name → fresh wandb run +
 # fresh logs/<group>/<run_name>/ folder, full state (weights+optimizer+iter+EMA+LR) loaded from the
 # source, no append/overlap-drop. Forms: "<name>" (source in the current wandb.group) or
-# "<group>/<name>" (cross-group, e.g. resume_from=generalization/train_5M run_name=gradrun). The output
+# "<group>/<name>" (cross-group, e.g. resume_from=gradient-analysis/5M run_name=gradrun). The output
 # always lands in the current group under run_name; only the read location follows resume_from.
 resume_from: null
 

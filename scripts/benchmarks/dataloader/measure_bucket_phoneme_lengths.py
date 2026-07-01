@@ -21,7 +21,7 @@ that hands you the numbers before you get there.)
 CPU-only, seconds — reads the cached `phoneme_length` column, no audio decode, no GPU. Composes the
 same config a run does, so point it at the exact run you're about to launch:
 
-    python scripts/benchmarks/dataloader/measure_bucket_phoneme_lengths.py +experiment=train_5M
+    python scripts/benchmarks/dataloader/measure_bucket_phoneme_lengths.py +experiment=5M
     python scripts/benchmarks/dataloader/measure_bucket_phoneme_lengths.py dataset.max_train_clips=200000
 """
 import sys

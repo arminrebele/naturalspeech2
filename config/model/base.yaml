@@ -27,7 +27,7 @@ detach_duration_predictor_input: true
 # Soft-alignment conditioning warmstart: for the first soft_align_steps the diffusion model is conditioned
 # on the aligner's SOFT alignment (A_soft @ phoneme_encodings, differentiable), then switches to the hard
 # durations path.
-soft_align_steps: 12000         # pure soft conditioning for the first N steps (0 = disabled)
+soft_align_steps: 6000          # pure soft conditioning for the first N steps (0 = disabled)
 soft_align_ramp_steps: 0        # 0 = sharp soft→hard switch (RAD-TTS); >0 = linear α 1→0 ramp after the hold
 detach_soft_alignment: false    # attach the soft alignment to the diffusion gradient during the warmstart
 
@@ -176,20 +176,20 @@ loss_weights:
 # Loss-weight schedule: hold at weight 0 for loss_warmup_hold_steps, then linear ramp 0→target over
 # loss_warmup_steps. Full weight at hold + ramp; both 0 = full from step 0. Absolute steps, not a fraction
 # of max_iters.
-#   conditioning : soft [0,12k), then hard durations
+#   conditioning : soft [0,6k), then hard durations
 #   forward_sum  : full from 0
-#   bin          : hold 36k, → full 48k
-#   duration     : hold 48k, → full 60k
+#   bin          : hold 18k, → full 24k
+#   duration     : hold 24k, → full 30k
 #   pitch/voicing: full from 0
 #   diffusion    : full from 0
 loss_warmup_steps:                # ramp length AFTER the hold (full weight at hold + this)
-  duration_predictor_loss: 12000
+  duration_predictor_loss: 6000
   pitch_predictor_loss: 0
   pitch_voicing_loss: 0
   aligner_loss:
     group_warmup: 0
     forward_sum_loss: 0
-    bin_loss: 12000
+    bin_loss: 6000
   diffusion_loss:
     group_warmup: 0
     data_loss: 0
@@ -197,13 +197,13 @@ loss_warmup_steps:                # ramp length AFTER the hold (full weight at h
     ce_rvq_loss: 0
 
 loss_warmup_hold_steps:           # steps held at weight 0 before the ramp begins
-  duration_predictor_loss: 48000
+  duration_predictor_loss: 24000
   pitch_predictor_loss: 0
   pitch_voicing_loss: 0
   aligner_loss:
     group_hold: 0
     forward_sum_loss: 0
-    bin_loss: 36000
+    bin_loss: 18000
   diffusion_loss:
     group_hold: 0
     data_loss: 0

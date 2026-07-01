@@ -7,7 +7,8 @@ defaults:
 # over the converged tail by the Optuna driver; dumped to setup.aligner_trial_out (driver overrides
 # that path + wandb.group/run_name per trial). Alignment converges fast → a short run suffices.
 
-max_iters: 5000                  # warmup_ratio (0.11 → 550) + ISR inherited from base
+max_iters: 5000                  # short: alignment converges fast
+warmup_iters: 550                # explicit (was ratio-derived 0.11 × 5000); ISR inherited from base
 lr_decay_iters: ${setup.max_iters}
 
 aligner_trial_run: True

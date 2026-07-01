@@ -27,12 +27,11 @@ compile:
   dynamic: null
   mode: default
 
-# max_iters = planned/expected run length (paper 300k × batch ratio 96/80 ≈ 360k). The LR-schedule
+# max_iters = planned/expected run length (paper 300k, still underfitting → 400k target). The LR-schedule
 # reference (warmup + cosine decay horizon) AND the early-stop floor (never stop before it). Diagnostic
 # modes override it and run to exactly this many steps (early_stopping.enabled stays false below).
-max_iters: 360000
-warmup_ratio: 0.11                   # warmup as a fraction of max_iters (0.11·360k ≈ 40k; paper 32k × 96/80 ≈ 38k). Canonical knob.
-warmup_iters: null                   # absolute override; null → round(warmup_ratio · max_iters), resolved at entry. Resume restores the ckpt's pinned value (immune to max_iters changes).
+max_iters: 400000
+warmup_iters: 44000                  # absolute warmup (11% of the 400k target; paper 32k × 96/85 ≈ 36k). PINNED, not derived — every training run inherits this same value, so an 80k test is a true prefix of the 400k target. Short standalone modes set their own (overfit_test/lr_range_test 0; aligner_trial 550). Resume restores the ckpt's value.
 lr_decay_iters: ${setup.max_iters}   # cosine decay horizon — tracks max_iters; ISR ignores it. Resume restores the ckpt's pinned value.
 
 # Early stopping. enabled=false (default → diagnostic/experiment modes + the canonical no-arg run): loop
