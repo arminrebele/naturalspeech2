@@ -653,6 +653,12 @@ class LossWrapper(torch.nn.Module):
                 flat[key] = value
         return flat
 
+    @property
+    def curriculum_end_step(self) -> int:
+        """First step at which every loss weight is at its final value (all holds + ramps done)."""
+        return max(self.loss_warmup_hold_steps[k] + self.loss_warmup_steps[k]
+                   for k in self.loss_weights)
+
     def _update_weights(self, step: int):
         # Hold at 0 for `hold` steps, then linear ramp 0→target over `ramp` steps (true-zero hard
         # onset). hold + ramp = step at full weight; both 0 → full weight from step 0.

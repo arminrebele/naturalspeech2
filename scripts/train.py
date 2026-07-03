@@ -610,6 +610,7 @@ def run_eval_block(
                 deps.cfg.setup.best_safetensors
                 and losses is not None
                 and 'val' in losses
+                and deps.iter_num >= loss_wrapper.curriculum_end_step
                 and losses['val']['total_loss'] < best_val_loss
             ):
                 best_val_loss = losses['val']['total_loss']

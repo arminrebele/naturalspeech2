@@ -509,8 +509,10 @@ def run_decoupled_eval(
             record_metric_dist(report.scalars, f"Evaluation: Metrics/{split}-SIM-o", sim_os)
         report.audio_tables[title] = {"columns": columns, "rows": rows}
 
-    # --- 3. best-ckpt decision (EMA val loss) ---
+    # --- 3. best-ckpt decision (EMA val loss; gated until all loss holds+ramps are done —
+    # ramp-phase totals are computed under partial weights and not comparable across steps) ---
     if (cfg.setup.best_safetensors and ema_losses is not None and 'val' in ema_losses
+            and snapshot_step >= loss_wrapper.curriculum_end_step
             and ema_losses['val']['total_loss'] < prev_best_val_loss):
         report.new_best = True
         report.best_val_loss = ema_losses['val']['total_loss']
