@@ -31,7 +31,7 @@ compile:
 # reference (warmup + cosine decay horizon) AND the early-stop floor (never stop before it). Diagnostic
 # modes override it and run to exactly this many steps (early_stopping.enabled stays false below).
 max_iters: 400000
-warmup_iters: 44000                  # absolute warmup (11% of the 400k target; paper 32k × 96/85 ≈ 36k). PINNED, not derived — every training run inherits this same value, so an 80k test is a true prefix of the 400k target. Short standalone modes set their own (overfit_test/lr_range_test 0; aligner_trial 550). Resume restores the ckpt's value.
+warmup_iters: 44000                  # absolute warmup (11% of the 400k target; paper 32k × 96/85 ≈ 36k). PINNED, not derived — every training run inherits this same value, so an 80k test is a true prefix of the 400k target. Short standalone modes set their own. Resume restores the ckpt's value.
 lr_decay_iters: ${setup.max_iters}   # cosine decay horizon — tracks max_iters; ISR ignores it. Resume restores the ckpt's pinned value.
 
 # Early stopping. enabled=false (default → diagnostic/experiment modes + the canonical no-arg run): loop
@@ -44,15 +44,19 @@ early_stopping:
   enabled: false
   patience_iters: 50000
 
-# Mode flags — branch training mechanics, not the eval/log/save surface
+# Mode flags — branch training mechanics, not the eval/log/save surface.
+# gradient_analysis_run defaults ON: every real run carries the per-term GradientAnalyzer (the primary
+# debugging instrument). Each analyzed step ≈ 10x a normal step (one backward per loss term), fired
+# every log_interval → ~+9% wall; thin via grad_analysis_interval if that ever bites. Diagnostic
+# modes (overfit_test, lr_range_test, aligner_trial) pin it off.
 overfit_single_batch: False
-gradient_analysis_run: False
+gradient_analysis_run: True
 aligner_trial_run: False
 
 # aligner_trial only (inert otherwise): dump per-eval held-out aligner losses (fwd_sum+bin) for the Optuna driver.
 aligner_trial_out: "research/aligner_trial_evals.jsonl"
 
-# gradient_analysis only (inert otherwise): per-term gradient diagnostic window.
+# gradient_analysis_run only (inert otherwise): per-term gradient diagnostic window.
 #   start_iter — first iter analyzed; window is [start_iter, end_iter). May sit inside the loss-weight
 #                warmup (the analyzer reads WEIGHTED grads = the term's true, warmup-scaled per-step impact).
 #   end_iter   — null → max_iters; else the window CLOSES here and training continues normally to max_iters
@@ -65,19 +69,19 @@ grad_analysis_interval: null
 
 # Frequencies (orthogonal)
 log_interval: 100
-eval_interval: 3000          # held-out eval cadence (decoupled on GPU1, off the training path). The real per-eval wall is ~11 min (≈670 s for 120 refs, measured from the daemon log's "done in Ys"; the old "~40 min" estimate was wrong) — and drops further with the bsd=1 + larger-batch eval below — vs ~70 min for 3000 normal-run steps (~47 min/2000, drain-timestamp deltas). So the daemon idles most of the gap = ample GPU1 headroom for future side-tasks. Gradient-analysis runs train slower (grad replays) → they densify to eval_interval_daemon (next line + setup/gradient_analysis.yaml); single-GPU keeps this 3000. Confirm the real wall from the daemon log.
-eval_interval_daemon: null   # opt-in denser eval cadence, applied ONLY when the daemon offloads eval to GPU1 (resolved in train.py). null → eval_interval stands (main run: no densification). gradient_analysis sets 2000 — its ~10x-slower grad replays overlap the parallel daemon eval for free; single-GPU / daemon-off keeps eval_interval, since blocking in-process eval buys no free time.
+eval_interval: 4000          # in-process eval cadence (single-GPU / daemon off). A multiple of eval_interval_daemon, so both cadences eval at shared steps → curves comparable across run types.
+eval_interval_daemon: 2000   # denser eval cadence, applied ONLY when the daemon offloads eval to GPU1 (resolved in train.py; null → eval_interval stands). The ~10x-slower grad-replay steps overlap the parallel daemon eval for free; single-GPU / daemon-off keeps eval_interval, since blocking in-process eval buys no free time.
 checkpoint_interval: 5000    # crash-recovery ckpt.pt every 5000 iters
 
 # Eval block contents
 eval_iters: 200
 audio_tables: [fixed_val_refs, random_val]  # fixed_val_refs: held-out dev+test validation (audio + WER/SIM-o over num_audio_refs); random_val: 1 random val (dev+test) clip @ 5s vs 10s prompt + random custom text (generation showcase, 2 rows, no metrics)
-num_audio_refs: 120             # total held-out refs drawn from the pooled dev+test val set (also the WER + SIM-o sample size — more refs = steadier mean + tighter p10/median/p90). VRAM-NEUTRAL: pack_by_budget caps each gen batch at gen_frame_budget regardless of count (more refs = more batches, same peak), so the GPU1 peak is unchanged; cost is eval wall (~linear). random_val + overfit_batch fixed at 2; num_table_rows still caps the rendered wandb rows at 2
-num_table_rows: 2               # how many of those refs to RENDER in each wandb audio table; WER/metrics still use ALL num_audio_refs. Caps table size so it doesn't balloon as num_audio_refs scales (set ≥ num_audio_refs to show all).
-gen_frame_budget: 80000         # eval-block batched generation: length-sorted refs packed up to batch·max_latent_frames ≤ this. VRAM headroom is LARGE: the daemon's own eval-log probe shows ~12 GB resident (models + compiled graphs + cached pre-warm + CUDA context) + only ~3 GB eval transient at the old 40000 → ~15 GB peak on the 24 GB 4090. (The earlier "~25 GB / ~97%, no headroom" reading was a colleague's *separate* GPU1 workload, not the daemon — corrected.) Raised 40000→80000 (~2× gen batch; expected peak ~18 GB, ~6 GB safety). The per-eval "X GB before → Y GB peak" line in the daemon log is the feedback loop — raise further only while Y stays under ~21 GB. Used by fixed-ref + random_val gen (in-process + daemon).
+num_audio_refs: 120             # held-out refs from the pooled dev+test val set = the WER/SIM-o sample size. VRAM-neutral (pack_by_budget caps each gen batch at gen_frame_budget — more refs = more batches, same peak); cost is eval wall, ~linear.
+num_table_rows: 2               # refs RENDERED per wandb audio table (metrics still use ALL num_audio_refs; set ≥ num_audio_refs to render all).
+gen_frame_budget: 80000         # eval-block batched generation: length-sorted refs packed up to batch·max_latent_frames ≤ this (the peak-VRAM knob for generation). Used by fixed-ref + random_val gen, in-process + daemon. Raising it raises the daemon's GPU1 peak — check the per-eval "X GB before → Y GB peak" daemon-log line first; GPU1 runs near-full at the current eval config.
 inference_data_loss_sweep: []   # empty by default; overfit_test enables for solver diagnostics
 eval_metrics: ["wer", "sim_o"]  # objective metrics on the pooled val refs. WER = HuBERT-CTC (no LM); SIM-o = WavLM-Large-SV speaker cosine (gen vs prompt). On the metric device. Inert for modes with no fixed-ref table.
-metric_batch_samples: 3200000   # batched-WER budget: length-sorted gen clips packed up to batch·max_16kHz_samples ≤ this (≈200 s audio/forward). HuBERT @no_grad FP32, a low-base separate eval phase → raised 1.6M→3.2M into the confirmed GPU1 headroom. Per-sample logits sliced to CTC length → ~ per-clip WER. (SIM-o stays per-clip: ECAPA pooling is unmasked.)
+metric_batch_samples: 3200000   # batched-WER budget: length-sorted gen clips packed up to batch·max_16kHz_samples ≤ this (≈200 s audio/forward, HuBERT @no_grad FP32). Per-sample logits sliced to CTC length → ~ per-clip WER. (SIM-o stays per-clip: ECAPA pooling is unmasked.)
 metric_device: auto             # WER ASR device. auto → cuda:1 if ≥2 GPUs else CPU (never silently steals the training card); override e.g. cuda:0. Daemon forces its own card.
 
 # Decoupled eval daemon — off-loads the eval block to a persistent process on the 2nd GPU so
@@ -88,7 +92,7 @@ eval_daemon:
   compile: true                 # torch.compile the daemon's eval forward (uses setup.compile.{dynamic,mode}); set false to debug the daemon in eager mode
   snapshot_dir: null            # null → /dev/shm/ns2_eval/<wandb-run-or-pid>; RAM-backed weight handoff
   num_workers: 4                # dataloader workers for EACH of the daemon's own dev/test/train loaders (independent of dataloader.num_workers so the main run isn't slowed)
-  batch_size_divisor: 1         # daemon eval forward: divide each bucket's batch_size by this on the 2nd GPU; grad_accum ×same so the logical batch + total samples match the in-process eval. 1 = full batch. Was 2 (a conservative VRAM halving); now 1 — estimate_loss runs @no_grad (minimal retained activations, far under a training step) and the eval-log probe shows ~9 GB headroom, so full batches fit. Fewer, larger launches → faster on the launch-bound eval.
+  batch_size_divisor: 1         # daemon eval forward: divide each bucket's batch_size by this on the 2nd GPU; grad_accum ×same so the logical batch + total samples match the in-process eval. 1 = full batches (viable: estimate_loss runs @no_grad, far under a training step's activations; fewer launches → faster on the launch-bound eval).
   poll_interval_s: 2.0          # marker poll cadence when idle
 
 # Save policy

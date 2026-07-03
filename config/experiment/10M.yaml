@@ -1,14 +1,13 @@
 # @package _global_
 #
-# Going-forward 10.8M test/tune/eval config: full train store on the standard scaffold
-# (44k pinned warmup + 1× aligner curriculum from base), 80k gradient-analysis setup.
-# Full train is the base default (dataset.max_train_clips: null) — no override needed; that
-# subset cap is the only thing 5M.yaml changes (to 5,000,000).
-
-defaults:
-  - override /setup: gradient_analysis
+# Full 10.8M test-scale run: the base scaffold (44k pinned warmup, grad analysis on, daemon eval
+# densified to 2000) at 80k steps. Full train is the base default (dataset.max_train_clips: null).
+#   python scripts/train.py +experiment=10M run_name=<variant>
 
 run_name: "10M"                    # one knob → wandb run + logs + checkpoints (a re-used name auto-bumps to 10M-2)
 
+setup:
+  max_iters: 80000                 # test-scale length; lr_decay_iters tracks it (base: 400k target)
+
 wandb:
-  group: "gradient-analysis"
+  group: "experiment"

@@ -8,10 +8,11 @@ defaults:
 # that path + wandb.group/run_name per trial). Alignment converges fast → a short run suffices.
 
 max_iters: 5000                  # short: alignment converges fast
-warmup_iters: 550                # explicit (was ratio-derived 0.11 × 5000); ISR inherited from base
+warmup_iters: 550                # 11% of the trial length, mirroring the production warmup share; ISR inherited from base
 lr_decay_iters: ${setup.max_iters}
 
 aligner_trial_run: True
+gradient_analysis_run: False     # keep trials fast (analyzed steps ≈ 10x)
 
 # Held-out eval at a fine cadence → tail = decision signal. eval_iters bounds each held-out pass.
 eval_interval: 250

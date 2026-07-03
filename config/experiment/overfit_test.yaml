@@ -4,15 +4,18 @@
 #   python scripts/train.py +experiment=overfit_test
 #
 # Single-batch memorization sanity check. Cosine LR over the short run (ISR's warmup>0
-# assert trips with warmup_iters=0); a small `train` slice as data source; dropout/halflife/warmups
-# via model/overfit_test.yaml.
+# assert trips with warmup_iters=0); a small `train` slice as data source; halflife/warmups
+# via model/overfit_test.yaml. Give the run context on the CLI, e.g.
+#   run_name=latentnorm_2k wandb.notes='"first 2k run with latent normalization"' wandb.tags='[latent-norm]'
 
 defaults:
   - override /model: overfit_test
   - override /setup: overfit_test
-  - override /wandb: overfit_test
 
 run_name: overfit_test           # default; a re-run auto-bumps to overfit_test-2 (never overwrites)
+
+wandb:
+  group: "overfit-test"
 
 training:
   lr_schedule: "cosine"

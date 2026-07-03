@@ -2,42 +2,16 @@ defaults:
   - base
   - _self_
 
-# Dropout off for overfit_test: stochastic ẑ₀ predictions get amplified by the low-t
-# α̅/(1−α̅)² weighting into score-loss spikes (~30–60% smaller spikes off; min-SNR(γ=5)
-# bounds the rest). Single-batch memorization also benefits from a deterministic forward.
-phoneme_encoder:
-  conv_dropout: 0.0
-  attn_weights_dropout: 0.0
-  attn_out_dropout: 0.0
-aligner:
-  dropout: 0.0
-speech_prompt_encoder:
-  conv_dropout: 0.0
-  attn_weights_dropout: 0.0
-  attn_out_dropout: 0.0
-duration_predictor:
-  conv_dropout: 0.0
-  attn_weights_dropout: 0.0
-  attn_out_dropout: 0.0
-pitch_predictor:
-  conv_dropout: 0.0
-  attn_weights_dropout: 0.0
-  attn_out_dropout: 0.0
-diffusion_model:
-  attn_weights_dropout: 0.0
-  attn_out_dropout: 0.0
-  wavenet_attn_weights_dropout: 0.0
-  wavenet_attn_out_dropout: 0.0
-  wavenet_gate_dropout: 0.0
+# Dropout stays base's all-zero (train.py asserts it for this mode — memorization needs a
+# deterministic forward).
 
 # Disable the soft-alignment warmstart: the 6k window would span the entire 2k run (pure-soft
 # throughout) and never exercise the hard single-batch memorization gate.
 soft_align_steps: 0
 
-# Override base's halflife_kimg=50 (right at ~300k iters). On a 2000-iter overfit_test
-# (~14 examples/iter = 27.87 kimg total), 50 leaves rampup unfinished → shadow stays
-# contaminated by rampup-region weights. halflife=5 ends rampup at iter ~360, concentrating
-# 90% of the shadow's mass on iter 814–1990.
+# Base's full-run halflife leaves EMA rampup unfinished inside 2000 iters (~14 examples/iter
+# ≈ 27.9 kimg total) → shadow stays contaminated by rampup-region weights. 5 ends rampup at
+# iter ~360, concentrating ~90% of the shadow's mass on iter 814–1990.
 ema:
   halflife_kimg: 5.0
 

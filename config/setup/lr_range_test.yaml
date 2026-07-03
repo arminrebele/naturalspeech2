@@ -6,6 +6,7 @@ defaults:
 # ramp), no eval/daemon/checkpoints; stops on divergence (loss > 4x running-min). Read-only tuning.
 max_iters: 500                  # sweep resolution: 500 exponential steps min_lr → max_lr
 warmup_iters: 0                 # the sweep is the ramp
+gradient_analysis_run: False    # pure LR sweep, no grad replays
 log_interval: 1                 # per-step loss → dense loss-vs-LR curve + divergence check
 
 lr_range_test:

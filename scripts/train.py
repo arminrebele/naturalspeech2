@@ -782,7 +782,7 @@ def train(cfg: DictConfig):
                         f"{torch.cuda.device_count()}, ema_enabled={cfg.model.ema.enabled}); "
                         "falling back to in-process eval.")
 
-    # Opt-in denser eval cadence (gradient_analysis sets eval_interval_daemon): apply it ONLY when the
+    # Denser eval cadence (setup.eval_interval_daemon, base 2000): apply it ONLY when the
     # daemon actually offloads eval to GPU1, where it runs in parallel with the ~10x-slower per-term grad
     # replays "for free". In-process (single-GPU / daemon off) eval blocks the step → keep eval_interval.
     if use_eval_daemon and cfg.setup.eval_interval_daemon is not None:

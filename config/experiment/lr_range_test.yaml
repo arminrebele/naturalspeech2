@@ -11,9 +11,11 @@
 
 defaults:
   - override /setup: lr_range_test
-  - override /wandb: lr_range_test
 
 run_name: lr_range_test          # default; a re-run auto-bumps to lr_range_test-2 (never overwrites)
+
+wandb:
+  group: "tuning"
 
 training:
   lr_schedule: range_test
