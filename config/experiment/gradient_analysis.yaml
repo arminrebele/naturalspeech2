@@ -1,8 +1,0 @@
-# @package _global_
-#
-# Full generalization run (eval + checkpoints + safetensors, like the main run) + per-loss-term gradient
-# diagnostic — python scripts/train.py +experiment=gradient_analysis
-
-defaults:
-  - override /setup: gradient_analysis
-  - override /wandb: gradient_analysis

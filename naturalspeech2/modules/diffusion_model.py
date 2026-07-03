@@ -15,9 +15,11 @@ class TimestepEmbedding(nn.Module):
             self,
             hidden_dim: int = 512,
             time_dim: int = 128,
+            scale: float = 1.0,
     ):
         super().__init__()
         self.time_dim = time_dim
+        self.scale = scale
         half_dim = time_dim // 2
         frequencies = torch.exp(
             -math.log(10000.0)
@@ -35,7 +37,7 @@ class TimestepEmbedding(nn.Module):
             self,
             t,  # [B]
     ):
-        angles = rearrange(t.float(), 'b -> b 1') * rearrange(self.frequencies, 'd -> 1 d')
+        angles = rearrange(t.float() * self.scale, 'b -> b 1') * rearrange(self.frequencies, 'd -> 1 d')
         timestep_vector = torch.cat([angles.sin(), angles.cos()], dim=-1) # [B, time_dim]
         timestep_embedding = self.mlp(timestep_vector) # [B, D]
         return timestep_embedding
@@ -123,6 +125,7 @@ class DiffusionModel(nn.Module):
             latent_dim: int = 128,
             hidden_dim: int = 512,
             time_dim: int = 128,
+            timestep_embedding_scale: float = 1.0,  # multiplies t before the sinusoid ladder; 1000 = Grad-TTS positional-range convention
             wavenet_layers: int = 40,
             wavenet_kernel_size: int = 3,
             wavenet_dilation: int = 2,
@@ -166,7 +169,9 @@ class DiffusionModel(nn.Module):
         self.t_logit_std = t_logit_std
 
         self.input_projection = nn.Linear(latent_dim, hidden_dim, bias=False)
-        self.timestep_embedding = TimestepEmbedding(hidden_dim=hidden_dim, time_dim=time_dim)
+        self.timestep_embedding = TimestepEmbedding(
+            hidden_dim=hidden_dim, time_dim=time_dim, scale=timestep_embedding_scale,
+        )
 
         self.query_tokens = nn.Parameter(torch.randn(1, query_tokens, hidden_dim) * 0.02)
         self.prompt_encodings_norm = RMSNorm(hidden_dim)

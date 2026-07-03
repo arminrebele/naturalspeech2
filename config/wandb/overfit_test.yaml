@@ -1,7 +1,0 @@
-defaults:
-  - base
-  - _self_
-
-group: "overfit-test"
-# Give the run context on the CLI, e.g.
-#   run_name=latentnorm_2k wandb.notes='"first 2k run with latent normalization"' wandb.tags='[latent-norm]'
