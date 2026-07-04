@@ -34,16 +34,18 @@ class EMA:
     @torch.no_grad()
     def update(self, model: nn.Module, batch_size: int, cur_kimg: float) -> None:
         decay = self._effective_decay(batch_size, cur_kimg)
-        one_minus_decay = 1.0 - decay
+        shadows, params = [], []
         for name, p in model.named_parameters():
-            if name not in self.shadow:
-                continue
-            if decay == 0.0:
-                self.shadow[name].copy_(p.data.float())
-            else:
-                self.shadow[name].mul_(decay).add_(
-                    p.data.float(), alpha=one_minus_decay,
-                )
+            if name in self.shadow:
+                shadows.append(self.shadow[name])
+                params.append(p.data.float())
+        # foreach: same elementwise ops as per-tensor mul_/add_, batched into a few
+        # multi-tensor kernels instead of 2 launches per parameter.
+        if decay == 0.0:
+            torch._foreach_copy_(shadows, params)
+        else:
+            torch._foreach_mul_(shadows, decay)
+            torch._foreach_add_(shadows, params, alpha=1.0 - decay)
 
     @contextmanager
     def swap_in(self, model: nn.Module):

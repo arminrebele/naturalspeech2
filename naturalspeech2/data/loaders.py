@@ -78,11 +78,14 @@ def create_dataloader(cfg, split: str, token_vocabulary_path: str = None, num_wo
         shuffle=cfg.dataloader.shuffle
     )
     collate_fn = BucketedCollateFn(bucket_mapping=bucket_mapping)
+    nw = cfg.dataloader.num_workers if num_workers is None else num_workers
     loader = DataLoader(
         dataset,
         batch_sampler=sampler,
         collate_fn=collate_fn,
-        num_workers=cfg.dataloader.num_workers if num_workers is None else num_workers,
-        pin_memory=True
+        num_workers=nw,
+        pin_memory=True,
+        # keep workers alive across epochs / repeated eval iterations (re-fork otherwise)
+        persistent_workers=nw > 0,
     )
     return loader, dataset
