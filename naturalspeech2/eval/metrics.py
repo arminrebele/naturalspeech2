@@ -5,7 +5,8 @@ no-LM CTC transcribes acoustics faithfully instead of letting a decoder LM paper
 mispronunciations. Lazy module-level singleton on the idle 2nd GPU (off the training
 card's budget), FP32, no_grad. Standard word-level Levenshtein(ref,hyp)/len(ref),
 shared ref/hyp normalization. SIM-o (speaker similarity) = WavLM-Large-SV embedding
-cosine (s3prl WavLM frontend + vendored ECAPA head; see `compute_sim_o`).
+cosine (s3prl WavLM frontend + vendored ECAPA head; see `compute_sim_o`). UTMOS
+(naturalness) = UTMOS22 strong-learner predicted MOS, reference-free (see `compute_utmos`).
 """
 import re
 import logging
@@ -213,3 +214,32 @@ def compute_sim_o(gen_audio, ref_embedding: torch.Tensor, src_sr: int = 24000) -
     if _degenerate(gen_audio):
         return float("nan")
     return torch.cosine_similarity(speaker_embedding(gen_audio, src_sr), ref_embedding).item()
+
+
+# ----------------------------------------------------------------------------
+# UTMOS (predicted naturalness MOS) — UTMOS22 strong learner via torch.hub
+# ----------------------------------------------------------------------------
+
+# Pinned tag of a fairseq-free reimplementation shipping the OFFICIAL VoiceMOS'22 strong-learner
+# checkpoint (utmos22_strong_step7459_v1.pt = the sarulab demo's epoch=3-step=7459 weights).
+# First load downloads the repo snapshot + ~0.4 GB weights into $TORCH_HOME; cached afterwards.
+_UTMOS_REPO = "tarepan/SpeechMOS:v1.2.0"
+
+
+@lru_cache(maxsize=1)
+def _load_utmos():
+    device = _metric_device()
+    model = torch.hub.load(_UTMOS_REPO, "utmos22_strong", trust_repo=True)
+    return model.to(device).eval(), device
+
+
+@torch.no_grad()
+def compute_utmos(audio, src_sr: int = 24000) -> float:
+    """UTMOS22-strong predicted naturalness MOS (continuous, ~[1,5]) of one clip, reference-free.
+    NaN on degenerate audio (drops out of the mean). The predictor resamples internally to 16 kHz,
+    so audio passes at its native rate. FP32, no autocast."""
+    if _degenerate(audio):
+        return float("nan")
+    model, device = _load_utmos()
+    wav = torch.from_numpy(np.ascontiguousarray(_to_numpy(audio))).float().unsqueeze(0).to(device)
+    return model(wav, sr=src_sr).item()

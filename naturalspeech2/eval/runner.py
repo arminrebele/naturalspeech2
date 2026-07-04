@@ -23,7 +23,8 @@ import torch
 from torch import nn
 from safetensors.torch import save_file
 
-from naturalspeech2.eval.metrics import compute_sim_o, compute_wer, compute_wer_batch, speaker_embedding
+from naturalspeech2.eval.metrics import (
+    compute_sim_o, compute_utmos, compute_wer, compute_wer_batch, speaker_embedding)
 from naturalspeech2.inference import generate_audio_batch
 from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 from naturalspeech2.utils.utils import compute_denominators, pack_by_budget
@@ -39,7 +40,7 @@ class _PhaseProfiler:
     perf_counter deltas are accurate without an explicit synchronize. peak-allocated is CUMULATIVE since
     the one reset at eval start (no per-phase reset → no clash with the caller's reserved-peak probe); it
     JUMPS at the phase that drives VRAM. CPU device → timing only."""
-    _ORDER = ("live_loss", "ema_loss", "generation", "wer", "sim_o")
+    _ORDER = ("live_loss", "ema_loss", "generation", "wer", "utmos", "sim_o")
 
     def __init__(self, device):
         self.device = device
@@ -442,6 +443,7 @@ def run_decoupled_eval(
     model.eval()
     do_wer = "wer" in cfg.setup.eval_metrics
     do_sim_o = "sim_o" in cfg.setup.eval_metrics
+    do_utmos = "utmos" in cfg.setup.eval_metrics
     num_table_rows = cfg.setup.num_table_rows
     refs_by_source = {"train": train_refs, "val": val_refs}
     for table_name in cfg.setup.audio_tables:
@@ -466,11 +468,13 @@ def run_decoupled_eval(
             columns += ["Transcription", "WER"]
         if do_sim_o:
             columns += ["SIM-o"]
-        # WER/SIM-o are means over ALL refs (well-sampled metrics); only the first num_table_rows
-        # are rendered as wandb rows (keeps the audio table small as num_audio_refs scales up).
-        # Generate (length-sorted, frame-budget-packed) for as many refs as needed: ALL when a
-        # metric is on, else just the rendered rows.
-        k = len(refs) if (do_wer or do_sim_o) else min(num_table_rows, len(refs))
+        if do_utmos:
+            columns += ["UTMOS"]
+        # WER/SIM-o/UTMOS are means over ALL refs (well-sampled metrics); only the first
+        # num_table_rows are rendered as wandb rows (keeps the audio table small as num_audio_refs
+        # scales up). Generate (length-sorted, frame-budget-packed) for as many refs as needed:
+        # ALL when a metric is on, else just the rendered rows.
+        k = len(refs) if (do_wer or do_sim_o or do_utmos) else min(num_table_rows, len(refs))
         proxies = [len(refs[i].original_np) // ENCODER_HOP_LENGTH for i in range(k)]
         with prof.phase("generation"):
             gens = batch_generate(model, [refs[i].prompt_tensor for i in range(k)],
@@ -480,6 +484,10 @@ def run_decoupled_eval(
             with prof.phase("wer"):
                 wer_list = compute_wer_batch(gens, [refs[i].text for i in range(k)], src_sr=sampling_rate,
                                              batch_samples=cfg.setup.metric_batch_samples)
+        utmos_list = None
+        if do_utmos:
+            with prof.phase("utmos"):
+                utmos_list = [compute_utmos(g, src_sr=sampling_rate) for g in gens]
         # sim_o is the only non-trivial GPU work in this per-clip loop (WER was batched above; row-build
         # is cheap CPU), so the loop's wall ≈ the per-clip SIM-o cost.
         rows, synth_wers, gt_wers, sim_os = [], [], [], []
@@ -501,12 +509,16 @@ def run_decoupled_eval(
                         row += [hyp, synth_wer]
                     if do_sim_o:
                         row += [sim_os[-1]]
+                    if do_utmos:
+                        row += [utmos_list[i]]
                     rows.append(row)
         if do_wer:
             record_metric_dist(report.scalars, f"Evaluation: Metrics/{split}-WER", synth_wers)
             report.scalars[f"Evaluation: Metrics/{split}-WER-gt"] = _mean_skip_nan(gt_wers)
         if do_sim_o:
             record_metric_dist(report.scalars, f"Evaluation: Metrics/{split}-SIM-o", sim_os)
+        if do_utmos:
+            record_metric_dist(report.scalars, f"Evaluation: Metrics/{split}-UTMOS", utmos_list)
         report.audio_tables[title] = {"columns": columns, "rows": rows}
 
     # --- 3. best-ckpt decision (EMA val loss; gated until all loss holds+ramps are done —

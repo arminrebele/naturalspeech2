@@ -31,7 +31,7 @@ from naturalspeech2.config.schema import model_cfg_from_omegaconf
 from naturalspeech2.data.loaders import create_dataloader
 from naturalspeech2.inference import compute_inference_data_loss, generate_audio
 from naturalspeech2.eval import resolve_metric_device, set_metric_device, ipc
-from naturalspeech2.eval.metrics import compute_sim_o, compute_wer_batch
+from naturalspeech2.eval.metrics import compute_sim_o, compute_utmos, compute_wer_batch
 from naturalspeech2.modules.encodec import ENCODER_HOP_LENGTH
 from naturalspeech2.eval.runner import (
     estimate_loss,
@@ -253,10 +253,12 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
     If "wer" in cfg.setup.eval_metrics: per-clip synth WER column + per-split means (synth WER and
     the GT-floor cached on each ref) → gap (synth − floor) = honest signal.
     If "sim_o" in cfg.setup.eval_metrics: per-clip speaker-similarity column + per-split mean.
+    If "utmos" in cfg.setup.eval_metrics: per-clip predicted-MOS column + per-split mean.
     """
     sr = deps.sampling_rate
     do_wer = "wer" in deps.cfg.setup.eval_metrics
     do_sim_o = "sim_o" in deps.cfg.setup.eval_metrics
+    do_utmos = "utmos" in deps.cfg.setup.eval_metrics
     num_table_rows = deps.cfg.setup.num_table_rows
     columns = ["Iteration", "Speech-Prompt-Length (s)", "Text-Prompt",
                "Original Audio", "Speech-Prompt", "Generated Audio"]
@@ -264,17 +266,20 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
         columns += ["Transcription", "WER"]
     if do_sim_o:
         columns += ["SIM-o"]
+    if do_utmos:
+        columns += ["UTMOS"]
 
-    # WER/SIM-o are means over ALL refs (well-sampled metrics); only the first num_table_rows
+    # WER/SIM-o/UTMOS are means over ALL refs (well-sampled metrics); only the first num_table_rows
     # are rendered as wandb rows (keeps the audio table small as num_audio_refs scales up).
     # Generate for ALL refs when a metric is on, else just the rendered rows.
     rows, synth_wers, gt_wers, sim_os = [], [], [], []
-    k = len(refs) if (do_wer or do_sim_o) else min(num_table_rows, len(refs))
+    k = len(refs) if (do_wer or do_sim_o or do_utmos) else min(num_table_rows, len(refs))
     proxies = [len(refs[i]["original_np"]) // ENCODER_HOP_LENGTH for i in range(k)]
     gens = batch_generate(deps.unoptimized_model, [refs[i]["prompt_tensor"] for i in range(k)],
                           [refs[i]["text"] for i in range(k)], proxies, deps.cfg.setup.gen_frame_budget)
     wer_list = (compute_wer_batch(gens, [refs[i]["text"] for i in range(k)], src_sr=sr,
                                   batch_samples=deps.cfg.setup.metric_batch_samples) if do_wer else None)
+    utmos_list = ([compute_utmos(g, src_sr=sr) for g in gens] if do_utmos else None)
     for i in range(k):
         ref, gen = refs[i], gens[i]
         if do_wer:
@@ -296,6 +301,8 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
                 row += [hyp, synth_wer]
             if do_sim_o:
                 row += [sim_os[-1]]
+            if do_utmos:
+                row += [utmos_list[i]]
             rows.append(row)
 
     if do_wer:
@@ -303,6 +310,8 @@ def _render_fixed_refs_table(deps: EvalDeps, refs: list, title: str, split: str)
         deps.metrics_out[f"Evaluation: Metrics/{split}-WER-gt"] = _mean_skip_nan(gt_wers)
     if do_sim_o:
         record_metric_dist(deps.metrics_out, f"Evaluation: Metrics/{split}-SIM-o", sim_os)
+    if do_utmos:
+        record_metric_dist(deps.metrics_out, f"Evaluation: Metrics/{split}-UTMOS", utmos_list)
 
     return (title, columns, rows)
 

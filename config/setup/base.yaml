@@ -80,7 +80,7 @@ num_audio_refs: 120             # held-out refs from the pooled dev+test val set
 num_table_rows: 2               # refs RENDERED per wandb audio table (metrics still use ALL num_audio_refs; set ≥ num_audio_refs to render all).
 gen_frame_budget: 80000         # eval-block batched generation: length-sorted refs packed up to batch·max_latent_frames ≤ this (the peak-VRAM knob for generation). Used by fixed-ref + random_val gen, in-process + daemon. Raising it raises the daemon's GPU1 peak — check the per-eval "X GB before → Y GB peak" daemon-log line first; GPU1 runs near-full at the current eval config.
 inference_data_loss_sweep: []   # empty by default; overfit_test enables for solver diagnostics
-eval_metrics: ["wer", "sim_o"]  # objective metrics on the pooled val refs. WER = HuBERT-CTC (no LM); SIM-o = WavLM-Large-SV speaker cosine (gen vs prompt). On the metric device. Inert for modes with no fixed-ref table.
+eval_metrics: ["wer", "sim_o", "utmos"]  # objective metrics on the pooled val refs. WER = HuBERT-CTC (no LM); SIM-o = WavLM-Large-SV speaker cosine (gen vs prompt); UTMOS = UTMOS22-strong predicted naturalness MOS (reference-free, ~0.4 GB resident). On the metric device. Inert for modes with no fixed-ref table.
 metric_batch_samples: 3200000   # batched-WER budget: length-sorted gen clips packed up to batch·max_16kHz_samples ≤ this (≈200 s audio/forward, HuBERT @no_grad FP32). Per-sample logits sliced to CTC length → ~ per-clip WER. (SIM-o stays per-clip: ECAPA pooling is unmasked.)
 metric_device: auto             # WER ASR device. auto → cuda:1 if ≥2 GPUs else CPU (never silently steals the training card); override e.g. cuda:0. Daemon forces its own card.
 
