@@ -116,7 +116,7 @@ diffusion_model:
   # Multiplies t before the sinusoid frequency ladder. At 1.0 the fastest channel spans ~1 rad
   # over t∈[0,1] (near-degenerate); 1000 maps t onto the ladder's designed 0..1000 positional
   # range (Grad-TTS pe_scale convention).
-  timestep_embedding_scale: 1.0
+  timestep_embedding_scale: 1000.0
   beta_min: 0.1
   beta_max: 20.0
   # Noise schedule. "cosine" (Nichol-Dhariwal 2021) keeps ᾱ high longer than the legacy linear-β
