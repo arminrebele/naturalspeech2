@@ -1027,7 +1027,7 @@ def train(cfg: DictConfig):
     # Spawn the eval daemon (handshake first → daemon reads it at startup). Pinned to GPU1.
     if use_eval_daemon:
         run_tag = wandb.run.id if cfg.wandb.log else f"pid{os.getpid()}"
-        eval_run_dir = ipc.resolve_run_dir(cfg.setup.eval_daemon.snapshot_dir, run_tag)
+        eval_run_dir = ipc.resolve_run_dir(cfg.setup.eval_daemon.snapshot_dir, run_tag, fresh=True)
         # Per-run eval-daemon log beside the trainer log (logs/<group>/<run_name>/eval_<run_name>.log).
         # The daemon opens it append; the dir is fresh on scratch so it starts empty, and a respawn (or
         # a resume) continues the same file. cfg.run_name was resolved above → handshake carries it.

@@ -9,15 +9,14 @@ __pycache__/
 *.py[cod]
 .venv/
 
-# monotonic_align Cython build artifacts (rebuilt in entrypoint.sh on container start)
+# monotonic_align Cython build artifacts (auto-built by the module's __init__.py at import)
 naturalspeech2/ops/monotonic_align/core.c
 naturalspeech2/ops/monotonic_align/*.so
 naturalspeech2/ops/monotonic_align/build/
+naturalspeech2/ops/monotonic_align/.build.lock
 
 .env
 
-docker-compose.override.yml
-docker-compose.mergerfs.yml
 *.log
 outputs/
 multirun/

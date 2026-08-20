@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -37,15 +38,19 @@ _RESULTS = "results"
 # Run dir + atomic primitives
 # ----------------------------------------------------------------------------
 
-def resolve_run_dir(snapshot_dir_cfg, run_tag: str) -> Path:
+def resolve_run_dir(snapshot_dir_cfg, run_tag: str, fresh: bool = False) -> Path:
     """Resolve the RAM-backed run dir. cfg None → /dev/shm/ns2_eval/<run_tag> (falls back to
-    /tmp if /dev/shm is absent). Created here so both sides agree on the path."""
+    /tmp if /dev/shm is absent). Created here so both sides agree on the path. fresh=True
+    deletes a pre-existing run dir first (trainer-side only — the daemon receives the path
+    via --run-dir and must never wipe it)."""
     if snapshot_dir_cfg:
         root = Path(snapshot_dir_cfg)
     else:
         shm = Path("/dev/shm")
         root = (shm if shm.is_dir() else Path("/tmp")) / "ns2_eval"
     run_dir = root / run_tag
+    if fresh and run_dir.exists():
+        shutil.rmtree(run_dir)
     (run_dir / _RESULTS).mkdir(parents=True, exist_ok=True)
     return run_dir
 

@@ -2,7 +2,7 @@
 
 Run from this directory:  python setup.py build_ext --inplace
 Produces core.cpython-<abi>-<platform>.so next to core.pyx, importable as
-naturalspeech2.ops.monotonic_align.core. Gitignored — entrypoint.sh rebuilds on first container start.
+naturalspeech2.ops.monotonic_align.core. Gitignored — __init__.py auto-builds at import.
 """
 from setuptools import Extension, setup
 from Cython.Build import cythonize

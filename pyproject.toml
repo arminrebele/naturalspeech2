@@ -11,9 +11,9 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "numpy (>=2.3.4,<3.0.0)",
     "tqdm (>=4.67.1,<5.0.0)",
-    "datasets (>=4.3.0,<5.0.0)",
+    "datasets (>=4.3.0,<4.4.0)",         # cap <4.4: dataset.py bypasses the 4.x torchcodec auto-decoder
     "transformers (>=4.57.1,<5.0.0)",
-    "torch (>=2.9.0,<3.0.0)",
+    "torch (>=2.9.1,<2.10.0)",           # cap <2.10: torchaudio 2.9.x requires torch 2.9.x (ABI)
     "pyworld (>=0.3.5,<0.4.0)",
     "torchcodec (>=0.8.1,<0.9.0)",      #ffmpeg@7
     "einops (>=0.8.1,<0.9.0)",
@@ -22,22 +22,27 @@ dependencies = [
     "phonemizer (>=3.3.0,<4.0.0)",       #espeak-ng
     "pyarrow (>=23.0.1,<24.0.0)",
     "omegaconf (>=2.3.0,<3.0.0)",
-    "dotenv (>=0.9.9,<0.10.0)",
+    "python-dotenv (>=1.2.2,<2.0.0)",
     "wandb (>=0.25.1,<0.26.0)",
     "soundfile (>=0.13.1,<0.14.0)",
     "s3prl (>=0.4.18,<0.5.0)",           # SIM-o eval metric (WavLM-Large-SV); load via s3prl.upstream.wavlm.hubconf, NOT s3prl.hub
     "matplotlib (>=3.10.8,<4.0.0)",
     "cython (>=3.0.0,<4.0.0)",
-    "setuptools (>=70.0.0)",
+    "setuptools (>=70.0.0,<81)",         # cap <81: pyworld imports pkg_resources (removed in 81)
     "optuna (>=4.0.0,<5.0.0)"            # aligner-scalar hyperparameter search (scripts/tuning/run_aligner_optuna.py)
 ]
 
 [build-system]
-requires = ["poetry-core>=2.0.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
-[tool.poetry.group.dev.dependencies]
-notebook = "^7.4.7"
-ipykernel = "^7.1.0"
-sounddevice = "^0.5.3"
+[tool.hatch.build.targets.wheel]
+packages = ["naturalspeech2"]
+
+[dependency-groups]
+dev = [
+    "notebook>=7.4.7,<8.0.0",
+    "ipykernel>=7.1.0,<8.0.0",
+    "sounddevice>=0.5.3,<0.6.0",
+]
 
