@@ -29,7 +29,7 @@ Requires Linux and an NVIDIA GPU (the lockfile pins CUDA 12.8 wheels), plus
 [uv](https://docs.astral.sh/uv/) and the espeak-ng library
 (Debian/Ubuntu: `apt install espeak-ng`).
 
-    git clone <repo-url> && cd naturalspeech2
+    git clone https://github.com/arminrebele/naturalspeech2.git && cd naturalspeech2
     uv sync
 
 Put your Weights & Biases key in `.env` (`WANDB_API_KEY=...`), or run with `wandb.log=false`.
