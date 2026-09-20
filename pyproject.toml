@@ -7,6 +7,8 @@ authors = [
   { name = "Lion Pöllath", email = "164176075+LionPoellath@users.noreply.github.com" }
 ]
 readme = "README.md"
+license = "MIT AND CC-BY-SA-3.0"
+license-files = ["LICENSE", "naturalspeech2/ops/monotonic_align/LICENSE.glow_tts"]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "numpy (>=2.3.4,<3.0.0)",

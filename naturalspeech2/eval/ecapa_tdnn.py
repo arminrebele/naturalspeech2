@@ -1,8 +1,10 @@
 """Vendored SIM-o speaker-verification head (ECAPA-TDNN over a WavLM-Large frontend).
 
-Third-party code, MIT-licensed. Vendored from microsoft/UniSpeech
-(downstreams/speaker_verification/models/ecapa_tdnn.py) via SWivid/F5-TTS
-(src/f5_tts/eval/ecapa_tdnn.py); ECAPA-TDNN core from lawlict/ECAPA-TDNN.
+Third-party code, NOT covered by this repository's MIT license. Adapted from microsoft/UniSpeech
+(https://github.com/microsoft/UniSpeech, downstreams/speaker_verification/models/ecapa_tdnn.py),
+licensed CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0/), via SWivid/F5-TTS
+(src/f5_tts/eval/ecapa_tdnn.py); ECAPA-TDNN core from https://github.com/lawlict/ECAPA-TDNN.
+This file remains under CC BY-SA 3.0.
 
 ONLY local modification: the WavLM frontend is built by a direct s3prl submodule import
 (`s3prl.upstream.wavlm.hubconf.wavlm_large`) instead of `torch.hub.load(...)`. torch.hub.load

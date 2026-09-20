@@ -34,6 +34,15 @@ Batch-size defaults are tuned for the reference setup: an NVIDIA RTX PRO 6000
 Blackwell (96 GB) for training, with an RTX 4090 (24 GB) picked up automatically
 as second GPU for parallel eval.
 
+## License
+
+MIT — see [LICENSE](LICENSE). Two vendored third-party files keep their own licenses:
+`naturalspeech2/ops/monotonic_align/` (Glow-TTS [3], MIT, see `LICENSE.glow_tts` there) and
+`naturalspeech2/eval/ecapa_tdnn.py` (speaker-verification head for the SIM-o metric, adapted
+from [microsoft/UniSpeech](https://github.com/microsoft/UniSpeech) via F5-TTS,
+[CC BY-SA 3.0](https://creativecommons.org/licenses/by-sa/3.0/)). Pretrained models and
+datasets fetched at runtime (Encodec, HuBERT, WavLM, UTMOS, MLS) are subject to their own licenses.
+
 ## References
 
 [1] Shen et al., *NaturalSpeech 2: Latent Diffusion Models are Natural and Zero-Shot
