@@ -6,6 +6,23 @@ duration/pitch prediction. The phoneme aligner is trained end-to-end with the mo
 (monotonic alignment search adapted from Glow-TTS [3]) — no external forced aligner or
 precomputed alignments required.
 
+## Status
+
+**No longer under active development.** This is research code from an unfinished
+reproduction attempt, published as-is. No pretrained weights are released.
+
+**What works:** the full pipeline (preprocessing, training, inference, evaluation)
+runs end-to-end on a single GPU, and training converges on the full MLS English
+set (10.8M clips).
+
+**Where it stands** (best run, 80k steps, validation set):
+
+| Metric | Value | Meaning |
+|---|---|---|
+| WER (HuBERT-CTC) | 5.3 % | speech is intelligible |
+| SIM-o (WavLM-SV) | 0.37 | speaker identity is only partially transferred |
+| UTMOS | 1.8 (Encodec ceiling ≈ 3.4) | sounds thin/metallic |
+
 ## Setup
 
 Requires Linux and an NVIDIA GPU (the lockfile pins CUDA 12.8 wheels), plus
